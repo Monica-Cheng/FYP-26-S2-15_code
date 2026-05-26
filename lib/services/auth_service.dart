@@ -81,6 +81,14 @@ class AuthService {
   }
 
   // ---------------------------------------------------------------------------
+  // Sends a password reset email to the given address.
+  // Throws FirebaseAuthException if the email is not registered or invalid.
+  // ---------------------------------------------------------------------------
+  Future<void> sendPasswordReset(String email) async {
+    await _auth.sendPasswordResetEmail(email: email);
+  }
+
+  // ---------------------------------------------------------------------------
   // Returns a stream that emits the current user whenever auth state changes
   // (sign-in, sign-out, token refresh). Use this to reactively respond to
   // login/logout events — typically consumed by a Riverpod StreamProvider.
