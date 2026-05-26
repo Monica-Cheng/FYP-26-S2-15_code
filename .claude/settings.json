@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit(lib/**)",
+      "Edit(functions/**)",
+      "Edit(AGENT.md)",
+      "Edit(pubspec.yaml)",
+      "Read(**)"
+    ],
+    "deny": [
+      "Edit(ios/**)",
+      "Edit(android/**)",
+      "Edit(lib/firebase_options.dart)",
+      "Edit(lib/core/app_theme.dart)",
+      "Edit(lib/core/constants.dart)"
+    ]
+  }
+}
