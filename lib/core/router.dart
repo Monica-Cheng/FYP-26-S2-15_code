@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 // Screen imports — add as you build each screen
 import '../screens/auth/forgot_password_screen.dart';
 import '../screens/auth/login_screen.dart';
+import '../screens/auth/register_screen.dart';
 import '../screens/home/home_screen.dart';
 
 // Route path constants — use these instead of hardcoding strings
@@ -42,6 +43,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.forgotPassword,
         builder: (context, state) => const ForgotPasswordScreen(),
+      ),
+      GoRoute(
+        path: Routes.register,
+        builder: (context, state) => const RegisterScreen(),
       ),
       // Add more routes here as you build each screen
     ],
