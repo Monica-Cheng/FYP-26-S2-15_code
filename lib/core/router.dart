@@ -2,12 +2,9 @@
 // All navigation routes defined in one place
 // NEVER use Navigator.push anywhere — always use context.go() or context.push()
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-
-import 'constants.dart';
 
 // Screen imports — add as you build each screen
 import '../screens/auth/forgot_password_screen.dart';
@@ -18,11 +15,15 @@ import '../screens/onboarding/onboarding_step1_screen.dart';
 import '../screens/onboarding/onboarding_step2_screen.dart';
 import '../screens/onboarding/onboarding_step3_screen.dart';
 import '../screens/plans/gym_session_screen.dart';
+import '../screens/onboarding/onboarding_walkthrough_screen.dart';
 import '../screens/plans/post_session_summary_screen.dart';
+import '../screens/splash_screen.dart';
 
 // Route path constants — use these instead of hardcoding strings
 class Routes {
   Routes._();
+  static const String splash = '/splash';
+  static const String walkthrough = '/walkthrough';
   static const String login = '/login';
   static const String forgotPassword = '/forgot-password';
   static const String register = '/register';
@@ -43,45 +44,33 @@ class Routes {
 
 final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
-    initialLocation: Routes.login,
-    redirect: (context, state) async {
+    initialLocation: Routes.splash,
+    redirect: (context, state) {
       final user = FirebaseAuth.instance.currentUser;
       final location = state.matchedLocation;
 
-      // Not logged in — allow auth screens, redirect everything else to login.
-      if (user == null) {
-        final isAuthRoute = location == Routes.login ||
-            location == Routes.register ||
-            location == Routes.forgotPassword;
-        return isAuthRoute ? null : Routes.login;
-      }
-
-      // Logged in — check whether the user has completed onboarding.
-      final doc = await FirebaseFirestore.instance
-          .collection(Collections.users)
-          .doc(user.uid)
-          .get();
-      final onboardingComplete = doc.data()?['onboardingComplete'] == true;
-
-      final isAuthRoute = location == Routes.login ||
+      // Public routes — always allow.
+      final isPublicRoute = location == Routes.splash ||
+          location == Routes.walkthrough ||
+          location == Routes.login ||
           location == Routes.register ||
           location == Routes.forgotPassword;
+      if (isPublicRoute) return null;
 
-      if (onboardingComplete) {
-        // Fully onboarded — bounce auth and onboarding screens to home.
-        if (isAuthRoute || location.startsWith('/onboarding')) {
-          return Routes.home;
-        }
-        return null;
-      } else {
-        // Onboarding incomplete — bounce auth screens and home to step 1.
-        if (isAuthRoute || location == Routes.home) {
-          return Routes.onboardingStep1;
-        }
-        return null;
-      }
+      // Onboarding routes — allow only while logged in.
+      // (Splash already sent unauthenticated users to login.)
+      if (user == null) return Routes.login;
+      return null;
     },
     routes: [
+      GoRoute(
+        path: Routes.splash,
+        builder: (context, state) => const SplashScreen(),
+      ),
+      GoRoute(
+        path: Routes.walkthrough,
+        builder: (context, state) => const OnboardingWalkthroughScreen(),
+      ),
       GoRoute(
         path: Routes.login,
         builder: (context, state) => const LoginScreen(),
