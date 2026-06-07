@@ -90,7 +90,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         _emailController.text.trim(),
         _passwordController.text,
       );
-      if (mounted) context.go(Routes.home);
+      if (mounted) context.go(Routes.onboardingStep1);
     } on FirebaseAuthException catch (e) {
       setState(() => _errorMessage = _friendlyError(e.code));
     } catch (_) {
@@ -111,7 +111,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     try {
       final credential = await _authService.signInWithGoogle();
       if (credential == null) return; // User cancelled picker
-      if (mounted) context.go(Routes.home);
+      if (mounted) context.go(Routes.onboardingStep1);
     } on FirebaseAuthException catch (e) {
       setState(() => _errorMessage = _friendlyError(e.code));
     } catch (_) {
