@@ -105,4 +105,31 @@ class FirestoreService {
         .doc(uid)
         .update({'onboardingComplete': true});
   }
+
+  // ---------------------------------------------------------------------------
+  // Returns all documents from the plans collection, each map including
+  // the document id as 'id'.
+  // ---------------------------------------------------------------------------
+  Future<List<Map<String, dynamic>>> getPlans() async {
+    final snapshot = await _db.collection(Collections.plans).get();
+    return snapshot.docs.map((doc) {
+      return {'id': doc.id, ...doc.data()};
+    }).toList();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reads trackedPlanId from users/{uid}, then fetches that plan document.
+  // Returns null if the user has no tracked plan or the plan doc is missing.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>?> getTrackedPlan(String uid) async {
+    final userDoc =
+        await _db.collection(Collections.users).doc(uid).get();
+    final trackedPlanId =
+        userDoc.data()?['trackedPlanId'] as String?;
+    if (trackedPlanId == null || trackedPlanId.isEmpty) return null;
+    final planDoc =
+        await _db.collection(Collections.plans).doc(trackedPlanId).get();
+    if (!planDoc.exists) return null;
+    return {'id': planDoc.id, ...planDoc.data()!};
+  }
 }

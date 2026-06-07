@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
+import '../../services/firestore_service.dart';
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
@@ -17,7 +18,42 @@ class PlansScreen extends StatefulWidget {
   State<PlansScreen> createState() => _PlansScreenState();
 }
 
+const List<Map<String, dynamic>> _kFallbackPlans = [
+  {'name': 'Beginner Push-Pull-Legs', 'type': 'Gym', 'level': 'Beginner', 'daysPerWeek': 3},
+  {'name': '5K Running Plan', 'type': 'Running', 'level': 'Beginner', 'daysPerWeek': 4},
+  {'name': 'My Custom Push', 'type': 'Gym', 'level': 'Custom', 'daysPerWeek': 3},
+];
+
 class _PlansScreenState extends State<PlansScreen> {
+  final _firestoreService = FirestoreService();
+  List<Map<String, dynamic>> _plans = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPlans();
+  }
+
+  Future<void> _loadPlans() async {
+    try {
+      final plans = await _firestoreService.getPlans();
+      if (mounted) {
+        setState(() {
+          _plans = plans.isNotEmpty ? plans : _kFallbackPlans;
+          _isLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _plans = _kFallbackPlans;
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
@@ -365,35 +401,35 @@ class _PlansScreenState extends State<PlansScreen> {
           ],
         ),
         const SizedBox(height: 10),
-        _PlanCard(
-          name: 'Beginner Push-Pull-Legs',
-          type: 'Gym',
-          level: 'Beginner',
-          days: 3,
-          chipLabel: 'Tracked',
-          chipTextColor: WW.primary,
-          chipBgColor: WW.chipBg,
-          onTap: () => _snack('Plan detail coming soon'),
-        ),
-        const SizedBox(height: 10),
-        _PlanCard(
-          name: '5K Running Plan',
-          type: 'Running',
-          level: 'Beginner',
-          days: 4,
-          onTap: () => _snack('Plan detail coming soon'),
-        ),
-        const SizedBox(height: 10),
-        _PlanCard(
-          name: 'My Custom Push',
-          type: 'Gym',
-          level: 'Custom',
-          days: 3,
-          chipLabel: 'Custom',
-          chipTextColor: WW.teal,
-          chipBgColor: WW.tealBg,
-          onTap: () => _snack('Plan detail coming soon'),
-        ),
+        if (_isLoading)
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: CircularProgressIndicator(color: WW.primary),
+            ),
+          )
+        else
+          ...List.generate(_plans.length, (i) {
+            final plan = _plans[i];
+            final name = plan['name']?.toString() ?? 'Unnamed Plan';
+            final type = plan['type']?.toString() ?? '';
+            final level = plan['level']?.toString() ?? '';
+            final days = (plan['daysPerWeek'] as num?)?.toInt() ?? 0;
+            final isCustom = level.toLowerCase() == 'custom';
+            return Padding(
+              padding: EdgeInsets.only(bottom: i < _plans.length - 1 ? 10 : 0),
+              child: _PlanCard(
+                name: name,
+                type: type,
+                level: level,
+                days: days,
+                chipLabel: isCustom ? 'Custom' : null,
+                chipTextColor: isCustom ? WW.teal : null,
+                chipBgColor: isCustom ? WW.tealBg : null,
+                onTap: () => _snack('Plan detail coming soon'),
+              ),
+            );
+          }),
       ],
     );
   }
