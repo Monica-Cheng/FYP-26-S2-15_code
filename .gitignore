@@ -58,3 +58,4 @@ lib/firebase_options.dart
 
 # macOS
 .DS_Store
+.env
