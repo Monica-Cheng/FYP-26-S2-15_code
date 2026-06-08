@@ -120,7 +120,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         iconBg: _kRed,
                         title: 'Health Profile',
                         sub: 'Injuries, calorie goals, conditions',
-                        onTap: () => _snack('Health profile coming soon'),
+                        onTap: () => context.push(Routes.healthProfile),
                       ),
                       _row(
                         icon: Icons.account_circle_rounded,

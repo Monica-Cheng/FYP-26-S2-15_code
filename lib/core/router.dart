@@ -18,6 +18,7 @@ import '../screens/plans/gym_session_screen.dart';
 import '../screens/onboarding/onboarding_walkthrough_screen.dart';
 import '../screens/plans/post_session_summary_screen.dart';
 import '../screens/profile/profile_screen.dart';
+import '../screens/settings/health_profile_screen.dart';
 import '../screens/settings/settings_screen.dart';
 import '../screens/splash_screen.dart';
 
@@ -42,7 +43,7 @@ class Routes {
   static const String postSessionSummary = '/post-session-summary';
   static const String profile = '/profile';
   static const String settings = '/settings';
-
+  static const String healthProfile = '/health-profile';
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -117,6 +118,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.settings,
         builder: (context, state) => const SettingsScreen(),
+      ),
+      GoRoute(
+        path: Routes.healthProfile,
+        builder: (context, state) => const HealthProfileScreen(),
       ),
       // Add more routes here as you build each screen
     ],
