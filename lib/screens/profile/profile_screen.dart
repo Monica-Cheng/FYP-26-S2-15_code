@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
@@ -198,7 +199,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           Align(
             alignment: Alignment.centerRight,
             child: GestureDetector(
-              onTap: () => _snack('Settings coming soon'),
+              onTap: () => context.push(Routes.settings),
               child: Container(
                 width: 34,
                 height: 34,
