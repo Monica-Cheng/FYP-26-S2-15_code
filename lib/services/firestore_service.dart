@@ -115,42 +115,63 @@ class FirestoreService {
     String uid,
     Map<String, dynamic> sessionData,
   ) async {
-    final exercises = sessionData['exercises'];
+    final rawExercises = sessionData['exercises'];
     int totalSets = 0;
     double totalVolume = 0.0;
 
-    if (exercises is List) {
-      for (final e in exercises) {
-        final sets = e is Map ? e['sets'] : null;
-        if (sets is List) {
-          for (final s in sets) {
-            if (s is Map && s['done'] == true) {
-              totalSets++;
-              final kg = double.tryParse(s['kg']?.toString() ?? '') ?? 0;
-              final reps = int.tryParse(s['reps']?.toString() ?? '') ?? 0;
-              totalVolume += kg * reps;
-            }
-          }
+    // Build a cleaned exercises list: only completed sets, numeric kg/reps.
+    final List<Map<String, dynamic>> cleanedExercises = [];
+
+    if (rawExercises is List) {
+      for (final e in rawExercises) {
+        if (e is! Map) continue;
+        final sets = e['sets'];
+        if (sets is! List) continue;
+
+        final List<Map<String, dynamic>> doneSets = [];
+        for (final s in sets) {
+          if (s is! Map || s['done'] != true) continue;
+          final kg = double.tryParse(s['kg']?.toString() ?? '');
+          final reps = int.tryParse(s['reps']?.toString() ?? '');
+          totalSets++;
+          totalVolume += (kg ?? 0) * (reps ?? 0);
+          doneSets.add({'kg': kg, 'reps': reps, 'done': true});
+        }
+
+        if (doneSets.isNotEmpty) {
+          cleanedExercises.add({
+            'name': e['name'],
+            'muscle': e['muscle'],
+            'sets': doneSets,
+          });
         }
       }
     }
 
-    await _db
-        .collection(Collections.users)
-        .doc(uid)
-        .collection(Collections.sessions)
-        .add({
-      'type': 'gym',
-      'sessionName': sessionData['sessionName'],
-      'date': Timestamp.now(),
-      'durationSeconds': sessionData['elapsedSeconds'],
-      'exercises': sessionData['exercises'],
-      'totalSets': totalSets,
-      'totalVolume': totalVolume,
-      'caloriesBurned': totalSets * 8,
-      'xpEarned': totalSets * 15,
-      'isManuallyLogged': false,
-    });
+    try {
+      print('Writing to Firestore...');
+      await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .collection(Collections.sessions)
+          .add({
+        'type': 'gym',
+        'sessionName': sessionData['sessionName'],
+        'date': FieldValue.serverTimestamp(),
+        'createdAt': FieldValue.serverTimestamp(),
+        'durationSeconds': sessionData['elapsedSeconds'],
+        'exercises': cleanedExercises,
+        'totalSets': totalSets,
+        'totalVolume': totalVolume,
+        'caloriesBurned': totalSets * 8,
+        'xpEarned': totalSets * 15,
+        'isManuallyLogged': false,
+      });
+      print('Firestore write successful!');
+    } catch (e) {
+      print('Firestore write error: $e');
+      rethrow;
+    }
   }
 
   // ---------------------------------------------------------------------------

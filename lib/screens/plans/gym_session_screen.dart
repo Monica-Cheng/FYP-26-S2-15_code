@@ -6,12 +6,12 @@
 
 import 'dart:async';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
-import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
 // ── Data models ────────────────────────────────────────────────────────────────
@@ -260,16 +260,19 @@ class _GymSessionState extends State<GymSessionScreen> {
                     .toList(),
               })
           .toList(),
-      'date': DateTime.now(),
     };
 
     try {
-      final uid = AuthService().getCurrentUser()?.uid;
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      print('Saving session for uid: $uid');
+      print('Session data: $sessionData');
       if (uid != null) {
         await FirestoreService().saveGymSession(uid, sessionData);
+      } else {
+        print('saveGymSession skipped: no authenticated user');
       }
-    } catch (_) {
-      // Continue to summary even if save fails
+    } catch (e) {
+      print('saveGymSession error: $e');
     }
 
     if (!mounted) return;
