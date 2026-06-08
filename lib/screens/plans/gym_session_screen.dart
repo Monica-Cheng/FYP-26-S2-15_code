@@ -11,6 +11,8 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
+import '../../services/auth_service.dart';
+import '../../services/firestore_service.dart';
 
 // ── Data models ────────────────────────────────────────────────────────────────
 
@@ -99,6 +101,7 @@ class _GymSessionState extends State<GymSessionScreen> {
   bool _paused = false;
   bool _showRest = false;
   int _restSecs = 90;
+  bool _isSaving = false;
 
   Timer? _elapsedTimer;
   Timer? _restTimer;
@@ -237,6 +240,43 @@ class _GymSessionState extends State<GymSessionScreen> {
     });
   }
 
+  Future<void> _saveAndNavigate() async {
+    if (!mounted) return;
+    setState(() => _isSaving = true);
+
+    final sessionData = {
+      'sessionName': 'Push A',
+      'elapsedSeconds': _elapsed,
+      'exercises': _exercises
+          .map((e) => {
+                'name': e.name,
+                'muscle': e.muscle,
+                'sets': e.sets
+                    .map((s) => {
+                          'kg': s.kg,
+                          'reps': s.reps,
+                          'done': s.done,
+                        })
+                    .toList(),
+              })
+          .toList(),
+      'date': DateTime.now(),
+    };
+
+    try {
+      final uid = AuthService().getCurrentUser()?.uid;
+      if (uid != null) {
+        await FirestoreService().saveGymSession(uid, sessionData);
+      }
+    } catch (_) {
+      // Continue to summary even if save fails
+    }
+
+    if (!mounted) return;
+    setState(() => _isSaving = false);
+    context.go(Routes.postSessionSummary, extra: sessionData);
+  }
+
   void _showFinishDialog() {
     final incomplete = _exercises
         .expand((e) => e.sets)
@@ -313,27 +353,7 @@ class _GymSessionState extends State<GymSessionScreen> {
                     child: ElevatedButton(
                       onPressed: () {
                         Navigator.pop(dialogCtx);
-                        context.go(
-                          Routes.postSessionSummary,
-                          extra: {
-                            'sessionName': 'Push A',
-                            'elapsedSeconds': _elapsed,
-                            'exercises': _exercises
-                                .map((e) => {
-                                      'name': e.name,
-                                      'muscle': e.muscle,
-                                      'sets': e.sets
-                                          .map((s) => {
-                                                'kg': s.kg,
-                                                'reps': s.reps,
-                                                'done': s.done,
-                                              })
-                                          .toList(),
-                                    })
-                                .toList(),
-                            'date': DateTime.now(),
-                          },
-                        );
+                        _saveAndNavigate();
                       },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFFEF4444),
@@ -389,36 +409,68 @@ class _GymSessionState extends State<GymSessionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: WW.bg,
-      body: Column(
-        children: [
-          // Top bar extends to status bar edge.
-          Container(
-            color: WW.primaryDark,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(height: MediaQuery.of(context).padding.top),
-                _buildTopBar(),
-                if (_showRest) _buildRestBar(),
-              ],
-            ),
+    return Stack(
+      children: [
+        Scaffold(
+          backgroundColor: WW.bg,
+          body: Column(
+            children: [
+              // Top bar extends to status bar edge.
+              Container(
+                color: WW.primaryDark,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(height: MediaQuery.of(context).padding.top),
+                    _buildTopBar(),
+                    if (_showRest) _buildRestBar(),
+                  ],
+                ),
+              ),
+              _buildProgressDots(),
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                  child: Column(
+                    children: [
+                      _buildExerciseCard(),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
-          _buildProgressDots(),
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-              child: Column(
-                children: [
-                  _buildExerciseCard(),
-                ],
+          bottomNavigationBar: _buildNavFooter(),
+        ),
+        if (_isSaving)
+          const ColoredBox(
+            color: Color(0x66000000),
+            child: Center(
+              child: Card(
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(16))),
+                child: Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(color: WW.primary),
+                      SizedBox(height: 14),
+                      Text(
+                        'Saving session…',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: WW.text,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
-        ],
-      ),
-      bottomNavigationBar: _buildNavFooter(),
+      ],
     );
   }
 
@@ -872,7 +924,7 @@ class _GymSessionState extends State<GymSessionScreen> {
                       boxShadow: [
                         BoxShadow(
                           color:
-                              (isLast ? WW.teal : WW.primary).withOpacity(0.35),
+                              (isLast ? WW.teal : WW.primary).withValues(alpha: 0.35),
                           blurRadius: 10,
                           offset: const Offset(0, 3),
                         ),
@@ -1021,7 +1073,7 @@ class _SetRowState extends State<_SetRow> {
       case _SetType.dropSet:
         typeColor = WW.gold;
         typeBg = Color.alphaBlend(
-          WW.gold.withOpacity(0.15),
+          WW.gold.withValues(alpha: 0.15),
           WW.card,
         );
         typeLabel = 'D';
@@ -1054,7 +1106,7 @@ class _SetRowState extends State<_SetRow> {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 5),
       decoration: BoxDecoration(
-        color: done ? WW.teal.withOpacity(0.05) : Colors.transparent,
+        color: done ? WW.teal.withValues(alpha: 0.05) : Colors.transparent,
         border: const Border(
           bottom: BorderSide(color: WW.elevated),
         ),
@@ -1106,7 +1158,7 @@ class _SetRowState extends State<_SetRow> {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: 11,
-                color: WW.textSec.withOpacity(0.75),
+                color: WW.textSec.withValues(alpha: 0.75),
               ),
             ),
           ),

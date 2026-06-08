@@ -163,6 +163,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     final exercises = _parseExercises(extra?['exercises']);
     final stats = _calcStats(exercises);
     final xp = stats.totalSets * 15;
+    final caloriesBurned = stats.totalSets * 8;
 
     return Scaffold(
       backgroundColor: WW.bg,
@@ -179,7 +180,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        _buildStatsRow(elapsedSeconds, stats),
+                        _buildStatsRow(elapsedSeconds, stats, caloriesBurned),
                         const SizedBox(height: 16),
                         _buildMusclesCard(),
                         const SizedBox(height: 16),
@@ -234,10 +235,10 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                   width: 72,
                   height: 72,
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.15),
+                    color: Colors.white.withValues(alpha: 0.15),
                     shape: BoxShape.circle,
                     border: Border.all(
-                      color: Colors.white.withOpacity(0.5),
+                      color: Colors.white.withValues(alpha: 0.5),
                       width: 2,
                     ),
                   ),
@@ -264,7 +265,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                 style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w600,
-                  color: Colors.white.withOpacity(0.75),
+                  color: Colors.white.withValues(alpha: 0.75),
                 ),
               ),
               const SizedBox(height: 4),
@@ -273,7 +274,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w500,
-                  color: Colors.white.withOpacity(0.55),
+                  color: Colors.white.withValues(alpha: 0.55),
                 ),
               ),
             ],
@@ -286,31 +287,51 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
 
   // ── Section 2 — Stats row ─────────────────────────────────────────────────
 
-  Widget _buildStatsRow(int secs, ({int totalSets, double volume}) stats) {
-    return Row(
+  Widget _buildStatsRow(
+    int secs,
+    ({int totalSets, double volume}) stats,
+    int calories,
+  ) {
+    return Column(
       children: [
-        Expanded(
-          child: _StatCard(
-            label: 'Duration',
-            value: _fmtDuration(secs),
-            icon: Icons.timer_outlined,
-          ),
+        Row(
+          children: [
+            Expanded(
+              child: _StatCard(
+                label: 'Duration',
+                value: _fmtDuration(secs),
+                icon: Icons.timer_outlined,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _StatCard(
+                label: 'Total Sets',
+                value: '${stats.totalSets}',
+                icon: Icons.fitness_center_rounded,
+              ),
+            ),
+          ],
         ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _StatCard(
-            label: 'Total Sets',
-            value: '${stats.totalSets}',
-            icon: Icons.fitness_center_rounded,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _StatCard(
-            label: 'Volume',
-            value: '${_fmtVolume(stats.volume)} kg',
-            icon: Icons.bar_chart_rounded,
-          ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: _StatCard(
+                label: 'Volume',
+                value: '${_fmtVolume(stats.volume)} kg',
+                icon: Icons.bar_chart_rounded,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _StatCard(
+                label: 'Calories',
+                value: '~$calories kcal',
+                icon: Icons.local_fire_department_rounded,
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -423,7 +444,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       decoration: BoxDecoration(
         color: WW.tealBg,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: WW.teal.withOpacity(0.3), width: 1),
+        border: Border.all(color: WW.teal.withValues(alpha: 0.3), width: 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -448,7 +469,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
             child: LinearProgressIndicator(
               value: 0.72,
               minHeight: 7,
-              backgroundColor: WW.teal.withOpacity(0.15),
+              backgroundColor: WW.teal.withValues(alpha: 0.15),
               valueColor: const AlwaysStoppedAnimation<Color>(WW.teal),
             ),
           ),
@@ -609,7 +630,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 7, vertical: 2),
                             decoration: BoxDecoration(
-                              color: WW.gold.withOpacity(0.15),
+                              color: WW.gold.withValues(alpha: 0.15),
                               borderRadius: BorderRadius.circular(6),
                             ),
                             child: const Text(
@@ -731,7 +752,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                   borderRadius: BorderRadius.circular(14),
                   boxShadow: [
                     BoxShadow(
-                      color: WW.primary.withOpacity(0.35),
+                      color: WW.primary.withValues(alpha: 0.35),
                       blurRadius: 12,
                       offset: const Offset(0, 4),
                     ),
@@ -835,7 +856,7 @@ class _PbRow extends StatelessWidget {
           width: 36,
           height: 36,
           decoration: BoxDecoration(
-            color: WW.gold.withOpacity(0.12),
+            color: WW.gold.withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(10),
           ),
           child: const Center(
@@ -953,7 +974,7 @@ class _ConfettiBurstState extends State<_ConfettiBurst>
                             width: 8,
                             height: 8,
                             decoration: BoxDecoration(
-                              color: color.withOpacity(0.85),
+                              color: color.withValues(alpha: 0.85),
                               borderRadius: BorderRadius.circular(2),
                             ),
                           ),
@@ -1092,7 +1113,7 @@ class _MusclesPainter extends CustomPainter {
 
     // Highlights — chest (primary)
     final chestPaint = Paint()
-      ..color = WW.primary.withOpacity(0.5)
+      ..color = WW.primary.withValues(alpha: 0.5)
       ..style = PaintingStyle.fill;
     canvas.drawRRect(
       RRect.fromRectAndRadius(
@@ -1104,7 +1125,7 @@ class _MusclesPainter extends CustomPainter {
 
     // Highlights — shoulders (primary, lighter)
     final shoulderPaint = Paint()
-      ..color = WW.primary.withOpacity(0.35)
+      ..color = WW.primary.withValues(alpha: 0.35)
       ..style = PaintingStyle.fill;
     // Left shoulder
     canvas.drawRRect(
@@ -1125,7 +1146,7 @@ class _MusclesPainter extends CustomPainter {
 
     // Highlights — triceps (secondary)
     final tricepPaint = Paint()
-      ..color = WW.lavender.withOpacity(0.4)
+      ..color = WW.lavender.withValues(alpha: 0.4)
       ..style = PaintingStyle.fill;
     // Left tricep
     canvas.drawRRect(
