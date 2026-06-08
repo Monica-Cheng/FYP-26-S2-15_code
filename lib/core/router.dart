@@ -17,6 +17,7 @@ import '../screens/onboarding/onboarding_step3_screen.dart';
 import '../screens/plans/gym_session_screen.dart';
 import '../screens/onboarding/onboarding_walkthrough_screen.dart';
 import '../screens/plans/post_session_summary_screen.dart';
+import '../screens/profile/profile_screen.dart';
 import '../screens/splash_screen.dart';
 
 // Route path constants — use these instead of hardcoding strings
@@ -40,6 +41,7 @@ class Routes {
   static const String postSessionSummary = '/post-session-summary';
   static const String profile = '/profile';
   static const String settings = '/settings';
+
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -106,6 +108,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.postSessionSummary,
         builder: (context, state) => const PostSessionSummaryScreen(),
+      ),
+      GoRoute(
+        path: Routes.profile,
+        builder: (context, state) => const ProfileScreen(),
       ),
       // Add more routes here as you build each screen
     ],

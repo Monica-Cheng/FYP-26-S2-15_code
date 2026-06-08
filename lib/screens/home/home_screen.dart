@@ -277,22 +277,25 @@ class _HomeTabState extends State<_HomeTab> {
             onPressed: () {},
           ),
           const SizedBox(width: 4),
-          // Avatar
-          Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              color: WW.chipBg,
-              shape: BoxShape.circle,
-              border: Border.all(color: WW.primary, width: 1.5),
-            ),
-            child: Center(
-              child: Text(
-                initials,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w800,
-                  color: WW.primary,
+          // Avatar → Profile screen
+          GestureDetector(
+            onTap: () => context.push(Routes.profile),
+            child: Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: WW.chipBg,
+                shape: BoxShape.circle,
+                border: Border.all(color: WW.primary, width: 1.5),
+              ),
+              child: Center(
+                child: Text(
+                  initials,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: WW.primary,
+                  ),
                 ),
               ),
             ),
@@ -515,7 +518,7 @@ class _TodayPlanCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(14),
                   boxShadow: [
                     BoxShadow(
-                      color: WW.primary.withOpacity(0.35),
+                      color: WW.primary.withValues(alpha: 0.35),
                       blurRadius: 12,
                       offset: const Offset(0, 4),
                     ),
