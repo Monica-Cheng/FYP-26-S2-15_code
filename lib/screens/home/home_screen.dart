@@ -50,7 +50,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _onFabTap() {
     context.push(Routes.manualActivityLog)
-        .then((_) => _homeTabKey.currentState?._loadCalorieData());
+        .then((_) => _homeTabKey.currentState?._loadUserData());
   }
 
   @override
@@ -166,58 +166,37 @@ class _HomeTabState extends State<_HomeTab> {
   @override
   void initState() {
     super.initState();
-    _loadHomeData();
-    _loadCalorieData();
-    _loadStreakData();
+    _loadUserData();
   }
 
-  Future<void> _loadStreakData() async {
-    final uid = _authService.getCurrentUser()?.uid;
-    if (uid == null) return;
-    try {
-      final results = await Future.wait<dynamic>([
-        _firestoreService.calculateStreak(uid),
-        _firestoreService.getSessionDates(uid, days: 30),
-      ]);
-      if (!mounted) return;
-      setState(() {
-        _streakDays = results[0] as int;
-        _sessionDates = results[1] as Set<String>;
-      });
-    } catch (_) {}
-  }
-
-  Future<void> _loadCalorieData() async {
-    final uid = _authService.getCurrentUser()?.uid;
-    if (uid == null) return;
-    try {
-      final results = await Future.wait<dynamic>([
-        _firestoreService.getUserCalorieGoal(uid),
-        _firestoreService.getTodaysCalories(uid),
-      ]);
-      if (!mounted) return;
-      final calGoal = results[0] as Map<String, dynamic>;
-      final todaysCal = results[1] as int;
-      setState(() {
-        _calorieGoalActive = calGoal['calorieGoalActive'] as bool? ?? false;
-        _dailyCalorieGoal = calGoal['dailyCalorieGoal'] as int? ?? 500;
-        _todaysCalories = todaysCal;
-      });
-    } catch (_) {}
-  }
-
-  Future<void> _loadHomeData() async {
+  Future<void> _loadUserData() async {
     final uid = _authService.getCurrentUser()?.uid;
     if (uid == null) {
       setState(() => _isLoadingName = false);
       return;
     }
     try {
-      final profile = await _firestoreService.getUserProfile(uid);
+      final results = await Future.wait<dynamic>([
+        _firestoreService.getUserProfile(uid),
+        _firestoreService.getUserCalorieGoal(uid),
+        _firestoreService.getTodaysCalories(uid),
+        _firestoreService.calculateStreak(uid),
+        _firestoreService.getSessionDates(uid, days: 30),
+      ]);
       if (!mounted) return;
+      final profile = results[0] as Map<String, dynamic>?;
+      final calGoal = results[1] as Map<String, dynamic>;
+      final todaysCal = results[2] as int;
+      final streak = results[3] as int;
+      final sessionDates = results[4] as Set<String>;
       setState(() {
         _displayName = profile?['displayName'] as String?;
         _isLoadingName = false;
+        _calorieGoalActive = calGoal['calorieGoalActive'] as bool? ?? false;
+        _dailyCalorieGoal = calGoal['dailyCalorieGoal'] as int? ?? 500;
+        _todaysCalories = todaysCal;
+        _streakDays = streak;
+        _sessionDates = sessionDates;
       });
     } catch (_) {
       if (mounted) setState(() => _isLoadingName = false);
@@ -334,7 +313,7 @@ class _HomeTabState extends State<_HomeTab> {
           const SizedBox(width: 4),
           // Avatar → Profile screen
           GestureDetector(
-            onTap: () => context.push(Routes.profile).then((_) => _loadCalorieData()),
+            onTap: () => context.push(Routes.profile).then((_) => _loadUserData()),
             child: Container(
               width: 38,
               height: 38,

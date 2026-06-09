@@ -491,6 +491,22 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Sets the user's tracked plan, recording start date and resetting progress.
+  // ---------------------------------------------------------------------------
+  Future<void> trackPlan(
+    String uid,
+    String planId,
+    String planName,
+  ) async {
+    await _db.collection(Collections.users).doc(uid).update({
+      'trackedPlanId': planId,
+      'trackedPlanName': planName,
+      'trackingStartDate': FieldValue.serverTimestamp(),
+      'currentDayIndex': 1,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Reads trackedPlanId from users/{uid}, then fetches that plan document.
   // Returns null if the user has no tracked plan or the plan doc is missing.
   // ---------------------------------------------------------------------------

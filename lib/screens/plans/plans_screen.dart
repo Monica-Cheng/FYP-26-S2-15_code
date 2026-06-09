@@ -426,7 +426,7 @@ class _PlansScreenState extends State<PlansScreen> {
                 chipLabel: isCustom ? 'Custom' : null,
                 chipTextColor: isCustom ? WW.teal : null,
                 chipBgColor: isCustom ? WW.tealBg : null,
-                onTap: () => _snack('Plan detail coming soon'),
+                onTap: () => context.push(Routes.planDetail, extra: plan),
               ),
             );
           }),

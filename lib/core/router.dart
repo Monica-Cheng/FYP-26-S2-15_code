@@ -22,6 +22,7 @@ import '../screens/profile/edit_profile_screen.dart';
 import '../screens/profile/profile_screen.dart';
 import '../screens/settings/health_profile_screen.dart';
 import '../screens/settings/settings_screen.dart';
+import '../screens/plans/plan_detail_screen.dart';
 import '../screens/splash_screen.dart';
 
 // Route path constants — use these instead of hardcoding strings
@@ -48,6 +49,7 @@ class Routes {
   static const String healthProfile = '/health-profile';
   static const String editProfile = '/edit-profile';
   static const String manualActivityLog = '/manual-activity-log';
+  static const String planDetail = '/plan-detail';
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -134,6 +136,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.manualActivityLog,
         builder: (context, state) => const ManualActivityLogScreen(),
+      ),
+      GoRoute(
+        path: Routes.planDetail,
+        builder: (context, state) => const PlanDetailScreen(),
       ),
       // Add more routes here as you build each screen
     ],
