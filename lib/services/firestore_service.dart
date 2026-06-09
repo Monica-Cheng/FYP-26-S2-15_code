@@ -148,6 +148,13 @@ class FirestoreService {
       }
     }
 
+    final profile = await getUserProfile(uid);
+    final weightKg =
+        double.tryParse(profile?['weight']?.toString() ?? '70') ?? 70.0;
+    final durationHours = (sessionData['elapsedSeconds'] as int) / 3600;
+    int caloriesBurned = (5.0 * weightKg * durationHours).round();
+    caloriesBurned = caloriesBurned.clamp(50, 2000);
+
     try {
       print('Writing to Firestore...');
       await _db
@@ -163,7 +170,7 @@ class FirestoreService {
         'exercises': cleanedExercises,
         'totalSets': totalSets,
         'totalVolume': totalVolume,
-        'caloriesBurned': totalSets * 8,
+        'caloriesBurned': caloriesBurned,
         'xpEarned': totalSets * 15,
         'isManuallyLogged': false,
       });
