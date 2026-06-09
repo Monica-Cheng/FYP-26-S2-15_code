@@ -258,6 +258,31 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Adds xpEarned to the user's totalXp and weeklyXp, then recalculates and
+  // updates their level. Uses merge:true so unrelated fields are untouched.
+  // ---------------------------------------------------------------------------
+  Future<void> addXpToUser(String uid, int xpEarned) async {
+    final doc = await _db.collection(Collections.users).doc(uid).get();
+    final data = doc.data() ?? {};
+    final newTotal = ((data['totalXp'] as num?)?.toInt() ?? 0) + xpEarned;
+    final newWeekly = ((data['weeklyXp'] as num?)?.toInt() ?? 0) + xpEarned;
+    await _db.collection(Collections.users).doc(uid).set({
+      'totalXp': newTotal,
+      'weeklyXp': newWeekly,
+      'level': _calculateLevel(newTotal),
+    }, SetOptions(merge: true));
+  }
+
+  static int _calculateLevel(int totalXp) {
+    const thresholds = [0, 500, 1200, 2500, 4500, 7000, 10000, 14000, 19000, 25000, 32000];
+    int level = 1;
+    for (int i = 0; i < thresholds.length; i++) {
+      if (totalXp >= thresholds[i]) level = i + 1;
+    }
+    return level;
+  }
+
+  // ---------------------------------------------------------------------------
   // Calculates the current workout streak for users/{uid}.
   // Counts consecutive days (going back from today) with at least one session.
   // If today has no session, yesterday is checked first — streak still counts.
@@ -322,6 +347,78 @@ class FirestoreService {
       }
     }
     return dates;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Saves a manually-logged activity to users/{uid}/sessions/{auto-id}.
+  // No XP is awarded for manual logs per the PRD.
+  // ---------------------------------------------------------------------------
+  Future<void> saveManualActivity(
+    String uid, {
+    required String activityKey,
+    required String activityName,
+    required String intensity,
+    required int durationMinutes,
+    double? distance,
+    String? notes,
+    required int caloriesBurned,
+    required DateTime activityDate,
+  }) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .add({
+      'type': 'manual',
+      'activityKey': activityKey,
+      'activityName': activityName,
+      'intensity': intensity,
+      'durationMinutes': durationMinutes,
+      'durationSeconds': durationMinutes * 60,
+      'distance': distance,
+      'notes': notes,
+      'caloriesBurned': caloriesBurned,
+      'date': Timestamp.fromDate(activityDate),
+      'createdAt': FieldValue.serverTimestamp(),
+      'isManuallyLogged': true,
+      'xpEarned': 0,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Appends an XP event to users/{uid}/xpEvents/{auto-id}.
+  // Called immediately after addXpToUser so XP history stays in sync.
+  // ---------------------------------------------------------------------------
+  Future<void> saveXpEvent(String uid, Map<String, dynamic> eventData) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.xpEvents)
+        .add({
+      'amount': eventData['amount'],
+      'reason': eventData['reason'],
+      'type': eventData['type'],
+      'date': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Returns the [limit] most recent XP events for users/{uid}, newest first.
+  // ---------------------------------------------------------------------------
+  Future<List<Map<String, dynamic>>> getXpEvents(
+    String uid, {
+    int limit = 20,
+  }) async {
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.xpEvents)
+        .orderBy('date', descending: true)
+        .limit(limit)
+        .get();
+    return snapshot.docs
+        .map((doc) => {'id': doc.id, ...doc.data()})
+        .toList();
   }
 
   // ---------------------------------------------------------------------------

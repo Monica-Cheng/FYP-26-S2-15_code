@@ -106,7 +106,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         title: 'Edit Profile',
                         sub: 'Name, username, photo, bio',
                         first: true,
-                        onTap: () => _snack('Edit profile coming soon'),
+                        onTap: () => context.push(Routes.editProfile),
                       ),
                       _row(
                         icon: Icons.mail_rounded,

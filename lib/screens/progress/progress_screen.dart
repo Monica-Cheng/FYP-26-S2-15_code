@@ -13,24 +13,6 @@ const List<int> _kCalData = [320, 0, 450, 0, 380, 0, 690];
 const List<int> _kGymData = [3200, 0, 4100, 0, 3800, 0, 0];
 const List<String> _kDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
-// ── XP events ─────────────────────────────────────────────────────────────────
-
-class _XpEvent {
-  final String label;
-  final int xp;
-  final String date;
-
-  const _XpEvent(this.label, this.xp, this.date);
-}
-
-const List<_XpEvent> _kXpEvents = [
-  _XpEvent('Completed Push A', 280, 'Today'),
-  _XpEvent('Completed Pull A', 240, 'Yesterday'),
-  _XpEvent('Morning Run 5.2km', 180, '2 days ago'),
-  _XpEvent('Completed Leg Day A', 320, '3 days ago'),
-  _XpEvent('7-day streak bonus', 100, '4 days ago'),
-];
-
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
 class ProgressScreen extends StatefulWidget {
@@ -47,15 +29,71 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
   List<Map<String, dynamic>> _sessions = [];
   bool _sessionsLoading = true;
+  int _totalXp = 0;
+  int _level = 1;
+  List<Map<String, dynamic>> _xpEvents = [];
+  bool _xpEventsLoading = true;
 
   static const List<String> _subtabLabels = ['Charts', 'Activities', 'XP History'];
   static const List<String> _timeLabels = ['This Week', 'This Month', 'This Year'];
-  static const List<String> _actLabels = ['All', 'Gym', 'Cardio'];
+  static const List<String> _actLabels = ['All', 'Gym', 'Cardio', 'Manual'];
+
+  static const _kXpThresholds = [0, 500, 1200, 2500, 4500, 7000, 10000, 14000, 19000, 25000, 32000];
+
+  static String _levelName(int level) {
+    const names = [
+      '', 'Rookie', 'Beginner', 'Apprentice', 'Contender',
+      'Challenger', 'Warrior', 'Iron Athlete', 'Steel Athlete',
+      'Elite Athlete', 'Champion', 'Legend',
+    ];
+    if (level < 1 || level >= names.length) return 'Level $level';
+    return names[level];
+  }
+
+  double _xpProgress() {
+    if (_level >= _kXpThresholds.length) return 1.0;
+    final start = _kXpThresholds[_level - 1];
+    final end = _kXpThresholds[_level];
+    return ((_totalXp - start) / (end - start)).clamp(0.0, 1.0);
+  }
 
   @override
   void initState() {
     super.initState();
     _loadSessions();
+    _loadXpData();
+    _loadXpEvents();
+  }
+
+  Future<void> _loadXpData() async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final profile = await FirestoreService().getUserProfile(uid);
+      if (!mounted) return;
+      setState(() {
+        _totalXp = (profile?['totalXp'] as num?)?.toInt() ?? 0;
+        _level = (profile?['level'] as num?)?.toInt() ?? 1;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _loadXpEvents() async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) {
+      setState(() => _xpEventsLoading = false);
+      return;
+    }
+    try {
+      final result = await FirestoreService().getXpEvents(uid);
+      if (!mounted) return;
+      setState(() {
+        _xpEvents = result;
+        _xpEventsLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _xpEventsLoading = false);
+    }
   }
 
   Future<void> _loadSessions() async {
@@ -78,6 +116,9 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
   List<Map<String, dynamic>> get _filteredSessions {
     if (_activityFilter == 0) return _sessions;
+    if (_activityFilter == 3) {
+      return _sessions.where((s) => s['isManuallyLogged'] == true).toList();
+    }
     final type = _activityFilter == 1 ? 'gym' : 'cardio';
     return _sessions.where((s) => s['type'] == type).toList();
   }
@@ -97,6 +138,16 @@ class _ProgressScreenState extends State<ProgressScreen> {
     final mins = seconds ~/ 60;
     if (mins < 60) return '$mins min';
     return '${mins ~/ 60}h ${mins % 60}m';
+  }
+
+  String _buildManualSubtitle(Map<String, dynamic> session) {
+    final date = _formatDate(session['date'] as Timestamp?);
+    final mins = session['durationMinutes'];
+    final cals = session['caloriesBurned'];
+    final parts = [date];
+    if (mins != null) parts.add('$mins min');
+    if (cals != null) parts.add('$cals kcal');
+    return parts.join(' · ');
   }
 
   String _formatVolume(double? v) {
@@ -651,6 +702,18 @@ class _ProgressScreenState extends State<ProgressScreen> {
       separatorBuilder: (_, __) => const SizedBox(height: 8),
       itemBuilder: (_, i) {
         final s = sessions[i];
+        final isManual = s['isManuallyLogged'] == true;
+
+        if (isManual) {
+          return _ActivityCard(
+            title: s['activityName'] as String? ?? 'Manual Activity',
+            subtitle: _buildManualSubtitle(s),
+            xpLabel: 'Manual',
+            isCardio: false,
+            isManual: true,
+          );
+        }
+
         final isCardio = s['type'] == 'cardio';
         final ts = s['date'] as Timestamp?;
         final duration = _formatDuration(s['durationSeconds'] as int?);
@@ -732,24 +795,66 @@ class _ProgressScreenState extends State<ProgressScreen> {
             ),
           ),
           const SizedBox(height: 8),
-          Container(
-            decoration: WW.cardDecoration,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Column(
-              children: List.generate(_kXpEvents.length, (i) {
-                return _XpRow(event: _kXpEvents[i], isLast: i == _kXpEvents.length - 1);
-              }),
+          if (_xpEventsLoading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 32),
+                child: CircularProgressIndicator(color: WW.primary),
+              ),
+            )
+          else if (_xpEvents.isEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const [
+                    Icon(Icons.star_rounded, size: 40, color: WW.textSec),
+                    SizedBox(height: 10),
+                    Text(
+                      'No XP history yet',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: WW.text,
+                      ),
+                    ),
+                    SizedBox(height: 4),
+                    Text(
+                      'Complete a workout to earn XP',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: WW.textSec,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            Container(
+              decoration: WW.cardDecoration,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Column(
+                children: List.generate(_xpEvents.length, (i) {
+                  return _XpRow(
+                    event: _xpEvents[i],
+                    isLast: i == _xpEvents.length - 1,
+                  );
+                }),
+              ),
             ),
-          ),
         ],
       ),
     );
   }
 
   Widget _buildLevelCard() {
-    const totalXp = 3000;
-    const currentXp = 2620;
-    const progress = currentXp / totalXp;
+    final progress = _xpProgress();
+    final isMaxLevel = _level >= _kXpThresholds.length;
+    final nextLevelXp = isMaxLevel ? 0 : _kXpThresholds[_level];
+    final xpToNext = isMaxLevel ? 0 : nextLevelXp - _totalXp;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -764,9 +869,9 @@ class _ProgressScreenState extends State<ProgressScreen> {
             crossAxisAlignment: CrossAxisAlignment.baseline,
             textBaseline: TextBaseline.alphabetic,
             children: [
-              const Text(
-                'Lv.7',
-                style: TextStyle(
+              Text(
+                'Lv.$_level',
+                style: const TextStyle(
                   fontSize: 28,
                   fontWeight: FontWeight.w700,
                   color: WW.primaryDark,
@@ -774,8 +879,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
               ),
               const SizedBox(width: 8),
               Text(
-                'Iron Athlete',
-                style: TextStyle(
+                _levelName(_level),
+                style: const TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.w500,
                   color: WW.textSec,
@@ -794,9 +899,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
             ),
           ),
           const SizedBox(height: 6),
-          const Text(
-            '2,620 XP · 380 XP to Level 8',
-            style: TextStyle(
+          Text(
+            isMaxLevel
+                ? '$_totalXp XP · Max Level'
+                : '$_totalXp XP · $xpToNext XP to Level ${_level + 1}',
+            style: const TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w500,
               color: WW.textSec,
@@ -816,18 +923,35 @@ class _ActivityCard extends StatelessWidget {
   final String subtitle;
   final String xpLabel;
   final bool isCardio;
+  final bool isManual;
 
   const _ActivityCard({
     required this.title,
     required this.subtitle,
     required this.xpLabel,
     required this.isCardio,
+    this.isManual = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    final barColor = isCardio ? WW.teal : WW.primary;
-    final iconColor = isCardio ? WW.teal : WW.primary;
+    final Color barColor;
+    final Color iconColor;
+    final IconData iconData;
+
+    if (isManual) {
+      barColor = WW.lavender;
+      iconColor = WW.lavender;
+      iconData = Icons.edit_note_rounded;
+    } else if (isCardio) {
+      barColor = WW.teal;
+      iconColor = WW.teal;
+      iconData = Icons.directions_run_rounded;
+    } else {
+      barColor = WW.primary;
+      iconColor = WW.primary;
+      iconData = Icons.fitness_center_rounded;
+    }
 
     return Container(
       decoration: WW.cardDecoration,
@@ -842,11 +966,7 @@ class _ActivityCard extends StatelessWidget {
             // Icon
             Padding(
               padding: const EdgeInsets.fromLTRB(10, 14, 4, 14),
-              child: isCardio
-                  ? Icon(Icons.directions_run_rounded,
-                      color: iconColor, size: 22)
-                  : Icon(Icons.fitness_center_rounded,
-                      color: iconColor, size: 22),
+              child: Icon(iconData, color: iconColor, size: 22),
             ),
 
             // Content
@@ -878,21 +998,21 @@ class _ActivityCard extends StatelessWidget {
               ),
             ),
 
-            // XP badge
+            // Badge: XP for gym/cardio, "Manual" label for manual logs
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: WW.tealBg,
+                  color: isManual ? WW.lavenderBg : WW.tealBg,
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
                   xpLabel,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
-                    color: WW.teal,
+                    color: isManual ? WW.lavenderText : WW.teal,
                   ),
                 ),
               ),
@@ -907,13 +1027,26 @@ class _ActivityCard extends StatelessWidget {
 // ── XP row ────────────────────────────────────────────────────────────────────
 
 class _XpRow extends StatelessWidget {
-  final _XpEvent event;
+  final Map<String, dynamic> event;
   final bool isLast;
 
   const _XpRow({required this.event, required this.isLast});
 
+  String _formatTs(dynamic ts) {
+    if (ts is! Timestamp) return 'Recently';
+    final date = ts.toDate();
+    final diff = DateTime.now().difference(date);
+    if (diff.inDays == 0) return 'Today';
+    if (diff.inDays == 1) return 'Yesterday';
+    return '${diff.inDays} days ago';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final reason = event['reason'] as String? ?? 'XP earned';
+    final amount = (event['amount'] as num?)?.toInt() ?? 0;
+    final dateLabel = _formatTs(event['date']);
+
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 12),
       decoration: BoxDecoration(
@@ -925,50 +1058,53 @@ class _XpRow extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Star icon
+          // Star circle
           Container(
-            width: 28,
-            height: 28,
-            decoration: BoxDecoration(
+            width: 36,
+            height: 36,
+            decoration: const BoxDecoration(
               color: WW.tealBg,
-              borderRadius: BorderRadius.circular(8),
+              shape: BoxShape.circle,
             ),
             child: const Center(
-              child: Icon(Icons.star_rounded, color: WW.teal, size: 16),
+              child: Icon(Icons.star_rounded, color: WW.teal, size: 18),
             ),
           ),
           const SizedBox(width: 10),
 
-          // Label
+          // Reason + date
           Expanded(
-            child: Text(
-              event.label,
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: WW.text,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  reason,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  dateLabel,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                    color: WW.textSec,
+                  ),
+                ),
+              ],
             ),
           ),
 
-          // XP
+          // XP amount
           Text(
-            '+${event.xp} XP',
+            '+$amount XP',
             style: const TextStyle(
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: FontWeight.w700,
               color: WW.primary,
-            ),
-          ),
-          const SizedBox(width: 10),
-
-          // Date
-          Text(
-            event.date,
-            style: const TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w500,
-              color: WW.textSec,
             ),
           ),
         ],

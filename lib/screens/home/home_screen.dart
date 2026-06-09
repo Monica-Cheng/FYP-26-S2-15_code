@@ -28,6 +28,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
+  final _homeTabKey = GlobalKey<_HomeTabState>();
 
   static const List<_TabItem> _tabItems = [
     _TabItem(label: 'Home', icon: Icons.home_rounded),
@@ -37,23 +38,19 @@ class _HomeScreenState extends State<HomeScreen> {
     _TabItem(label: 'Progress', icon: Icons.bar_chart_rounded),
   ];
 
-  late final List<Widget> _tabs = const [
-    _HomeTab(),
-    PlansScreen(),
-    CoachScreen(),
-    ClubScreen(),
-    ProgressScreen(),
+  late final List<Widget> _tabs = [
+    _HomeTab(key: _homeTabKey),
+    const PlansScreen(),
+    const CoachScreen(),
+    const ClubScreen(),
+    const ProgressScreen(),
   ];
 
   void _onTabTap(int index) => setState(() => _selectedIndex = index);
 
   void _onFabTap() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Activity logging coming soon'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    context.push(Routes.manualActivityLog)
+        .then((_) => _homeTabKey.currentState?._loadCalorieData());
   }
 
   @override
@@ -148,7 +145,7 @@ class _BottomNav extends StatelessWidget {
 // ── Home tab ──────────────────────────────────────────────────────────────────
 
 class _HomeTab extends StatefulWidget {
-  const _HomeTab();
+  const _HomeTab({super.key});
 
   @override
   State<_HomeTab> createState() => _HomeTabState();

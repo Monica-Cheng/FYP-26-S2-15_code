@@ -268,6 +268,16 @@ class _GymSessionState extends State<GymSessionScreen> {
       print('Session data: $sessionData');
       if (uid != null) {
         await FirestoreService().saveGymSession(uid, sessionData);
+        final totalCompletedSets = _exercises
+            .expand((e) => e.sets)
+            .where((s) => s.done)
+            .length;
+        await FirestoreService().addXpToUser(uid, totalCompletedSets * 15);
+        await FirestoreService().saveXpEvent(uid, {
+          'amount': totalCompletedSets * 15,
+          'reason': 'Completed ${sessionData['sessionName']} · $totalCompletedSets sets',
+          'type': 'gym',
+        });
       } else {
         print('saveGymSession skipped: no authenticated user');
       }

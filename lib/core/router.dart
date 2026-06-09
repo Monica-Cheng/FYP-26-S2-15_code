@@ -17,6 +17,8 @@ import '../screens/onboarding/onboarding_step3_screen.dart';
 import '../screens/plans/gym_session_screen.dart';
 import '../screens/onboarding/onboarding_walkthrough_screen.dart';
 import '../screens/plans/post_session_summary_screen.dart';
+import '../screens/home/manual_activity_log_screen.dart';
+import '../screens/profile/edit_profile_screen.dart';
 import '../screens/profile/profile_screen.dart';
 import '../screens/settings/health_profile_screen.dart';
 import '../screens/settings/settings_screen.dart';
@@ -44,6 +46,8 @@ class Routes {
   static const String profile = '/profile';
   static const String settings = '/settings';
   static const String healthProfile = '/health-profile';
+  static const String editProfile = '/edit-profile';
+  static const String manualActivityLog = '/manual-activity-log';
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -122,6 +126,14 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.healthProfile,
         builder: (context, state) => const HealthProfileScreen(),
+      ),
+      GoRoute(
+        path: Routes.editProfile,
+        builder: (context, state) => const EditProfileScreen(),
+      ),
+      GoRoute(
+        path: Routes.manualActivityLog,
+        builder: (context, state) => const ManualActivityLogScreen(),
       ),
       // Add more routes here as you build each screen
     ],

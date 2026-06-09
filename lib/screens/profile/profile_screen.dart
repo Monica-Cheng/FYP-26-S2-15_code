@@ -76,7 +76,30 @@ class _ProfileScreenState extends State<ProfileScreen> {
   final _firestore = FirestoreService();
 
   String? _displayName;
+  String? _hometown;
+  String? _bio;
   bool _isLoading = true;
+  int _totalXp = 0;
+  int _level = 1;
+
+  static const _kXpThresholds = [0, 500, 1200, 2500, 4500, 7000, 10000, 14000, 19000, 25000, 32000];
+
+  static String _levelName(int level) {
+    const names = [
+      '', 'Rookie', 'Beginner', 'Apprentice', 'Contender',
+      'Challenger', 'Warrior', 'Iron Athlete', 'Steel Athlete',
+      'Elite Athlete', 'Champion', 'Legend',
+    ];
+    if (level < 1 || level >= names.length) return 'Level $level';
+    return names[level];
+  }
+
+  double _xpProgress() {
+    if (_level >= _kXpThresholds.length) return 1.0;
+    final start = _kXpThresholds[_level - 1];
+    final end = _kXpThresholds[_level];
+    return ((_totalXp - start) / (end - start)).clamp(0.0, 1.0);
+  }
 
   @override
   void initState() {
@@ -95,6 +118,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if (mounted) {
         setState(() {
           _displayName = profile?['displayName'] as String?;
+          _hometown = profile?['hometown'] as String?;
+          _bio = profile?['bio'] as String?;
+          _totalXp = (profile?['totalXp'] as num?)?.toInt() ?? 0;
+          _level = (profile?['level'] as num?)?.toInt() ?? 1;
           _isLoading = false;
         });
       }
@@ -199,7 +226,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           Align(
             alignment: Alignment.centerRight,
             child: GestureDetector(
-              onTap: () => context.push(Routes.settings),
+              onTap: () => context.push(Routes.settings).then((_) => _loadProfile()),
               child: Container(
                 width: 34,
                 height: 34,
@@ -266,7 +293,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 bottom: 0,
                 right: 0,
                 child: GestureDetector(
-                  onTap: () => _snack('Edit photo coming soon'),
+                  onTap: () => _snack('Photo upload coming soon'),
                   child: Container(
                     width: 24,
                     height: 24,
@@ -312,32 +339,36 @@ class _ProfileScreenState extends State<ProfileScreen> {
             _username,
             style: const TextStyle(fontSize: 14, color: WW.textSec),
           ),
-          const SizedBox(height: 4),
-          // Location
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: const [
-              Icon(Icons.location_on_rounded, size: 12, color: WW.textSec),
-              SizedBox(width: 3),
-              Text(
-                'Singapore',
-                style: TextStyle(fontSize: 13, color: WW.textSec),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          // Bio
-          const Text(
-            'Gym 4x a week. Running on weekends. Chasing PRs and consistency.',
-            textAlign: TextAlign.center,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 13,
-              color: WW.text,
-              height: 1.5,
+          if (_hometown != null && _hometown!.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            // Location
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.location_on_rounded, size: 12, color: WW.textSec),
+                const SizedBox(width: 3),
+                Text(
+                  _hometown!,
+                  style: const TextStyle(fontSize: 13, color: WW.textSec),
+                ),
+              ],
             ),
-          ),
+          ],
+          if (_bio != null && _bio!.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            // Bio
+            Text(
+              _bio!,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 13,
+                color: WW.text,
+                height: 1.5,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -476,15 +507,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
   // ── XP level card ─────────────────────────────────────────────────────────
 
   Widget _buildXpCard() {
+    final progress = _xpProgress();
+    final isMaxLevel = _level >= _kXpThresholds.length;
+    final nextLevelXp = isMaxLevel ? 0 : _kXpThresholds[_level];
+    final xpToNext = isMaxLevel ? 0 : nextLevelXp - _totalXp;
+
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       padding: const EdgeInsets.all(12),
       decoration: WW.cardDecoration,
       child: Row(
         children: [
-          const Text(
-            'Lv.7',
-            style: TextStyle(
+          Text(
+            'Lv.$_level',
+            style: const TextStyle(
               fontSize: 20,
               fontWeight: FontWeight.w700,
               color: WW.primaryDark,
@@ -495,9 +531,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Iron Athlete',
-                  style: TextStyle(
+                Text(
+                  _levelName(_level),
+                  style: const TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
                     color: WW.text,
@@ -506,17 +542,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 const SizedBox(height: 4),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(6),
-                  child: const LinearProgressIndicator(
-                    value: 0.81,
+                  child: LinearProgressIndicator(
+                    value: progress,
                     minHeight: 6,
                     backgroundColor: WW.chipBg,
-                    valueColor: AlwaysStoppedAnimation<Color>(WW.primary),
+                    valueColor: const AlwaysStoppedAnimation<Color>(WW.primary),
                   ),
                 ),
                 const SizedBox(height: 4),
-                const Text(
-                  '3,240 / 4,000 XP · 760 to Level 8',
-                  style: TextStyle(fontSize: 11, color: WW.textSec),
+                Text(
+                  isMaxLevel
+                      ? '$_totalXp XP · Max Level'
+                      : '$_totalXp / $nextLevelXp XP · $xpToNext to Level ${_level + 1}',
+                  style: const TextStyle(fontSize: 11, color: WW.textSec),
                 ),
               ],
             ),
