@@ -3,8 +3,10 @@
 // Tab 0 = Home (_HomeTab), tabs 1-4 = placeholder screens.
 // FAB shown only on Home tab; tapping shows SnackBar.
 
+import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -39,7 +41,7 @@ class _HomeScreenState extends State<HomeScreen> {
   ];
 
   late final List<Widget> _tabs = [
-    _HomeTab(key: _homeTabKey),
+    _HomeTab(key: _homeTabKey, onGoToPlans: () => _onTabTap(1)),
     const PlansScreen(),
     const CoachScreen(),
     const ClubScreen(),
@@ -145,7 +147,8 @@ class _BottomNav extends StatelessWidget {
 // ── Home tab ──────────────────────────────────────────────────────────────────
 
 class _HomeTab extends StatefulWidget {
-  const _HomeTab({super.key});
+  final VoidCallback? onGoToPlans;
+  const _HomeTab({super.key, this.onGoToPlans});
 
   @override
   State<_HomeTab> createState() => _HomeTabState();
@@ -162,11 +165,42 @@ class _HomeTabState extends State<_HomeTab> {
   bool _calorieGoalActive = false;
   int _streakDays = 0;
   Set<String> _sessionDates = {};
+  String _trackedPlanName = '';
+  String _trackedPlanId = '';
+  StreamSubscription<DocumentSnapshot>? _userStreamSub;
 
   @override
   void initState() {
     super.initState();
     _loadUserData();
+    _startUserStream();
+  }
+
+  void _startUserStream() {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    _userStreamSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .snapshots()
+        .listen((doc) {
+      if (doc.exists && mounted) {
+        setState(() {
+          _trackedPlanName =
+              doc.data()?['trackedPlanName'] as String? ?? '';
+          _trackedPlanId =
+              doc.data()?['trackedPlanId'] as String? ?? '';
+          _displayName =
+              doc.data()?['displayName'] as String? ?? _displayName;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _userStreamSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadUserData() async {
@@ -254,7 +288,10 @@ class _HomeTabState extends State<_HomeTab> {
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: _TodayPlanCard(),
+              child: _TodayPlanCard(
+                trackedPlanName: _trackedPlanName,
+                onGoToPlans: widget.onGoToPlans,
+              ),
             ),
           ),
           const SliverToBoxAdapter(child: SizedBox(height: 100)),
@@ -688,10 +725,69 @@ class _CalorieRingPainter extends CustomPainter {
 // ── Today's Plan card ─────────────────────────────────────────────────────────
 
 class _TodayPlanCard extends StatelessWidget {
-  const _TodayPlanCard();
+  final String trackedPlanName;
+  final VoidCallback? onGoToPlans;
+
+  const _TodayPlanCard({
+    required this.trackedPlanName,
+    this.onGoToPlans,
+  });
 
   @override
   Widget build(BuildContext context) {
+    if (trackedPlanName.isEmpty) {
+      return _buildEmptyState(context);
+    }
+    return _buildPlanCard(context);
+  }
+
+  Widget _buildEmptyState(BuildContext context) {
+    return Container(
+      decoration: WW.cardDecoration,
+      padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
+      child: Column(
+        children: [
+          const Icon(Icons.fitness_center_rounded, size: 40, color: WW.textSec),
+          const SizedBox(height: 12),
+          const Text(
+            'No plan tracked yet',
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              color: WW.text,
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Go to Plans tab to choose a plan',
+            style: TextStyle(fontSize: 13, color: WW.textSec),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          GestureDetector(
+            onTap: onGoToPlans,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(
+                color: WW.primary,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Text(
+                'Browse Plans',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlanCard(BuildContext context) {
     return Container(
       decoration: WW.cardDecoration,
       clipBehavior: Clip.hardEdge,
@@ -721,14 +817,16 @@ class _TodayPlanCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 12),
-                const Expanded(
+                Expanded(
                   child: Text(
-                    'Chest, Shoulders & Triceps',
-                    style: TextStyle(
+                    trackedPlanName,
+                    style: const TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.w700,
                       color: Colors.white,
                     ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
               ],
@@ -736,10 +834,10 @@ class _TodayPlanCard extends StatelessWidget {
           ),
 
           // Stats row
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 14, 16, 0),
             child: Row(
-              children: const [
+              children: [
                 _StatChip(icon: Icons.timer_outlined, label: '45 min'),
                 SizedBox(width: 16),
                 _StatChip(icon: Icons.fitness_center_rounded, label: '6 exercises'),

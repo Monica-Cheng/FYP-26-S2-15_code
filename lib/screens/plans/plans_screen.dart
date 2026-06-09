@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
+import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
@@ -26,13 +27,17 @@ const List<Map<String, dynamic>> _kFallbackPlans = [
 
 class _PlansScreenState extends State<PlansScreen> {
   final _firestoreService = FirestoreService();
+  final _authService = AuthService();
   List<Map<String, dynamic>> _plans = [];
   bool _isLoading = true;
+  Map<String, dynamic>? _trackedPlan;
+  bool _trackedPlanLoading = true;
 
   @override
   void initState() {
     super.initState();
     _loadPlans();
+    _loadTrackedPlan();
   }
 
   Future<void> _loadPlans() async {
@@ -51,6 +56,24 @@ class _PlansScreenState extends State<PlansScreen> {
           _isLoading = false;
         });
       }
+    }
+  }
+
+  Future<void> _loadTrackedPlan() async {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) {
+      setState(() => _trackedPlanLoading = false);
+      return;
+    }
+    try {
+      final plan = await _firestoreService.getTrackedPlan(uid);
+      if (!mounted) return;
+      setState(() {
+        _trackedPlan = plan;
+        _trackedPlanLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _trackedPlanLoading = false);
     }
   }
 
@@ -208,165 +231,181 @@ class _PlansScreenState extends State<PlansScreen> {
           ),
         ),
         const SizedBox(height: 10),
-        Container(
-          decoration: WW.cardDecoration,
-          clipBehavior: Clip.hardEdge,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Dark header strip
-              Container(
-                padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                color: WW.primaryDark,
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: WW.primary,
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: const Text(
-                        'TRACKED',
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                          letterSpacing: 0.4,
-                        ),
-                      ),
-                    ),
-                    const Spacer(),
-                    const Text(
-                      'Day 5 of 24',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              // Body
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Beginner Push-Pull-Legs',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w800,
-                        color: WW.primaryDark,
-                        letterSpacing: -0.2,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: WW.elevated,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: const Text(
-                        'Gym · Beginner · 3 days/week',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: WW.textSec,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    // Progress bar
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: const LinearProgressIndicator(
-                        value: 5 / 24,
-                        minHeight: 6,
-                        backgroundColor: WW.elevated,
-                        color: WW.primary,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      '5 of 24 sessions complete',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500,
-                        color: WW.textSec,
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    // Buttons row
-                    Row(
-                      children: [
-                        Expanded(
-                          child: GestureDetector(
-                            onTap: () => context.go(Routes.gymSession),
-                            child: Container(
-                              height: 42,
-                              decoration: BoxDecoration(
-                                color: WW.primary,
-                                borderRadius: BorderRadius.circular(11),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: WW.primary.withOpacity(0.3),
-                                    blurRadius: 10,
-                                    offset: const Offset(0, 3),
-                                  ),
-                                ],
-                              ),
-                              child: const Center(
-                                child: Text(
-                                  'Continue Session',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w700,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: GestureDetector(
-                            onTap: () => _snack('Schedule coming soon'),
-                            child: Container(
-                              height: 42,
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(11),
-                                border:
-                                    Border.all(color: WW.primary, width: 1.5),
-                              ),
-                              child: const Center(
-                                child: Text(
-                                  'Schedule',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w700,
-                                    color: WW.primary,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
+        if (_trackedPlanLoading)
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: CircularProgressIndicator(color: WW.primary),
+            ),
+          )
+        else if (_trackedPlan == null)
+          _buildNoTrackedPlan()
+        else
+          _buildTrackedPlanCard(_trackedPlan!),
       ],
+    );
+  }
+
+  Widget _buildNoTrackedPlan() {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
+      decoration: WW.cardDecoration,
+      child: const Column(
+        children: [
+          Icon(Icons.fitness_center_rounded, size: 36, color: WW.textSec),
+          SizedBox(height: 10),
+          Text(
+            'No tracked plan',
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              color: WW.text,
+            ),
+          ),
+          SizedBox(height: 4),
+          Text(
+            'Choose a plan below to start tracking',
+            style: TextStyle(fontSize: 13, color: WW.textSec),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTrackedPlanCard(Map<String, dynamic> plan) {
+    final name = plan['name'] as String? ?? 'Unnamed Plan';
+    final type = plan['type'] as String? ?? '';
+    final level = plan['level'] as String? ?? '';
+    final days = (plan['daysPerWeek'] as num?)?.toInt() ?? 0;
+
+    return Container(
+      decoration: WW.cardDecoration,
+      clipBehavior: Clip.hardEdge,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Dark header strip
+          Container(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            color: WW.primaryDark,
+            child: Row(
+              children: [
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: WW.primary,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Text(
+                    'TRACKED',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Body
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: WW.primaryDark,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: WW.elevated,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '$type · $level · $days days/week',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: WW.textSec,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                // Buttons row
+                Row(
+                  children: [
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => context.go(Routes.gymSession),
+                        child: Container(
+                          height: 42,
+                          decoration: BoxDecoration(
+                            color: WW.primary,
+                            borderRadius: BorderRadius.circular(11),
+                            boxShadow: [
+                              BoxShadow(
+                                color: WW.primary.withOpacity(0.3),
+                                blurRadius: 10,
+                                offset: const Offset(0, 3),
+                              ),
+                            ],
+                          ),
+                          child: const Center(
+                            child: Text(
+                              'Continue Session',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => _snack('Schedule coming soon'),
+                        child: Container(
+                          height: 42,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(11),
+                            border: Border.all(color: WW.primary, width: 1.5),
+                          ),
+                          child: const Center(
+                            child: Text(
+                              'Schedule',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: WW.primary,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -426,7 +465,9 @@ class _PlansScreenState extends State<PlansScreen> {
                 chipLabel: isCustom ? 'Custom' : null,
                 chipTextColor: isCustom ? WW.teal : null,
                 chipBgColor: isCustom ? WW.tealBg : null,
-                onTap: () => context.push(Routes.planDetail, extra: plan),
+                onTap: () => context
+                    .push(Routes.planDetail, extra: plan)
+                    .then((_) => _loadTrackedPlan()),
               ),
             );
           }),

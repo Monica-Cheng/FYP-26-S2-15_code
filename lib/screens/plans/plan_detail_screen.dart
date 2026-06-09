@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
-import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
@@ -73,6 +72,27 @@ class PlanDetailScreen extends StatefulWidget {
 class _PlanDetailScreenState extends State<PlanDetailScreen> {
   bool _overviewExpanded = false;
   bool _isTracking = false;
+  bool _isTracked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkTrackedState());
+  }
+
+  Future<void> _checkTrackedState() async {
+    final plan = GoRouterState.of(context).extra as Map<String, dynamic>?;
+    final planId = plan?['id'] as String?;
+    if (planId == null || planId.isEmpty) return;
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final profile = await FirestoreService().getUserProfile(uid);
+      if (!mounted) return;
+      final trackedId = profile?['trackedPlanId'] as String?;
+      setState(() => _isTracked = trackedId == planId);
+    } catch (_) {}
+  }
 
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -138,8 +158,60 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
       }
     } catch (_) {}
     if (!mounted) return;
-    setState(() => _isTracking = false);
-    context.go(Routes.home);
+    setState(() {
+      _isTracking = false;
+      _isTracked = true;
+    });
+    context.pop();
+  }
+
+  Future<void> _handleUntrackPlan() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Stop tracking this plan?',
+          style: TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.w700,
+            color: WW.text,
+          ),
+        ),
+        content: const Text(
+          'Your progress will be saved but this plan will no longer be tracked.',
+          style: TextStyle(fontSize: 14, color: WW.textSec),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Untrack',
+              style: TextStyle(
+                color: Color(0xFFEF4444),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      await FirestoreService().updateUserProfile(uid, {
+        'trackedPlanId': '',
+        'trackedPlanName': '',
+      });
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() => _isTracked = false);
   }
 
   @override
@@ -634,6 +706,68 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
 
   Widget _buildStickyBar(Map<String, dynamic> plan) {
     final bottomPad = MediaQuery.of(context).padding.bottom;
+
+    if (_isTracked) {
+      return Container(
+        padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPad + 12),
+        decoration: const BoxDecoration(
+          color: WW.card,
+          border: Border(top: BorderSide(color: WW.border, width: 0.5)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: double.infinity,
+              height: 50,
+              decoration: BoxDecoration(
+                color: WW.teal,
+                borderRadius: BorderRadius.circular(13),
+                boxShadow: [
+                  BoxShadow(
+                    color: WW.teal.withOpacity(0.3),
+                    blurRadius: 14,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: const Center(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.check_circle_rounded,
+                        color: Colors.white, size: 18),
+                    SizedBox(width: 8),
+                    Text(
+                      'Currently Tracking',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            GestureDetector(
+              onTap: _handleUntrackPlan,
+              child: const Text(
+                'Untrack Plan',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFFEF4444),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPad + 12),
       decoration: const BoxDecoration(
