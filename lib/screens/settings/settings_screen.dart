@@ -29,6 +29,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _workoutReminders = true;
   bool _streakAlerts = true;
   bool _wiseCoachMessages = true;
+  bool _prefsLoading = true;
 
   String? _userEmail;
 
@@ -36,6 +37,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     _userEmail = _auth.getCurrentUser()?.email;
+    _loadPrefs();
+  }
+
+  Future<void> _loadPrefs() async {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) {
+      setState(() => _prefsLoading = false);
+      return;
+    }
+    try {
+      final profile = await _firestore.getUserProfile(uid);
+      if (!mounted) return;
+      setState(() {
+        _pushNotif = profile?['notificationsEnabled'] as bool? ?? true;
+        _workoutReminders = profile?['workoutReminders'] as bool? ?? true;
+        _streakAlerts = profile?['streakAlerts'] as bool? ?? true;
+        _wiseCoachMessages = profile?['wiseCoachMessages'] as bool? ?? true;
+        _prefsLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _prefsLoading = false);
+    }
+  }
+
+  Future<void> _savePrefs() async {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      await _firestore.updateUserProfile(uid, {
+        'notificationsEnabled': _pushNotif,
+        'workoutReminders': _workoutReminders,
+        'streakAlerts': _streakAlerts,
+        'wiseCoachMessages': _wiseCoachMessages,
+      });
+    } catch (_) {}
   }
 
   void _snack(String msg) {
@@ -72,15 +108,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (confirmed != true || !mounted) return;
     await _auth.signOut();
     if (mounted) context.go(Routes.login);
-  }
-
-  Future<void> _onPushNotifChanged(bool val) async {
-    setState(() => _pushNotif = val);
-    final uid = _auth.getCurrentUser()?.uid;
-    if (uid == null) return;
-    try {
-      await _firestore.updateUserProfile(uid, {'pushNotificationsEnabled': val});
-    } catch (_) {}
   }
 
   @override
@@ -163,46 +190,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ]),
                     _sectionHeader('Notifications'),
-                    _sectionCard([
-                      _row(
-                        icon: Icons.notifications_rounded,
-                        iconBg: WW.gold,
-                        title: 'Push Notifications',
-                        first: true,
-                        chevron: false,
-                        right: _buildToggle(_pushNotif, _onPushNotifChanged),
-                      ),
-                      _row(
-                        icon: Icons.fitness_center_rounded,
-                        iconBg: WW.primary,
-                        title: 'Workout Reminders',
-                        chevron: false,
-                        right: _buildToggle(
-                          _workoutReminders,
-                          (v) => setState(() => _workoutReminders = v),
+                    if (_prefsLoading)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 24),
+                        child: Center(
+                          child: CircularProgressIndicator(color: WW.primary),
                         ),
-                      ),
-                      _row(
-                        icon: Icons.local_fire_department_rounded,
-                        iconBg: WW.teal,
-                        title: 'Streak Alerts',
-                        chevron: false,
-                        right: _buildToggle(
-                          _streakAlerts,
-                          (v) => setState(() => _streakAlerts = v),
+                      )
+                    else
+                      _sectionCard([
+                        _row(
+                          icon: Icons.notifications_rounded,
+                          iconBg: WW.gold,
+                          title: 'Push Notifications',
+                          first: true,
+                          chevron: false,
+                          right: _buildToggle(_pushNotif, (v) {
+                            setState(() => _pushNotif = v);
+                            _savePrefs();
+                          }),
                         ),
-                      ),
-                      _row(
-                        icon: Icons.auto_awesome_rounded,
-                        iconBg: WW.lavender,
-                        title: 'WiseCoach Messages',
-                        chevron: false,
-                        right: _buildToggle(
-                          _wiseCoachMessages,
-                          (v) => setState(() => _wiseCoachMessages = v),
+                        _row(
+                          icon: Icons.fitness_center_rounded,
+                          iconBg: WW.primary,
+                          title: 'Workout Reminders',
+                          chevron: false,
+                          right: _buildToggle(_workoutReminders, (v) {
+                            setState(() => _workoutReminders = v);
+                            _savePrefs();
+                          }),
                         ),
-                      ),
-                    ]),
+                        _row(
+                          icon: Icons.local_fire_department_rounded,
+                          iconBg: WW.teal,
+                          title: 'Streak Alerts',
+                          chevron: false,
+                          right: _buildToggle(_streakAlerts, (v) {
+                            setState(() => _streakAlerts = v);
+                            _savePrefs();
+                          }),
+                        ),
+                        _row(
+                          icon: Icons.auto_awesome_rounded,
+                          iconBg: WW.lavender,
+                          title: 'WiseCoach Messages',
+                          chevron: false,
+                          right: _buildToggle(_wiseCoachMessages, (v) {
+                            setState(() => _wiseCoachMessages = v);
+                            _savePrefs();
+                          }),
+                        ),
+                      ]),
                     _sectionHeader('Community'),
                     _sectionCard([
                       _row(
