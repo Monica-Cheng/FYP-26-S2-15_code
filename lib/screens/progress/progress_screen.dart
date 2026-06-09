@@ -7,10 +7,6 @@ import '../../core/app_theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
-// ── Hardcoded chart data ───────────────────────────────────────────────────────
-
-const List<int> _kCalData = [320, 0, 450, 0, 380, 0, 690];
-const List<int> _kGymData = [3200, 0, 4100, 0, 3800, 0, 0];
 const List<String> _kDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
@@ -33,6 +29,14 @@ class _ProgressScreenState extends State<ProgressScreen> {
   int _level = 1;
   List<Map<String, dynamic>> _xpEvents = [];
   bool _xpEventsLoading = true;
+
+  List<double> _caloriesByDay = [0, 0, 0, 0, 0, 0, 0];
+  List<double> _volumeByDay = [0, 0, 0, 0, 0, 0, 0];
+  int _weekTotalCalories = 0;
+  int _weekTotalVolume = 0;
+  int _weekTotalSessions = 0;
+  int _weekGymSessions = 0;
+  bool _chartsLoading = true;
 
   static const List<String> _subtabLabels = ['Charts', 'Activities', 'XP History'];
   static const List<String> _timeLabels = ['This Week', 'This Month', 'This Year'];
@@ -63,6 +67,30 @@ class _ProgressScreenState extends State<ProgressScreen> {
     _loadSessions();
     _loadXpData();
     _loadXpEvents();
+    _loadChartData();
+  }
+
+  Future<void> _loadChartData() async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) {
+      setState(() => _chartsLoading = false);
+      return;
+    }
+    try {
+      final stats = await FirestoreService().getWeeklySessionStats(uid);
+      if (!mounted) return;
+      setState(() {
+        _caloriesByDay = List<double>.from(stats['caloriesByDay'] as List);
+        _volumeByDay = List<double>.from(stats['volumeByDay'] as List);
+        _weekTotalCalories = stats['totalCalories'] as int;
+        _weekTotalVolume = stats['totalVolume'] as int;
+        _weekTotalSessions = stats['totalSessions'] as int;
+        _weekGymSessions = stats['gymSessions'] as int;
+        _chartsLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _chartsLoading = false);
+    }
   }
 
   Future<void> _loadXpData() async {
@@ -269,6 +297,9 @@ class _ProgressScreenState extends State<ProgressScreen> {
   // ══════════════════════════════════════════════════════════════════════════
 
   Widget _buildChartsTab() {
+    if (_chartsLoading) {
+      return const Center(child: CircularProgressIndicator(color: WW.primary));
+    }
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
       child: Column(
@@ -406,7 +437,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
             child: BarChart(
               BarChartData(
                 barGroups: List.generate(7, (i) {
-                  final val = _kCalData[i].toDouble();
+                  final val = _caloriesByDay[i];
                   return BarChartGroupData(
                     x: i,
                     barRods: [
@@ -457,7 +488,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   touchTooltipData: BarTouchTooltipData(
                     getTooltipColor: (_) => WW.primaryDark,
                     getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                      final val = _kCalData[group.x];
+                      final val = _caloriesByDay[group.x].round();
                       if (val == 0) return null;
                       return BarTooltipItem(
                         '$val kcal',
@@ -474,9 +505,9 @@ class _ProgressScreenState extends State<ProgressScreen> {
             ),
           ),
           const SizedBox(height: 10),
-          const Text(
-            'Total: 1,840 kcal  ·  Avg: 461 kcal/session',
-            style: TextStyle(
+          Text(
+            'Total: $_weekTotalCalories kcal  ·  Avg: ${_weekTotalSessions > 0 ? (_weekTotalCalories / _weekTotalSessions).round() : 0} kcal/session',
+            style: const TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w500,
               color: WW.textSec,
@@ -515,7 +546,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
             child: BarChart(
               BarChartData(
                 barGroups: List.generate(7, (i) {
-                  final val = _kGymData[i].toDouble();
+                  final val = _volumeByDay[i];
                   return BarChartGroupData(
                     x: i,
                     barRods: [
@@ -566,7 +597,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   touchTooltipData: BarTouchTooltipData(
                     getTooltipColor: (_) => WW.primaryDark,
                     getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                      final val = _kGymData[group.x];
+                      final val = _volumeByDay[group.x].round();
                       if (val == 0) return null;
                       return BarTooltipItem(
                         '$val kg',
@@ -583,9 +614,9 @@ class _ProgressScreenState extends State<ProgressScreen> {
             ),
           ),
           const SizedBox(height: 10),
-          const Text(
-            'Total: 11,100 kg  ·  3 sessions',
-            style: TextStyle(
+          Text(
+            'Total: $_weekTotalVolume kg  ·  $_weekTotalSessions sessions',
+            style: const TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w500,
               color: WW.textSec,
@@ -597,17 +628,15 @@ class _ProgressScreenState extends State<ProgressScreen> {
   }
 
   Widget _buildStatCardsRow() {
-    const items = [
-      ('4', 'sessions\nthis week'),
-      ('+12%', 'volume\nincrease'),
-      ('3', 'day\nstreak'),
+    final items = [
+      ('$_weekTotalSessions', 'sessions\nthis week'),
+      ('$_weekGymSessions', 'gym\nsessions'),
     ];
     return Row(
-      children: items.map((item) {
-        final isLast = item == items.last;
+      children: List.generate(items.length, (i) {
         return Expanded(
           child: Padding(
-            padding: EdgeInsets.only(right: isLast ? 0 : 10),
+            padding: EdgeInsets.only(right: i < items.length - 1 ? 10 : 0),
             child: Container(
               padding: const EdgeInsets.symmetric(vertical: 16),
               decoration: BoxDecoration(
@@ -617,7 +646,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
               child: Column(
                 children: [
                   Text(
-                    item.$1,
+                    items[i].$1,
                     style: const TextStyle(
                       fontSize: 22,
                       fontWeight: FontWeight.w800,
@@ -626,7 +655,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    item.$2,
+                    items[i].$2,
                     textAlign: TextAlign.center,
                     style: const TextStyle(
                       fontSize: 11,
@@ -640,7 +669,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
             ),
           ),
         );
-      }).toList(),
+      }),
     );
   }
 

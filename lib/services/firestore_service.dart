@@ -386,6 +386,64 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Returns weekly session statistics for users/{uid}.
+  // Covers Mon–Sun of the current local week.
+  // caloriesByDay / volumeByDay are indexed 0=Mon … 6=Sun.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>> getWeeklySessionStats(String uid) async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final weekStart = today.subtract(Duration(days: today.weekday - 1));
+
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(weekStart))
+        .get();
+
+    final caloriesByDay = List<double>.filled(7, 0);
+    final volumeByDay = List<double>.filled(7, 0);
+    int totalCalories = 0;
+    double totalVolume = 0;
+    int totalSessions = 0;
+    int gymSessions = 0;
+    int cardioSessions = 0;
+
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      final ts = data['date'];
+      if (ts is! Timestamp) continue;
+
+      final date = ts.toDate().toLocal();
+      final dayIndex = date.weekday - 1; // 0=Mon … 6=Sun
+      if (dayIndex < 0 || dayIndex > 6) continue;
+
+      final cals = (data['caloriesBurned'] as num?)?.toDouble() ?? 0;
+      final vol = (data['totalVolume'] as num?)?.toDouble() ?? 0;
+      final type = data['type'] as String? ?? '';
+
+      caloriesByDay[dayIndex] += cals;
+      if (type == 'gym') volumeByDay[dayIndex] += vol;
+      totalCalories += cals.round();
+      totalVolume += vol;
+      totalSessions++;
+      if (type == 'gym') gymSessions++;
+      if (type == 'cardio') cardioSessions++;
+    }
+
+    return {
+      'caloriesByDay': caloriesByDay,
+      'volumeByDay': volumeByDay,
+      'totalCalories': totalCalories,
+      'totalVolume': totalVolume.round(),
+      'totalSessions': totalSessions,
+      'gymSessions': gymSessions,
+      'cardioSessions': cardioSessions,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Appends an XP event to users/{uid}/xpEvents/{auto-id}.
   // Called immediately after addXpToUser so XP history stays in sync.
   // ---------------------------------------------------------------------------
