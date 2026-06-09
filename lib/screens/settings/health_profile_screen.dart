@@ -298,13 +298,11 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
 
   Future<void> _onCalorieToggle(bool val) async {
     setState(() => _calorieGoalActive = val);
-    if (!val) {
-      final uid = _auth.getCurrentUser()?.uid;
-      if (uid == null) return;
-      try {
-        await _firestore.updateUserProfile(uid, {'calorieGoalActive': false});
-      } catch (_) {}
-    }
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      await _firestore.updateUserProfile(uid, {'calorieGoalActive': val});
+    } catch (_) {}
   }
 
   void _autoCalcFromDaily() {
@@ -338,7 +336,6 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
     setState(() => _isSavingCalorie = true);
     try {
       await _firestore.updateUserProfile(uid, {
-        'calorieGoalActive': true,
         'dailyCalorieGoal': int.tryParse(_dailyCalCtrl.text),
         'weeklyCalorieGoal': int.tryParse(_weeklyCalCtrl.text),
         'monthlyCalorieGoal': int.tryParse(_monthlyCalCtrl.text),

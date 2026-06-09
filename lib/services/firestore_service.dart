@@ -214,6 +214,43 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Sums caloriesBurned across all sessions logged today (since local midnight)
+  // for users/{uid}. Returns 0 if no sessions exist.
+  // ---------------------------------------------------------------------------
+  Future<int> getTodaysCalories(String uid) async {
+    final now = DateTime.now();
+    final midnight = DateTime(now.year, now.month, now.day);
+
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(midnight))
+        .get();
+
+    int total = 0;
+    for (final doc in snapshot.docs) {
+      total += (doc.data()['caloriesBurned'] as num?)?.toInt() ?? 0;
+    }
+    return total;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Returns the calorie goal settings from users/{uid}:
+  //   'calorieGoalActive': bool  (default false)
+  //   'dailyCalorieGoal':  int   (default 500)
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>> getUserCalorieGoal(String uid) async {
+    final doc = await _db.collection(Collections.users).doc(uid).get();
+    final data = doc.data();
+    return {
+      'calorieGoalActive': data?['calorieGoalActive'] as bool? ?? false,
+      'dailyCalorieGoal':
+          (data?['dailyCalorieGoal'] as num?)?.toInt() ?? 500,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Returns all documents from the plans collection, each map including
   // the document id as 'id'.
   // ---------------------------------------------------------------------------

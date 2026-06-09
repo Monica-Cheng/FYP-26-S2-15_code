@@ -3,6 +3,8 @@
 // Tab 0 = Home (_HomeTab), tabs 1-4 = placeholder screens.
 // FAB shown only on Home tab; tapping shows SnackBar.
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -158,14 +160,37 @@ class _HomeTabState extends State<_HomeTab> {
 
   String? _displayName;
   bool _isLoadingName = true;
+  int _todaysCalories = 0;
+  int _dailyCalorieGoal = 500;
+  bool _calorieGoalActive = false;
 
   @override
   void initState() {
     super.initState();
-    _loadDisplayName();
+    _loadHomeData();
+    _loadCalorieData();
   }
 
-  Future<void> _loadDisplayName() async {
+  Future<void> _loadCalorieData() async {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final results = await Future.wait<dynamic>([
+        _firestoreService.getUserCalorieGoal(uid),
+        _firestoreService.getTodaysCalories(uid),
+      ]);
+      if (!mounted) return;
+      final calGoal = results[0] as Map<String, dynamic>;
+      final todaysCal = results[1] as int;
+      setState(() {
+        _calorieGoalActive = calGoal['calorieGoalActive'] as bool? ?? false;
+        _dailyCalorieGoal = calGoal['dailyCalorieGoal'] as int? ?? 500;
+        _todaysCalories = todaysCal;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _loadHomeData() async {
     final uid = _authService.getCurrentUser()?.uid;
     if (uid == null) {
       setState(() => _isLoadingName = false);
@@ -173,12 +198,11 @@ class _HomeTabState extends State<_HomeTab> {
     }
     try {
       final profile = await _firestoreService.getUserProfile(uid);
-      if (mounted) {
-        setState(() {
-          _displayName = profile?['displayName'] as String?;
-          _isLoadingName = false;
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _displayName = profile?['displayName'] as String?;
+        _isLoadingName = false;
+      });
     } catch (_) {
       if (mounted) setState(() => _isLoadingName = false);
     }
@@ -203,6 +227,16 @@ class _HomeTabState extends State<_HomeTab> {
         slivers: [
           SliverToBoxAdapter(child: _buildTopBar()),
           SliverToBoxAdapter(child: _WeekCalendar()),
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+              child: _CalorieRingCard(
+                calories: _todaysCalories,
+                goal: _dailyCalorieGoal,
+                goalActive: _calorieGoalActive,
+              ),
+            ),
+          ),
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
@@ -279,7 +313,7 @@ class _HomeTabState extends State<_HomeTab> {
           const SizedBox(width: 4),
           // Avatar → Profile screen
           GestureDetector(
-            onTap: () => context.push(Routes.profile),
+            onTap: () => context.push(Routes.profile).then((_) => _loadCalorieData()),
             child: Container(
               width: 38,
               height: 38,
@@ -426,6 +460,185 @@ class _DayCell extends StatelessWidget {
       ],
     );
   }
+}
+
+// ── Calorie ring card ─────────────────────────────────────────────────────────
+
+class _CalorieRingCard extends StatelessWidget {
+  final int calories;
+  final int goal;
+  final bool goalActive;
+
+  const _CalorieRingCard({
+    required this.calories,
+    required this.goal,
+    required this.goalActive,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final remaining = (goal - calories).clamp(0, goal);
+    final progress = (goal > 0 ? calories / goal : 0.0).clamp(0.0, 1.0);
+
+    return Container(
+      decoration: WW.cardDecoration,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          // Mode A — no goal: simple stat row
+          if (!goalActive)
+            Row(
+              children: [
+                const Icon(Icons.local_fire_department_rounded,
+                    color: WW.teal, size: 24),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    "Today's Energy",
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: WW.textSec,
+                    ),
+                  ),
+                ),
+                Text(
+                  '$calories kcal burned',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: WW.primaryDark,
+                  ),
+                ),
+              ],
+            ),
+          // Mode B — goal active: circular ring
+          if (goalActive) ...[
+            SizedBox(
+              width: 120,
+              height: 120,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  CustomPaint(
+                    size: const Size(120, 120),
+                    painter: _CalorieRingPainter(progress),
+                  ),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '$calories',
+                        style: const TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w800,
+                          color: WW.primaryDark,
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                      const Text(
+                        'kcal',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: WW.textSec,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Goal: $goal kcal/day',
+              style: const TextStyle(fontSize: 12, color: WW.textSec),
+            ),
+          ],
+          const SizedBox(height: 12),
+          // Stat chips — always shown
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _chip(Icons.fitness_center_rounded, 'Gym: $calories kcal',
+                  WW.elevated),
+              _chip(Icons.directions_run_rounded, 'Cardio: 0 kcal',
+                  WW.elevated),
+              if (goalActive)
+                _chip(Icons.flash_on_rounded, 'Left: $remaining kcal',
+                    WW.tealBg),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _chip(IconData icon, String label, Color bg) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: WW.textSec),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: WW.textSec,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CalorieRingPainter extends CustomPainter {
+  final double progress; // 0.0–1.0
+
+  const _CalorieRingPainter(this.progress);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    const strokeWidth = 12.0;
+    final radius = (size.width - strokeWidth) / 2;
+    const startAngle = -math.pi / 2; // top of circle
+
+    // Background track
+    final trackPaint = Paint()
+      ..color = WW.elevated
+      ..strokeWidth = strokeWidth
+      ..style = PaintingStyle.stroke;
+    canvas.drawCircle(center, radius, trackPaint);
+
+    // Progress arc
+    if (progress > 0) {
+      final arcPaint = Paint()
+        ..color = WW.primary
+        ..strokeWidth = strokeWidth
+        ..strokeCap = StrokeCap.round
+        ..style = PaintingStyle.stroke;
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius),
+        startAngle,
+        2 * math.pi * progress,
+        false,
+        arcPaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_CalorieRingPainter old) => old.progress != progress;
 }
 
 // ── Today's Plan card ─────────────────────────────────────────────────────────
