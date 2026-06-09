@@ -1,57 +1,17 @@
 // lib/screens/progress/progress_screen.dart
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/app_theme.dart';
+import '../../services/auth_service.dart';
+import '../../services/firestore_service.dart';
 
 // ── Hardcoded chart data ───────────────────────────────────────────────────────
 
 const List<int> _kCalData = [320, 0, 450, 0, 380, 0, 690];
 const List<int> _kGymData = [3200, 0, 4100, 0, 3800, 0, 0];
 const List<String> _kDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
-// ── Activity items ────────────────────────────────────────────────────────────
-
-class _ActivityItem {
-  final String title;
-  final String subtitle;
-  final String xp;
-  final bool isCardio;
-
-  const _ActivityItem({
-    required this.title,
-    required this.subtitle,
-    required this.xp,
-    required this.isCardio,
-  });
-}
-
-const List<_ActivityItem> _kActivities = [
-  _ActivityItem(
-    title: 'Push A',
-    subtitle: 'Today · 41 min · 18 sets · 3,240 kg',
-    xp: '280 XP',
-    isCardio: false,
-  ),
-  _ActivityItem(
-    title: 'Pull A',
-    subtitle: 'Yesterday · 38 min · 15 sets · 2,890 kg',
-    xp: '240 XP',
-    isCardio: false,
-  ),
-  _ActivityItem(
-    title: 'Morning Run',
-    subtitle: '2 days ago · 5.2 km · 28 min · 4:32/km',
-    xp: '180 XP',
-    isCardio: true,
-  ),
-  _ActivityItem(
-    title: 'Leg Day A',
-    subtitle: '3 days ago · 52 min · 20 sets · 4,100 kg',
-    xp: '320 XP',
-    isCardio: false,
-  ),
-];
 
 // ── XP events ─────────────────────────────────────────────────────────────────
 
@@ -85,14 +45,67 @@ class _ProgressScreenState extends State<ProgressScreen> {
   int _timeFilter = 0;
   int _activityFilter = 0;
 
+  List<Map<String, dynamic>> _sessions = [];
+  bool _sessionsLoading = true;
+
   static const List<String> _subtabLabels = ['Charts', 'Activities', 'XP History'];
   static const List<String> _timeLabels = ['This Week', 'This Month', 'This Year'];
   static const List<String> _actLabels = ['All', 'Gym', 'Cardio'];
 
-  List<_ActivityItem> get _filteredActivities {
-    if (_activityFilter == 0) return _kActivities;
-    final isCardio = _activityFilter == 2;
-    return _kActivities.where((a) => a.isCardio == isCardio).toList();
+  @override
+  void initState() {
+    super.initState();
+    _loadSessions();
+  }
+
+  Future<void> _loadSessions() async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) {
+      setState(() => _sessionsLoading = false);
+      return;
+    }
+    try {
+      final result = await FirestoreService().getRecentSessions(uid, limit: 20);
+      if (!mounted) return;
+      setState(() {
+        _sessions = result;
+        _sessionsLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _sessionsLoading = false);
+    }
+  }
+
+  List<Map<String, dynamic>> get _filteredSessions {
+    if (_activityFilter == 0) return _sessions;
+    final type = _activityFilter == 1 ? 'gym' : 'cardio';
+    return _sessions.where((s) => s['type'] == type).toList();
+  }
+
+  String _formatDate(Timestamp? ts) {
+    if (ts == null) return 'Recently';
+    final date = ts.toDate();
+    final now = DateTime.now();
+    final diff = now.difference(date);
+    if (diff.inDays == 0) return 'Today';
+    if (diff.inDays == 1) return 'Yesterday';
+    return '${diff.inDays} days ago';
+  }
+
+  String _formatDuration(int? seconds) {
+    if (seconds == null) return '';
+    final mins = seconds ~/ 60;
+    if (mins < 60) return '$mins min';
+    return '${mins ~/ 60}h ${mins % 60}m';
+  }
+
+  String _formatVolume(double? v) {
+    if (v == null || v == 0) return '';
+    final n = v.round();
+    if (n >= 1000) {
+      return '${n ~/ 1000},${(n % 1000).toString().padLeft(3, '0')} kg';
+    }
+    return '$n kg';
   }
 
   @override
@@ -589,17 +602,75 @@ class _ProgressScreenState extends State<ProgressScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _buildActivityFilter(),
-        Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
-            itemCount: _filteredActivities.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
-            itemBuilder: (_, i) => _ActivityCard(
-              item: _filteredActivities[i],
-            ),
-          ),
-        ),
+        Expanded(child: _buildActivitiesList()),
       ],
+    );
+  }
+
+  Widget _buildActivitiesList() {
+    if (_sessionsLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: WW.primary),
+      );
+    }
+
+    final sessions = _filteredSessions;
+
+    if (sessions.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: const [
+            Icon(Icons.fitness_center_rounded, size: 48, color: WW.textSec),
+            SizedBox(height: 12),
+            Text(
+              'No sessions yet',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: WW.text,
+              ),
+            ),
+            SizedBox(height: 4),
+            Text(
+              'Complete a workout to see your activity here',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: WW.textSec,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
+      itemCount: sessions.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      itemBuilder: (_, i) {
+        final s = sessions[i];
+        final isCardio = s['type'] == 'cardio';
+        final ts = s['date'] as Timestamp?;
+        final duration = _formatDuration(s['durationSeconds'] as int?);
+        final sets = s['totalSets'] as int? ?? 0;
+        final volume = _formatVolume((s['totalVolume'] as num?)?.toDouble());
+        final xp = (s['xpEarned'] as num?)?.toInt() ?? 0;
+
+        final parts = <String>[_formatDate(ts)];
+        if (duration.isNotEmpty) parts.add(duration);
+        if (!isCardio && sets > 0) parts.add('$sets sets');
+        if (!isCardio && volume.isNotEmpty) parts.add(volume);
+        final subtitle = parts.join(' · ');
+
+        return _ActivityCard(
+          title: s['sessionName'] as String? ?? 'Workout',
+          subtitle: subtitle,
+          xpLabel: '+$xp XP',
+          isCardio: isCardio,
+        );
+      },
     );
   }
 
@@ -741,14 +812,22 @@ class _ProgressScreenState extends State<ProgressScreen> {
 // ── Activity card ─────────────────────────────────────────────────────────────
 
 class _ActivityCard extends StatelessWidget {
-  final _ActivityItem item;
+  final String title;
+  final String subtitle;
+  final String xpLabel;
+  final bool isCardio;
 
-  const _ActivityCard({required this.item});
+  const _ActivityCard({
+    required this.title,
+    required this.subtitle,
+    required this.xpLabel,
+    required this.isCardio,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final barColor = item.isCardio ? WW.teal : WW.primary;
-    final iconColor = item.isCardio ? WW.teal : WW.primary;
+    final barColor = isCardio ? WW.teal : WW.primary;
+    final iconColor = isCardio ? WW.teal : WW.primary;
 
     return Container(
       decoration: WW.cardDecoration,
@@ -763,7 +842,7 @@ class _ActivityCard extends StatelessWidget {
             // Icon
             Padding(
               padding: const EdgeInsets.fromLTRB(10, 14, 4, 14),
-              child: item.isCardio
+              child: isCardio
                   ? Icon(Icons.directions_run_rounded,
                       color: iconColor, size: 22)
                   : Icon(Icons.fitness_center_rounded,
@@ -778,7 +857,7 @@ class _ActivityCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      item.title,
+                      title,
                       style: const TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w700,
@@ -787,7 +866,7 @@ class _ActivityCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      item.subtitle,
+                      subtitle,
                       style: const TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w500,
@@ -809,7 +888,7 @@ class _ActivityCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
-                  item.xp,
+                  xpLabel,
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
