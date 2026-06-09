@@ -258,6 +258,73 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Calculates the current workout streak for users/{uid}.
+  // Counts consecutive days (going back from today) with at least one session.
+  // If today has no session, yesterday is checked first — streak still counts.
+  // ---------------------------------------------------------------------------
+  Future<int> calculateStreak(String uid) async {
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .orderBy('date', descending: true)
+        .get();
+
+    if (snapshot.docs.isEmpty) return 0;
+
+    String _key(DateTime d) =>
+        '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+    final sessionDates = <String>{};
+    for (final doc in snapshot.docs) {
+      final ts = doc.data()['date'];
+      if (ts is Timestamp) {
+        sessionDates.add(_key(ts.toDate().toLocal()));
+      }
+    }
+
+    final now = DateTime.now();
+    // If today has no session, start counting from yesterday.
+    DateTime check =
+        sessionDates.contains(_key(now)) ? now : now.subtract(const Duration(days: 1));
+
+    if (!sessionDates.contains(_key(check))) return 0;
+
+    int streak = 0;
+    while (sessionDates.contains(_key(check))) {
+      streak++;
+      check = check.subtract(const Duration(days: 1));
+    }
+    return streak;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Returns a Set of date strings ('yyyy-MM-dd') for all sessions logged within
+  // the last [days] days for users/{uid}. Used to drive the week calendar strip.
+  // ---------------------------------------------------------------------------
+  Future<Set<String>> getSessionDates(String uid, {int days = 30}) async {
+    final cutoff = DateTime.now().subtract(Duration(days: days));
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(cutoff))
+        .get();
+
+    String _key(DateTime d) =>
+        '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+    final dates = <String>{};
+    for (final doc in snapshot.docs) {
+      final ts = doc.data()['date'];
+      if (ts is Timestamp) {
+        dates.add(_key(ts.toDate().toLocal()));
+      }
+    }
+    return dates;
+  }
+
+  // ---------------------------------------------------------------------------
   // Returns all documents from the plans collection, each map including
   // the document id as 'id'.
   // ---------------------------------------------------------------------------

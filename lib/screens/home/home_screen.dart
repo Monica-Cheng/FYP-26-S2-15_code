@@ -163,12 +163,31 @@ class _HomeTabState extends State<_HomeTab> {
   int _todaysCalories = 0;
   int _dailyCalorieGoal = 500;
   bool _calorieGoalActive = false;
+  int _streakDays = 0;
+  Set<String> _sessionDates = {};
 
   @override
   void initState() {
     super.initState();
     _loadHomeData();
     _loadCalorieData();
+    _loadStreakData();
+  }
+
+  Future<void> _loadStreakData() async {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final results = await Future.wait<dynamic>([
+        _firestoreService.calculateStreak(uid),
+        _firestoreService.getSessionDates(uid, days: 30),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _streakDays = results[0] as int;
+        _sessionDates = results[1] as Set<String>;
+      });
+    } catch (_) {}
   }
 
   Future<void> _loadCalorieData() async {
@@ -226,10 +245,15 @@ class _HomeTabState extends State<_HomeTab> {
       child: CustomScrollView(
         slivers: [
           SliverToBoxAdapter(child: _buildTopBar()),
-          SliverToBoxAdapter(child: _WeekCalendar()),
+          SliverToBoxAdapter(
+            child: _WeekCalendar(
+              sessionDates: _sessionDates,
+              streakDays: _streakDays,
+            ),
+          ),
           SliverToBoxAdapter(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
               child: _CalorieRingCard(
                 calories: _todaysCalories,
                 goal: _dailyCalorieGoal,
@@ -349,34 +373,80 @@ class _HomeTabState extends State<_HomeTab> {
 // ── Week calendar strip ───────────────────────────────────────────────────────
 
 class _WeekCalendar extends StatelessWidget {
-  const _WeekCalendar();
+  final Set<String> sessionDates;
+  final int streakDays;
+
+  const _WeekCalendar({required this.sessionDates, required this.streakDays});
+
+  static String _dateKey(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
     final today = DateTime.now();
-    // Build a 7-day strip: Mon–Sun of the current week.
     final weekday = today.weekday; // 1=Mon … 7=Sun
     final monday = today.subtract(Duration(days: weekday - 1));
-
     final days = List.generate(7, (i) => monday.add(Duration(days: i)));
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        padding: const EdgeInsets.all(14),
         decoration: WW.cardDecoration,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: days.map((day) {
-            final isToday = day.year == today.year &&
-                day.month == today.month &&
-                day.day == today.day;
-            // Mark Mon & Wed as completed (demo data).
-            final completed = (day.weekday == 1 || day.weekday == 3) &&
-                day.isBefore(today) && !isToday;
-
-            return _DayCell(day: day, isToday: isToday, isCompleted: completed);
-          }).toList(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header row: "This Week" label + streak pill
+            Row(
+              children: [
+                const Text(
+                  'This Week',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+                const Spacer(),
+                if (streakDays > 0)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: WW.tealBg,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.local_fire_department_rounded,
+                            color: WW.teal, size: 13),
+                        const SizedBox(width: 4),
+                        Text(
+                          '$streakDays day streak',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: WW.teal,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            // Day cells
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: days.map((day) {
+                final isToday = day.year == today.year &&
+                    day.month == today.month &&
+                    day.day == today.day;
+                final hasSession = sessionDates.contains(_dateKey(day));
+                return _DayCell(day: day, isToday: isToday, isCompleted: hasSession);
+              }).toList(),
+            ),
+          ],
         ),
       ),
     );
@@ -412,6 +482,7 @@ class _DayCell extends StatelessWidget {
     } else {
       bgColor = Colors.transparent;
       textColor = WW.textSec;
+      border = Border.all(color: WW.border, width: 1);
     }
 
     return Column(
@@ -445,18 +516,6 @@ class _DayCell extends StatelessWidget {
             ),
           ),
         ),
-        const SizedBox(height: 4),
-        if (isCompleted)
-          Container(
-            width: 5,
-            height: 5,
-            decoration: const BoxDecoration(
-              color: WW.teal,
-              shape: BoxShape.circle,
-            ),
-          )
-        else
-          const SizedBox(height: 5),
       ],
     );
   }
@@ -483,120 +542,129 @@ class _CalorieRingCard extends StatelessWidget {
     return Container(
       decoration: WW.cardDecoration,
       padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          // Mode A — no goal: simple stat row
-          if (!goalActive)
-            Row(
-              children: [
-                const Icon(Icons.local_fire_department_rounded,
-                    color: WW.teal, size: 24),
-                const SizedBox(width: 10),
-                const Expanded(
-                  child: Text(
-                    "Today's Energy",
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: WW.textSec,
-                    ),
-                  ),
-                ),
-                Text(
-                  '$calories kcal burned',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: WW.primaryDark,
-                  ),
-                ),
-              ],
-            ),
-          // Mode B — goal active: circular ring
-          if (goalActive) ...[
-            SizedBox(
-              width: 120,
-              height: 120,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  CustomPaint(
-                    size: const Size(120, 120),
-                    painter: _CalorieRingPainter(progress),
-                  ),
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        '$calories',
-                        style: const TextStyle(
-                          fontSize: 26,
-                          fontWeight: FontWeight.w800,
-                          color: WW.primaryDark,
-                          letterSpacing: -0.5,
-                        ),
-                      ),
-                      const Text(
-                        'kcal',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          color: WW.textSec,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Goal: $goal kcal/day',
-              style: const TextStyle(fontSize: 12, color: WW.textSec),
-            ),
-          ],
-          const SizedBox(height: 12),
-          // Stat chips — always shown
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              _chip(Icons.fitness_center_rounded, 'Gym: $calories kcal',
-                  WW.elevated),
-              _chip(Icons.directions_run_rounded, 'Cardio: 0 kcal',
-                  WW.elevated),
-              if (goalActive)
-                _chip(Icons.flash_on_rounded, 'Left: $remaining kcal',
-                    WW.tealBg),
-            ],
-          ),
-        ],
-      ),
+      child: goalActive ? _buildGoalMode(calories, goal, remaining, progress) : _buildSimpleMode(),
     );
   }
 
-  Widget _chip(IconData icon, String label, Color bg) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 13, color: WW.textSec),
-          const SizedBox(width: 5),
-          Text(
-            label,
-            style: const TextStyle(
-              fontSize: 11,
+  Widget _buildSimpleMode() {
+    return Row(
+      children: [
+        const Icon(Icons.local_fire_department_rounded, color: WW.teal, size: 24),
+        const SizedBox(width: 10),
+        const Expanded(
+          child: Text(
+            "Today's Energy",
+            style: TextStyle(
+              fontSize: 14,
               fontWeight: FontWeight.w600,
               color: WW.textSec,
             ),
           ),
-        ],
-      ),
+        ),
+        Text(
+          '$calories kcal',
+          style: const TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w800,
+            color: WW.primaryDark,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGoalMode(int calories, int goal, int remaining, double progress) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        // Ring
+        SizedBox(
+          width: 104,
+          height: 104,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              CustomPaint(
+                size: const Size(104, 104),
+                painter: _CalorieRingPainter(progress),
+              ),
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '$calories',
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: WW.primaryDark,
+                      letterSpacing: -0.5,
+                    ),
+                  ),
+                  const Text(
+                    'kcal',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                      color: WW.textSec,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 16),
+        // Info column
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                "Today's energy",
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: WW.text,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                'Goal $goal kcal',
+                style: const TextStyle(fontSize: 12, color: WW.textSec),
+              ),
+              const SizedBox(height: 10),
+              _statRow(WW.primary, 'Gym', '$calories kcal'),
+              const SizedBox(height: 6),
+              _statRow(WW.teal, 'Cardio', '0 kcal'),
+              const SizedBox(height: 6),
+              _statRow(WW.textSec, 'Left', '$remaining kcal'),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _statRow(Color dotColor, String label, String value) {
+    return Row(
+      children: [
+        Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: WW.textSec),
+          ),
+        ),
+        Text(
+          value,
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: WW.text),
+        ),
+      ],
     );
   }
 }
@@ -609,13 +677,13 @@ class _CalorieRingPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    const strokeWidth = 12.0;
+    const strokeWidth = 7.0;
     final radius = (size.width - strokeWidth) / 2;
     const startAngle = -math.pi / 2; // top of circle
 
     // Background track
     final trackPaint = Paint()
-      ..color = WW.elevated
+      ..color = WW.chipBg
       ..strokeWidth = strokeWidth
       ..style = PaintingStyle.stroke;
     canvas.drawCircle(center, radius, trackPaint);
