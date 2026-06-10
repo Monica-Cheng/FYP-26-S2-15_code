@@ -349,7 +349,7 @@ class _PlansScreenState extends State<PlansScreen> {
                   children: [
                     Expanded(
                       child: GestureDetector(
-                        onTap: () => context.go(Routes.gymSession),
+                        onTap: () => context.push(Routes.gymSession),
                         child: Container(
                           height: 42,
                           decoration: BoxDecoration(

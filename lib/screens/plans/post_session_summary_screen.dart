@@ -137,6 +137,20 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         },
       ];
 
+  static List<String> _getMusclesWorked(
+      List<Map<String, dynamic>> exercises) {
+    final counts = <String, int>{};
+    for (final e in exercises) {
+      final muscle = e['muscle']?.toString() ?? '';
+      if (muscle.isNotEmpty) {
+        counts[muscle] = (counts[muscle] ?? 0) + 1;
+      }
+    }
+    final sorted = counts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return sorted.map((entry) => entry.key).toList();
+  }
+
   ({int totalSets, double volume}) _calcStats(
       List<Map<String, dynamic>> exercises) {
     int totalSets = 0;
@@ -248,7 +262,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                       children: [
                         _buildStatsRow(elapsedSeconds, stats, caloriesBurned),
                         const SizedBox(height: 16),
-                        _buildMusclesCard(),
+                        _buildMusclesCard(exercises),
                         const SizedBox(height: 16),
                         _buildPbCard(),
                         const SizedBox(height: 16),
@@ -405,7 +419,8 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
 
   // ── Section 3 — Muscles worked ────────────────────────────────────────────
 
-  Widget _buildMusclesCard() {
+  Widget _buildMusclesCard(List<Map<String, dynamic>> exercises) {
+    final muscles = _getMusclesWorked(exercises);
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: WW.cardDecoration,
@@ -420,8 +435,56 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
               color: WW.text,
             ),
           ),
-          const SizedBox(height: 14),
-          const _MusclesDiagram(),
+          if (muscles.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: muscles.asMap().entries.map((entry) {
+                final isPrimary = entry.key < 2;
+                final color = isPrimary ? WW.primary : WW.lavender;
+                final bgColor = isPrimary ? WW.chipBg : WW.lavenderBg;
+                return Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: bgColor,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                        color: color.withValues(alpha: 0.3), width: 1),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                            color: color, shape: BoxShape.circle),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        entry.value,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: color,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: const [
+                _LegendDot(color: WW.primary, label: 'Primary'),
+                SizedBox(width: 16),
+                _LegendDot(color: WW.lavender, label: 'Secondary'),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -1122,34 +1185,6 @@ class _ConfettiBurstState extends State<_ConfettiBurst>
   }
 }
 
-// ── Muscles diagram ───────────────────────────────────────────────────────────
-
-class _MusclesDiagram extends StatelessWidget {
-  const _MusclesDiagram();
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        SizedBox(
-          width: 190,
-          height: 160,
-          child: CustomPaint(painter: _MusclesPainter()),
-        ),
-        const SizedBox(height: 12),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            _LegendDot(color: WW.primary, label: 'Primary'),
-            const SizedBox(width: 16),
-            _LegendDot(color: WW.lavender, label: 'Secondary'),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
 class _LegendDot extends StatelessWidget {
   final Color color;
   final String label;
@@ -1180,122 +1215,3 @@ class _LegendDot extends StatelessWidget {
   }
 }
 
-class _MusclesPainter extends CustomPainter {
-  const _MusclesPainter();
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final outline = Paint()
-      ..color = WW.border
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5;
-
-    // Head
-    canvas.drawOval(
-      Rect.fromLTWH(75, 2, 40, 36),
-      outline,
-    );
-
-    // Torso
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(58, 42, 74, 76),
-        const Radius.circular(8),
-      ),
-      outline,
-    );
-
-    // Left shoulder / arm
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(28, 44, 28, 72),
-        const Radius.circular(10),
-      ),
-      outline,
-    );
-
-    // Right shoulder / arm
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(134, 44, 28, 72),
-        const Radius.circular(10),
-      ),
-      outline,
-    );
-
-    // Left leg
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(60, 122, 28, 36),
-        const Radius.circular(8),
-      ),
-      outline,
-    );
-
-    // Right leg
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(102, 122, 28, 36),
-        const Radius.circular(8),
-      ),
-      outline,
-    );
-
-    // Highlights — chest (primary)
-    final chestPaint = Paint()
-      ..color = WW.primary.withValues(alpha: 0.5)
-      ..style = PaintingStyle.fill;
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(62, 48, 66, 30),
-        const Radius.circular(6),
-      ),
-      chestPaint,
-    );
-
-    // Highlights — shoulders (primary, lighter)
-    final shoulderPaint = Paint()
-      ..color = WW.primary.withValues(alpha: 0.35)
-      ..style = PaintingStyle.fill;
-    // Left shoulder
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(30, 44, 28, 18),
-        const Radius.circular(5),
-      ),
-      shoulderPaint,
-    );
-    // Right shoulder
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(132, 44, 28, 18),
-        const Radius.circular(5),
-      ),
-      shoulderPaint,
-    );
-
-    // Highlights — triceps (secondary)
-    final tricepPaint = Paint()
-      ..color = WW.lavender.withValues(alpha: 0.4)
-      ..style = PaintingStyle.fill;
-    // Left tricep
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(28, 64, 18, 34),
-        const Radius.circular(5),
-      ),
-      tricepPaint,
-    );
-    // Right tricep
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(144, 64, 18, 34),
-        const Radius.circular(5),
-      ),
-      tricepPaint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}

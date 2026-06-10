@@ -7,59 +7,6 @@ import '../../core/app_theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
-// ── Sample week data ──────────────────────────────────────────────────────────
-
-const List<Map<String, dynamic>> _kGymWeek = [
-  {
-    'day': 'Mon',
-    'session': 'Push A',
-    'exercises': [
-      'Bench Press 4×8',
-      'Overhead Press 3×10',
-      'Tricep Pushdown 3×12',
-      'Lateral Raise 3×15',
-    ],
-  },
-  {
-    'day': 'Wed',
-    'session': 'Pull A',
-    'exercises': [
-      'Pull-ups 4×8',
-      'Barbell Row 3×10',
-      'Face Pull 3×15',
-      'Bicep Curl 3×12',
-    ],
-  },
-  {
-    'day': 'Fri',
-    'session': 'Legs A',
-    'exercises': [
-      'Squat 4×8',
-      'Romanian Deadlift 3×10',
-      'Leg Press 3×12',
-      'Calf Raise 4×15',
-    ],
-  },
-];
-
-const List<Map<String, dynamic>> _kRunWeek = [
-  {
-    'day': 'Tue',
-    'session': 'Easy Run',
-    'exercises': ['20–30 min easy pace'],
-  },
-  {
-    'day': 'Thu',
-    'session': 'Intervals',
-    'exercises': ['6×400m at 5K pace'],
-  },
-  {
-    'day': 'Sat',
-    'session': 'Long Run',
-    'exercises': ['45–60 min easy pace'],
-  },
-];
-
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
 class PlanDetailScreen extends StatefulWidget {
@@ -274,9 +221,6 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
         (plan['equipment'] as List?)?.map((e) => e.toString()).toList() ?? [];
     final goals =
         (plan['goals'] as List?)?.map((e) => e.toString()).toList() ?? [];
-    final isRunning = type.toLowerCase().contains('run');
-    final sampleWeek = isRunning ? _kRunWeek : _kGymWeek;
-
     return Scaffold(
       backgroundColor: WW.bg,
       body: Stack(
@@ -298,7 +242,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                     const SizedBox(height: 14),
                     _buildOverviewCard(description),
                     const SizedBox(height: 14),
-                    _buildSampleWeek(sampleWeek),
+                    _buildSessionSchedule(plan['sessions']),
                     const SizedBox(height: 14),
                     _buildEquipmentCard(equipment),
                     if (goals.isNotEmpty) ...[
@@ -609,14 +553,29 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     );
   }
 
-  // ── Sample Week ────────────────────────────────────────────────────────────
+  // ── Plan Schedule ──────────────────────────────────────────────────────────
 
-  Widget _buildSampleWeek(List<Map<String, dynamic>> week) {
+  Widget _buildSessionSchedule(dynamic rawSessions) {
+    final sessions = (rawSessions as List<dynamic>?)
+            ?.map((s) => s as Map<String, dynamic>)
+            .toList() ??
+        [];
+
+    if (sessions.isEmpty) {
+      return _SectionCard(
+        title: 'Plan Schedule',
+        child: const Text(
+          'Session details not available yet.',
+          style: TextStyle(fontSize: 14, color: WW.textSec),
+        ),
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'Sample Week',
+          'Plan Schedule',
           style: TextStyle(
             fontSize: 15,
             fontWeight: FontWeight.w800,
@@ -625,7 +584,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
           ),
         ),
         const SizedBox(height: 10),
-        ...week.map((day) => _DayCard(dayData: day)),
+        ...sessions.map((s) => _DayCard(sessionData: s)),
       ],
     );
   }
@@ -922,8 +881,8 @@ class _SectionCard extends StatelessWidget {
 // ── Collapsible day card ───────────────────────────────────────────────────────
 
 class _DayCard extends StatefulWidget {
-  final Map<String, dynamic> dayData;
-  const _DayCard({required this.dayData});
+  final Map<String, dynamic> sessionData;
+  const _DayCard({required this.sessionData});
 
   @override
   State<_DayCard> createState() => _DayCardState();
@@ -934,11 +893,65 @@ class _DayCardState extends State<_DayCard> {
 
   @override
   Widget build(BuildContext context) {
-    final day = widget.dayData['day'] as String;
-    final session = widget.dayData['session'] as String;
-    final exercises = (widget.dayData['exercises'] as List)
-        .map((e) => e.toString())
-        .toList();
+    final isRest = widget.sessionData['isRestDay'] == true;
+    final dayLabel = widget.sessionData['day'] as String? ?? '';
+    final sessionName = widget.sessionData['name'] as String? ?? '';
+    final estimatedMinutes =
+        (widget.sessionData['estimatedMinutes'] as num?)?.toInt() ?? 0;
+    final rawExercises =
+        (widget.sessionData['exercises'] as List<dynamic>?) ?? [];
+
+    // Badge text: "Day 1" → "D1", anything else → first 3 chars
+    final badge = dayLabel.startsWith('Day ')
+        ? 'D${dayLabel.substring(4)}'
+        : dayLabel.substring(0, dayLabel.length.clamp(0, 3));
+
+    if (isRest) {
+      return Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: WW.elevated,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: WW.border, width: 0.5),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: WW.border.withValues(alpha: 0.4),
+                borderRadius: BorderRadius.circular(9),
+              ),
+              child: const Center(
+                child: Text('💤', style: TextStyle(fontSize: 16)),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  dayLabel,
+                  style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: WW.textSec),
+                ),
+                const Text(
+                  'Rest Day',
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: WW.textSec),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -968,7 +981,7 @@ class _DayCardState extends State<_DayCard> {
                     ),
                     child: Center(
                       child: Text(
-                        day,
+                        badge,
                         style: const TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w800,
@@ -983,7 +996,7 @@ class _DayCardState extends State<_DayCard> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          session,
+                          sessionName,
                           style: const TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.w700,
@@ -991,7 +1004,8 @@ class _DayCardState extends State<_DayCard> {
                           ),
                         ),
                         Text(
-                          '${exercises.length} exercises',
+                          '${rawExercises.length} exercises'
+                          '${estimatedMinutes > 0 ? ' · ${estimatedMinutes}min' : ''}',
                           style: const TextStyle(
                               fontSize: 11, color: WW.textSec),
                         ),
@@ -1008,16 +1022,25 @@ class _DayCardState extends State<_DayCard> {
               ),
             ),
           ),
-          if (_expanded) ...[
+          if (_expanded && rawExercises.isNotEmpty) ...[
             const Divider(height: 1, color: WW.border),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
               child: Column(
-                children: List.generate(exercises.length, (i) {
+                children: List.generate(rawExercises.length, (i) {
+                  final exMap =
+                      rawExercises[i] as Map<String, dynamic>;
+                  final exName =
+                      exMap['name'] as String? ?? 'Exercise';
+                  final sets =
+                      (exMap['sets'] as num?)?.toInt() ?? 3;
+                  final reps =
+                      (exMap['reps'] as num?)?.toInt() ?? 10;
+                  final tag = exMap['tag'] as String? ?? '';
                   return Container(
                     padding: const EdgeInsets.symmetric(vertical: 6),
                     decoration: BoxDecoration(
-                      border: i < exercises.length - 1
+                      border: i < rawExercises.length - 1
                           ? const Border(
                               bottom: BorderSide(
                                   color: WW.border, width: 0.5))
@@ -1034,14 +1057,47 @@ class _DayCardState extends State<_DayCard> {
                           ),
                         ),
                         const SizedBox(width: 8),
-                        Text(
-                          exercises[i],
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                            color: WW.text,
+                        Expanded(
+                          child: Text(
+                            exName,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                              color: WW.text,
+                            ),
                           ),
                         ),
+                        Text(
+                          '${sets}×${reps}',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: WW.textSec,
+                          ),
+                        ),
+                        if (tag.isNotEmpty) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 5, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: tag == 'Primary'
+                                  ? WW.chipBg
+                                  : WW.elevated,
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              tag,
+                              style: TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w700,
+                                color: tag == 'Primary'
+                                    ? WW.primary
+                                    : WW.textSec,
+                              ),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   );

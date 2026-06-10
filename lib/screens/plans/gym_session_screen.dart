@@ -12,6 +12,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
+import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
 // ── Data models ────────────────────────────────────────────────────────────────
@@ -102,6 +103,10 @@ class _GymSessionState extends State<GymSessionScreen> {
   bool _showRest = false;
   int _restSecs = 90;
   bool _isSaving = false;
+  bool _isLoadingSession = true;
+  bool _isRestDay = false;
+  String _sessionName = 'Workout';
+  int _totalSessions = 1;
 
   Timer? _elapsedTimer;
   Timer? _restTimer;
@@ -109,46 +114,93 @@ class _GymSessionState extends State<GymSessionScreen> {
   // Note controllers keyed by exercise index — persists text across exercise switches.
   final Map<int, TextEditingController> _noteControllers = {};
 
-  late final List<_ExerciseData> _exercises;
+  List<_ExerciseData> _exercises = [];
 
   @override
   void initState() {
     super.initState();
-    _exercises = [
-      _ExerciseData(
-        name: 'Bench Press',
-        muscle: 'Chest',
-        sets: List.generate(4, (i) => _SetData(
-          prev: '80kg×8',
-          type: i == 0 ? _SetType.warmup : _SetType.normal,
-        )),
-      ),
-      _ExerciseData(
-        name: 'Overhead Press',
-        muscle: 'Shoulders',
-        sets: List.generate(3, (_) => _SetData(prev: '50kg×10')),
-      ),
-      _ExerciseData(
-        name: 'Tricep Pushdown',
-        muscle: 'Triceps',
-        sets: [
-          _SetData(prev: '25kg×12'),
-          _SetData(prev: '25kg×12'),
-          _SetData(prev: '25kg×12', type: _SetType.dropSet),
-        ],
-      ),
-      _ExerciseData(
-        name: 'Lateral Raise',
-        muscle: 'Shoulders',
-        sets: List.generate(3, (_) => _SetData(prev: '10kg×15')),
-      ),
-      _ExerciseData(
-        name: 'Cable Fly',
-        muscle: 'Chest',
-        sets: List.generate(3, (_) => _SetData(prev: '15kg×12')),
-      ),
-    ];
+    _loadPlanSession();
     _startElapsedTimer();
+  }
+
+  Future<void> _loadPlanSession() async {
+    try {
+      final uid = AuthService().getCurrentUser()?.uid;
+      if (uid == null) {
+        if (mounted) setState(() => _isLoadingSession = false);
+        return;
+      }
+
+      final results = await Future.wait<Map<String, dynamic>?>([
+        FirestoreService().getUserProfile(uid),
+        FirestoreService().getTrackedPlan(uid),
+      ]);
+
+      final profile = results[0];
+      final plan = results[1];
+
+      if (plan == null) {
+        if (mounted) setState(() => _isLoadingSession = false);
+        return;
+      }
+
+      final currentDayIndex =
+          (profile?['currentDayIndex'] as num?)?.toInt() ?? 1;
+      final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
+      final total = sessions.length;
+
+      if (sessions.isEmpty) {
+        if (mounted) setState(() => _isLoadingSession = false);
+        return;
+      }
+
+      final sessionIdx = (currentDayIndex - 1) % total;
+      final session = sessions[sessionIdx] as Map<String, dynamic>;
+      final isRest = session['isRestDay'] == true;
+
+      if (isRest) {
+        if (mounted) {
+          setState(() {
+            _isRestDay = true;
+            _sessionName = session['name'] as String? ?? 'Rest';
+            _totalSessions = total;
+            _isLoadingSession = false;
+          });
+        }
+        return;
+      }
+
+      final rawExercises =
+          (session['exercises'] as List<dynamic>?) ?? [];
+      final exercises = rawExercises.map((e) {
+        final exMap = e as Map<String, dynamic>;
+        final setsCount = (exMap['sets'] as num?)?.toInt() ?? 3;
+        final restTime = (exMap['restTime'] as num?)?.toInt() ?? 90;
+        return _ExerciseData(
+          name: exMap['name'] as String? ?? 'Exercise',
+          muscle: exMap['muscle'] as String? ?? '',
+          restTime: restTime,
+          sets: List.generate(
+            setsCount,
+            (i) => _SetData(
+              prev: '—',
+              type: i == 0 ? _SetType.warmup : _SetType.normal,
+            ),
+          ),
+        );
+      }).toList();
+
+      if (mounted) {
+        setState(() {
+          _exercises = exercises;
+          _sessionName = session['name'] as String? ?? 'Workout';
+          _totalSessions = total;
+          _isLoadingSession = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isLoadingSession = false);
+    }
   }
 
   @override
@@ -245,7 +297,7 @@ class _GymSessionState extends State<GymSessionScreen> {
     setState(() => _isSaving = true);
 
     final sessionData = {
-      'sessionName': 'Push A',
+      'sessionName': _sessionName,
       'elapsedSeconds': _elapsed,
       'exercises': _exercises
           .map((e) => {
@@ -278,6 +330,8 @@ class _GymSessionState extends State<GymSessionScreen> {
           'reason': 'Completed ${sessionData['sessionName']} · $totalCompletedSets sets',
           'type': 'gym',
         });
+        await FirestoreService()
+            .markSessionComplete(uid, _totalSessions);
       } else {
         print('saveGymSession skipped: no authenticated user');
       }
@@ -420,8 +474,156 @@ class _GymSessionState extends State<GymSessionScreen> {
 
   // ── Build ───────────────────────────────────────────────────────────────────
 
+  Widget _buildRestDayScreen() {
+    return Scaffold(
+      backgroundColor: WW.bg,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Text('💤', style: TextStyle(fontSize: 64)),
+              const SizedBox(height: 20),
+              const Text(
+                'Rest Day',
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.w800,
+                  color: WW.primaryDark,
+                  letterSpacing: -0.4,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Today is a scheduled rest day. Take it easy and recover!',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: WW.textSec,
+                  height: 1.5,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 36),
+              GestureDetector(
+                onTap: () => context.push(Routes.manualActivityLog),
+                child: Container(
+                  width: double.infinity,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: WW.primary,
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: [
+                      BoxShadow(
+                        color: WW.primary.withValues(alpha: 0.35),
+                        blurRadius: 14,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: const Center(
+                    child: Text(
+                      'Log Manual Activity',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              GestureDetector(
+                onTap: () => context.pop(),
+                child: Container(
+                  width: double.infinity,
+                  height: 50,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: WW.border, width: 1.5),
+                  ),
+                  child: const Center(
+                    child: Text(
+                      'Back to Plans',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: WW.textSec,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_isLoadingSession) {
+      return Scaffold(
+        backgroundColor: WW.primaryDark,
+        body: const Center(
+          child: CircularProgressIndicator(color: Colors.white),
+        ),
+      );
+    }
+
+    if (_isRestDay) return _buildRestDayScreen();
+
+    if (_exercises.isEmpty) {
+      return Scaffold(
+        backgroundColor: WW.bg,
+        body: SafeArea(
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.fitness_center_rounded,
+                    size: 48, color: WW.textSec),
+                const SizedBox(height: 16),
+                const Text(
+                  'No active plan found',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Track a plan from the Plans tab to get started.',
+                  style: TextStyle(fontSize: 13, color: WW.textSec),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                GestureDetector(
+                  onTap: () => context.pop(),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: WW.primary,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Text(
+                      'Go Back',
+                      style: TextStyle(
+                          color: Colors.white, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Stack(
       children: [
         Scaffold(
@@ -520,9 +722,9 @@ class _GymSessionState extends State<GymSessionScreen> {
             ),
           ),
           // Session name
-          const Text(
-            'Push A',
-            style: TextStyle(
+          Text(
+            _sessionName,
+            style: const TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w700,
               color: Colors.white70,

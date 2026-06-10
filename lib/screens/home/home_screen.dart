@@ -167,6 +167,10 @@ class _HomeTabState extends State<_HomeTab> {
   Set<String> _sessionDates = {};
   String _trackedPlanName = '';
   String _trackedPlanId = '';
+  int _currentDayIndex = 1;
+  Map<String, dynamic>? _todaySession;
+  bool _todayIsRestDay = false;
+  bool _todayCompleted = false;
   StreamSubscription<DocumentSnapshot>? _userStreamSub;
 
   @override
@@ -185,16 +189,49 @@ class _HomeTabState extends State<_HomeTab> {
         .snapshots()
         .listen((doc) {
       if (doc.exists && mounted) {
+        final newPlanId =
+            doc.data()?['trackedPlanId'] as String? ?? '';
+        final newDayIndex =
+            (doc.data()?['currentDayIndex'] as num?)?.toInt() ?? 1;
+        final lastCompletedDate =
+            doc.data()?['lastCompletedDate'] as String?;
+        final today = DateTime.now().toString().substring(0, 10);
+        final shouldReload =
+            (newPlanId != _trackedPlanId || newDayIndex != _currentDayIndex) &&
+                newPlanId.isNotEmpty;
+
         setState(() {
           _trackedPlanName =
               doc.data()?['trackedPlanName'] as String? ?? '';
-          _trackedPlanId =
-              doc.data()?['trackedPlanId'] as String? ?? '';
+          _trackedPlanId = newPlanId;
+          _currentDayIndex = newDayIndex;
           _displayName =
               doc.data()?['displayName'] as String? ?? _displayName;
+          _todayCompleted = lastCompletedDate == today;
         });
+
+        if (shouldReload) _loadTodaySession(uid, newDayIndex);
       }
     });
+  }
+
+  Future<void> _loadTodaySession(String uid, int currentDayIndex) async {
+    try {
+      final plan = await _firestoreService.getTrackedPlan(uid);
+      if (plan == null || !mounted) return;
+      final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
+      if (sessions.isEmpty) return;
+      final effectiveDayIndex =
+          await _firestoreService.checkAndAdvanceDay(uid, sessions.length);
+      final sessionIdx = (effectiveDayIndex - 1) % sessions.length;
+      final session = sessions[sessionIdx] as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() {
+        _currentDayIndex = effectiveDayIndex;
+        _todaySession = session;
+        _todayIsRestDay = session['isRestDay'] == true;
+      });
+    } catch (_) {}
   }
 
   @override
@@ -223,6 +260,14 @@ class _HomeTabState extends State<_HomeTab> {
       final todaysCal = results[2] as int;
       final streak = results[3] as int;
       final sessionDates = results[4] as Set<String>;
+      final dayIndex =
+          (profile?['currentDayIndex'] as num?)?.toInt() ?? 1;
+      final trackedPlanId =
+          profile?['trackedPlanId'] as String? ?? '';
+      final lastCompletedDate =
+          profile?['lastCompletedDate'] as String?;
+      final today = DateTime.now().toString().substring(0, 10);
+
       setState(() {
         _displayName = profile?['displayName'] as String?;
         _isLoadingName = false;
@@ -231,7 +276,13 @@ class _HomeTabState extends State<_HomeTab> {
         _todaysCalories = todaysCal;
         _streakDays = streak;
         _sessionDates = sessionDates;
+        _currentDayIndex = dayIndex;
+        _todayCompleted = lastCompletedDate == today;
       });
+
+      if (trackedPlanId.isNotEmpty) {
+        _loadTodaySession(uid, dayIndex);
+      }
     } catch (_) {
       if (mounted) setState(() => _isLoadingName = false);
     }
@@ -291,6 +342,10 @@ class _HomeTabState extends State<_HomeTab> {
               child: _TodayPlanCard(
                 trackedPlanName: _trackedPlanName,
                 onGoToPlans: widget.onGoToPlans,
+                todaySession: _todaySession,
+                todayIsRestDay: _todayIsRestDay,
+                currentDayIndex: _currentDayIndex,
+                todayCompleted: _todayCompleted,
               ),
             ),
           ),
@@ -727,18 +782,62 @@ class _CalorieRingPainter extends CustomPainter {
 class _TodayPlanCard extends StatelessWidget {
   final String trackedPlanName;
   final VoidCallback? onGoToPlans;
+  final Map<String, dynamic>? todaySession;
+  final bool todayIsRestDay;
+  final int currentDayIndex;
+  final bool todayCompleted;
 
   const _TodayPlanCard({
     required this.trackedPlanName,
     this.onGoToPlans,
+    this.todaySession,
+    this.todayIsRestDay = false,
+    this.currentDayIndex = 1,
+    this.todayCompleted = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    if (trackedPlanName.isEmpty) {
-      return _buildEmptyState(context);
-    }
+    if (trackedPlanName.isEmpty) return _buildEmptyState(context);
+    if (todayIsRestDay) return _buildRestDayCard();
     return _buildPlanCard(context);
+  }
+
+  Widget _buildRestDayCard() {
+    return Container(
+      decoration: WW.cardDecoration,
+      padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
+      child: Column(
+        children: [
+          const Text('💤', style: TextStyle(fontSize: 40)),
+          const SizedBox(height: 12),
+          const Text(
+            'Rest Day',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+              color: WW.primaryDark,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            trackedPlanName,
+            style: const TextStyle(fontSize: 13, color: WW.textSec),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Recovery and rest are key to reaching your goals.',
+            style: TextStyle(
+              fontSize: 13,
+              color: WW.textSec,
+              height: 1.5,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildEmptyState(BuildContext context) {
@@ -788,6 +887,16 @@ class _TodayPlanCard extends StatelessWidget {
   }
 
   Widget _buildPlanCard(BuildContext context) {
+    final sessionName =
+        todaySession?['name'] as String? ?? '';
+    final estimatedMinutes =
+        (todaySession?['estimatedMinutes'] as num?)?.toInt() ?? 45;
+    final exercises =
+        (todaySession?['exercises'] as List<dynamic>?)
+            ?.cast<Map<String, dynamic>>() ??
+            [];
+    final estimatedCals = (estimatedMinutes * 6.5).round();
+
     return Container(
       decoration: WW.cardDecoration,
       clipBehavior: Clip.hardEdge,
@@ -801,14 +910,15 @@ class _TodayPlanCard extends StatelessWidget {
             child: Row(
               children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
                     color: WW.primary,
                     borderRadius: BorderRadius.circular(20),
                   ),
-                  child: const Text(
-                    'DAY 1',
-                    style: TextStyle(
+                  child: Text(
+                    'DAY $currentDayIndex',
+                    style: const TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w800,
                       color: Colors.white,
@@ -818,15 +928,30 @@ class _TodayPlanCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: Text(
-                    trackedPlanName,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        trackedPlanName,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (sessionName.isNotEmpty)
+                        Text(
+                          sessionName,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.white70,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
                   ),
                 ),
               ],
@@ -834,63 +959,106 @@ class _TodayPlanCard extends StatelessWidget {
           ),
 
           // Stats row
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 14, 16, 0),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
             child: Row(
               children: [
-                _StatChip(icon: Icons.timer_outlined, label: '45 min'),
-                SizedBox(width: 16),
-                _StatChip(icon: Icons.fitness_center_rounded, label: '6 exercises'),
-                SizedBox(width: 16),
-                _StatChip(icon: Icons.local_fire_department_outlined, label: '~320 kcal'),
+                _StatChip(
+                    icon: Icons.timer_outlined,
+                    label: '${estimatedMinutes}min'),
+                const SizedBox(width: 16),
+                _StatChip(
+                    icon: Icons.fitness_center_rounded,
+                    label: '${exercises.length} exercises'),
+                const SizedBox(width: 16),
+                _StatChip(
+                    icon: Icons.local_fire_department_outlined,
+                    label: '~${estimatedCals}kcal'),
               ],
             ),
           ),
 
           const SizedBox(height: 14),
-          const Divider(height: 1, color: WW.elevated, indent: 16, endIndent: 16),
+          const Divider(
+              height: 1, color: WW.elevated, indent: 16, endIndent: 16),
           const SizedBox(height: 10),
 
-          // Exercise list
-          _exerciseTile('Bench Press', '4 × 8–10 reps'),
-          _exerciseTile('Incline Dumbbell Press', '3 × 10 reps'),
-          _exerciseTile('Overhead Press', '3 × 8 reps'),
-          _exerciseTile('Lateral Raises', '3 × 15 reps'),
-          _exerciseTile('Tricep Pushdown', '3 × 12 reps'),
-          _exerciseTile('Skull Crushers', '3 × 10 reps'),
+          // Exercise list — show first 5, "+N more" if needed
+          ...exercises.take(5).map((e) {
+            final name = e['name'] as String? ?? 'Exercise';
+            final sets = (e['sets'] as num?)?.toInt() ?? 3;
+            final reps = (e['reps'] as num?)?.toInt() ?? 10;
+            return _exerciseTile(name, '$sets × $reps reps');
+          }),
+          if (exercises.length > 5)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+              child: Text(
+                '+ ${exercises.length - 5} more',
+                style: const TextStyle(fontSize: 12, color: WW.textSec),
+              ),
+            ),
 
           const SizedBox(height: 16),
 
-          // Start Workout button
+          // Start Workout / Completed today
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: GestureDetector(
-              onTap: () => context.go(Routes.gymSession),
-              child: Container(
-                height: 50,
-                decoration: BoxDecoration(
-                  color: WW.primary,
-                  borderRadius: BorderRadius.circular(14),
-                  boxShadow: [
-                    BoxShadow(
-                      color: WW.primary.withValues(alpha: 0.35),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
+            child: todayCompleted
+                ? Container(
+                    height: 50,
+                    decoration: BoxDecoration(
+                      color: WW.tealBg,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                          color: WW.teal.withValues(alpha: 0.35), width: 1),
                     ),
-                  ],
-                ),
-                child: const Center(
-                  child: Text(
-                    'Start Workout',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
+                    child: const Center(
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.check_circle_rounded,
+                              color: WW.teal, size: 18),
+                          SizedBox(width: 8),
+                          Text(
+                            'Completed today!',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: WW.teal,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                : GestureDetector(
+                    onTap: () => context.push(Routes.gymSession),
+                    child: Container(
+                      height: 50,
+                      decoration: BoxDecoration(
+                        color: WW.primary,
+                        borderRadius: BorderRadius.circular(14),
+                        boxShadow: [
+                          BoxShadow(
+                            color: WW.primary.withValues(alpha: 0.35),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: const Center(
+                        child: Text(
+                          'Start Workout',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                ),
-              ),
-            ),
           ),
         ],
       ),

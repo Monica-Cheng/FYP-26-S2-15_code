@@ -523,6 +523,50 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Records completion of today's session. Saves lastCompletedDate (yyyy-MM-dd)
+  // and lastCompletedDayIndex without changing currentDayIndex — the advance
+  // happens on the next app open via checkAndAdvanceDay.
+  // ---------------------------------------------------------------------------
+  Future<void> markSessionComplete(String uid, int totalSessions) async {
+    final doc = await _db.collection(Collections.users).doc(uid).get();
+    final currentDayIndex =
+        (doc.data()?['currentDayIndex'] as num?)?.toInt() ?? 1;
+    final today = DateTime.now().toString().substring(0, 10);
+    await _db.collection(Collections.users).doc(uid).update({
+      'lastCompletedDate': today,
+      'lastCompletedDayIndex': currentDayIndex,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Advances currentDayIndex if the last completed session was on a previous
+  // calendar day and the index has not been advanced yet.
+  // Returns the effective currentDayIndex (new value or unchanged).
+  // ---------------------------------------------------------------------------
+  Future<int> checkAndAdvanceDay(String uid, int totalSessions) async {
+    final doc = await _db.collection(Collections.users).doc(uid).get();
+    final data = doc.data() ?? {};
+    final currentDayIndex =
+        (data['currentDayIndex'] as num?)?.toInt() ?? 1;
+    final lastCompletedDate = data['lastCompletedDate'] as String?;
+    final lastCompletedDayIndex =
+        (data['lastCompletedDayIndex'] as num?)?.toInt();
+    final today = DateTime.now().toString().substring(0, 10);
+
+    if (lastCompletedDate != null &&
+        lastCompletedDate != today &&
+        lastCompletedDayIndex == currentDayIndex) {
+      final newIndex = (currentDayIndex % totalSessions) + 1;
+      await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .update({'currentDayIndex': newIndex});
+      return newIndex;
+    }
+    return currentDayIndex;
+  }
+
+  // ---------------------------------------------------------------------------
   // Fetches approved and visible business partner profiles.
   // ---------------------------------------------------------------------------
   Future<List<Map<String, dynamic>>> getBusinessPartners() async {
