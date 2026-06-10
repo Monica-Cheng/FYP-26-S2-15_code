@@ -3,9 +3,11 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
 
 import '../../core/app_theme.dart';
+import '../../core/router.dart';
 
 const List<String> _kQuickReplies = [
   'My progress this week',
@@ -212,14 +214,7 @@ class _CoachScreenState extends State<CoachScreen> {
           const Spacer(),
           // Find Professional button
           GestureDetector(
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Find a Professional coming soon'),
-                  behavior: SnackBarBehavior.floating,
-                ),
-              );
-            },
+            onTap: () => context.push(Routes.findProfessional),
             child: const Padding(
               padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               child: Text(
@@ -548,7 +543,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
                       width: 6,
                       height: 6,
                       decoration: BoxDecoration(
-                        color: WW.lavender.withOpacity(opacity),
+                        color: WW.lavender.withValues(alpha: opacity),
                         shape: BoxShape.circle,
                       ),
                       transform: Matrix4.diagonal3Values(scale, scale, 1),
@@ -614,12 +609,10 @@ class _SparklePainter extends CustomPainter {
   }
 
   double _cos(double angle) {
-    // Simple cos approximation via sin offset
     return _sin(angle + 3.14159265 / 2);
   }
 
   double _sin(double angle) {
-    // Taylor series sin(x) accurate enough for icons
     double x = angle % (2 * 3.14159265);
     if (x > 3.14159265) x -= 2 * 3.14159265;
     if (x < -3.14159265) x += 2 * 3.14159265;

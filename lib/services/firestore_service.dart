@@ -521,4 +521,18 @@ class FirestoreService {
     if (!planDoc.exists) return null;
     return {'id': planDoc.id, ...planDoc.data()!};
   }
+
+  // ---------------------------------------------------------------------------
+  // Fetches approved and visible business partner profiles.
+  // ---------------------------------------------------------------------------
+  Future<List<Map<String, dynamic>>> getBusinessPartners() async {
+    final snap = await _db
+        .collection('businessPartners')
+        .where('isApproved', isEqualTo: true)
+        .where('isVisible', isEqualTo: true)
+        .get();
+    return snap.docs
+        .map((doc) => {'id': doc.id, ...doc.data()})
+        .toList();
+  }
 }

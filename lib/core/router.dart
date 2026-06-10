@@ -22,6 +22,7 @@ import '../screens/profile/edit_profile_screen.dart';
 import '../screens/profile/profile_screen.dart';
 import '../screens/settings/health_profile_screen.dart';
 import '../screens/settings/settings_screen.dart';
+import '../screens/coach/find_professional_screen.dart';
 import '../screens/plans/plan_detail_screen.dart';
 import '../screens/progress/activity_detail_screen.dart';
 import '../screens/splash_screen.dart';
@@ -52,6 +53,7 @@ class Routes {
   static const String manualActivityLog = '/manual-activity-log';
   static const String planDetail = '/plan-detail';
   static const String activityDetail = '/activity-detail';
+  static const String findProfessional = '/find-professional';
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -146,6 +148,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.activityDetail,
         builder: (context, state) => const ActivityDetailScreen(),
+      ),
+      GoRoute(
+        path: Routes.findProfessional,
+        builder: (context, state) => const FindProfessionalScreen(),
       ),
       // Add more routes here as you build each screen
     ],
