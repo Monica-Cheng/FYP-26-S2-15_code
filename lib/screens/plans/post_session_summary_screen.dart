@@ -1,8 +1,11 @@
 // lib/screens/plans/post_session_summary_screen.dart
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:go_router/go_router.dart';
+import 'package:http/http.dart' as http;
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
@@ -51,6 +54,8 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
   bool _exercisesExpanded = false;
   late AnimationController _entranceCtrl;
   late Animation<double> _checkScale;
+  String _wiseCoachSummary = '';
+  bool _summaryLoading = true;
 
   @override
   void initState() {
@@ -63,6 +68,8 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       parent: _entranceCtrl,
       curve: const Interval(0.0, 0.7, curve: Curves.elasticOut),
     );
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _generateWiseCoachSummary());
   }
 
   @override
@@ -148,6 +155,65 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       }
     }
     return (totalSets: totalSets, volume: volume);
+  }
+
+  // ── OpenAI summary ────────────────────────────────────────────────────────
+
+  Future<void> _generateWiseCoachSummary() async {
+    final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
+    final sessionName = extra?['sessionName'] as String? ?? 'Gym Session';
+    final elapsedSeconds = extra?['elapsedSeconds'] as int? ?? 0;
+    final exercises = _parseExercises(extra?['exercises']);
+    final stats = _calcStats(exercises);
+    final durationMins = elapsedSeconds ~/ 60;
+    final caloriesBurned = stats.totalSets * 8;
+
+    final prompt =
+        'You are WiseCoach, an AI fitness coach. Generate a 2-3 sentence '
+        'post-workout summary for this gym session. Be encouraging and specific.\n'
+        'Session: $sessionName\n'
+        'Duration: $durationMins minutes\n'
+        'Sets completed: ${stats.totalSets}\n'
+        'Total volume: ${stats.volume.round()} kg\n'
+        'Calories burned: $caloriesBurned kcal\n'
+        'Keep it under 60 words. Plain text only, no markdown.';
+
+    try {
+      final response = await http.post(
+        Uri.parse('https://api.openai.com/v1/chat/completions'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization':
+              'Bearer ${dotenv.env['OPENAI_API_KEY'] ?? ''}',
+        },
+        body: jsonEncode({
+          'model': 'gpt-4o-mini',
+          'messages': [
+            {'role': 'user', 'content': prompt},
+          ],
+          'max_tokens': 150,
+          'temperature': 0.7,
+        }),
+      );
+      if (!mounted) return;
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final text =
+            data['choices'][0]['message']['content'] as String;
+        setState(() {
+          _wiseCoachSummary = text.trim();
+          _summaryLoading = false;
+        });
+      } else {
+        throw Exception('${response.statusCode}');
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _wiseCoachSummary = 'Great session! Keep up the consistency.';
+        _summaryLoading = false;
+      });
+    }
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────
@@ -397,20 +463,21 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       decoration: BoxDecoration(
         color: WW.lavenderBg,
         borderRadius: BorderRadius.circular(14),
-        border: Border(
+        border: const Border(
           left: BorderSide(color: WW.lavender, width: 3),
         ),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.auto_awesome_rounded, color: WW.lavender, size: 18),
+          const Icon(Icons.auto_awesome_rounded,
+              color: WW.lavender, size: 18),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
-                Text(
+              children: [
+                const Text(
                   'WiseCoach Insight',
                   style: TextStyle(
                     fontSize: 12,
@@ -418,16 +485,19 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                     color: WW.lavenderDark,
                   ),
                 ),
-                SizedBox(height: 4),
-                Text(
-                  'Great session! Your bench press volume is up 8% from last week. Consider adding a 5th set next session to keep progressing.',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: WW.lavenderText,
-                    height: 1.45,
+                const SizedBox(height: 8),
+                if (_summaryLoading)
+                  const _WiseCoachTypingDots()
+                else
+                  Text(
+                    _wiseCoachSummary,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: WW.lavenderText,
+                      height: 1.45,
+                    ),
                   ),
-                ),
               ],
             ),
           ),
@@ -773,6 +843,66 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
           ),
         ],
       ),
+    );
+  }
+}
+
+// ── WiseCoach typing dots ─────────────────────────────────────────────────────
+
+class _WiseCoachTypingDots extends StatefulWidget {
+  const _WiseCoachTypingDots();
+
+  @override
+  State<_WiseCoachTypingDots> createState() => _WiseCoachTypingDotsState();
+}
+
+class _WiseCoachTypingDotsState extends State<_WiseCoachTypingDots>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(3, (i) {
+        return AnimatedBuilder(
+          animation: _ctrl,
+          builder: (context, _) {
+            final phase =
+                ((_ctrl.value * 1400 - i * 160) % 1400) / 1400;
+            final t =
+                phase < 0.5 ? phase * 2 : (1.0 - phase) * 2;
+            final scale = 0.8 + 0.2 * t;
+            final opacity = 0.2 + 0.8 * t;
+            return Container(
+              margin: EdgeInsets.only(left: i == 0 ? 0 : 5),
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(
+                color: WW.lavender.withOpacity(opacity),
+                shape: BoxShape.circle,
+              ),
+              transform: Matrix4.diagonal3Values(scale, scale, 1),
+              transformAlignment: Alignment.center,
+            );
+          },
+        );
+      }),
     );
   }
 }

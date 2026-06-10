@@ -129,16 +129,19 @@ class _CoachScreenState extends State<CoachScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return ColoredBox(
-      color: WW.bg,
-      child: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            _buildTopBar(),
-            Expanded(child: _buildMessageList()),
-            _buildInputArea(),
-          ],
+    return GestureDetector(
+      onTap: () => FocusScope.of(context).unfocus(),
+      child: ColoredBox(
+        color: WW.bg,
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              _buildTopBar(),
+              Expanded(child: _buildMessageList()),
+              _buildInputArea(),
+            ],
+          ),
         ),
       ),
     );

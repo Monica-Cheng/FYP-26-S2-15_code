@@ -297,41 +297,45 @@ class _ManualActivityLogScreenState extends State<ManualActivityLogScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: WW.bg,
-      body: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            _buildTopBar(),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 120),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildHelperTip(),
-                    const SizedBox(height: 12),
-                    _buildSearchBar(),
-                    const SizedBox(height: 10),
-                    if (_selected != null) ...[
-                      _buildSelectedPill(),
-                      const SizedBox(height: 16),
-                      _buildIntensitySection(),
-                      const SizedBox(height: 20),
-                      _buildForm(),
-                      if (_estimatedCals > 0) ...[
-                        const SizedBox(height: 12),
-                        _buildCalCard(),
-                      ],
-                    ] else
-                      _buildActivityList(),
-                  ],
+      resizeToAvoidBottomInset: true,
+      body: GestureDetector(
+        onTap: () => FocusScope.of(context).unfocus(),
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              _buildTopBar(),
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildHelperTip(),
+                      const SizedBox(height: 12),
+                      _buildSearchBar(),
+                      const SizedBox(height: 10),
+                      if (_selected != null) ...[
+                        _buildSelectedPill(),
+                        const SizedBox(height: 16),
+                        _buildIntensitySection(),
+                        const SizedBox(height: 20),
+                        _buildForm(),
+                        if (_estimatedCals > 0) ...[
+                          const SizedBox(height: 12),
+                          _buildCalCard(),
+                        ],
+                      ] else
+                        _buildActivityList(),
+                      _buildStickyButton(),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
-      bottomNavigationBar: _buildStickyButton(),
     );
   }
 
@@ -876,38 +880,32 @@ class _ManualActivityLogScreenState extends State<ManualActivityLogScreen> {
       label = 'Log Activity';
     }
 
-    return Container(
-      decoration: const BoxDecoration(
-        color: WW.card,
-        border: Border(top: BorderSide(color: Color(0xFFE8EAF8), width: 0.5)),
+    return Padding(
+      padding: EdgeInsets.only(
+        top: 16,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
       ),
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          child: GestureDetector(
-            onTap: _canSave ? _save : null,
-            child: Container(
-              height: 52,
-              decoration: BoxDecoration(
-                color: bg,
-                borderRadius: BorderRadius.circular(14),
+      child: GestureDetector(
+        onTap: _canSave ? _save : null,
+        child: Container(
+          height: 52,
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (leading != null) ...[leading, const SizedBox(width: 8)],
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: fg,
+                ),
               ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  if (leading != null) ...[leading, const SizedBox(width: 8)],
-                  Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: fg,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            ],
           ),
         ),
       ),
