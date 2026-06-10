@@ -2,8 +2,10 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
@@ -740,6 +742,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
             xpLabel: 'Manual',
             isCardio: false,
             isManual: true,
+            onTap: () => context.push(Routes.activityDetail, extra: s),
           );
         }
 
@@ -761,6 +764,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
           subtitle: subtitle,
           xpLabel: '+$xp XP',
           isCardio: isCardio,
+          onTap: () => context.push(Routes.activityDetail, extra: s),
         );
       },
     );
@@ -953,6 +957,7 @@ class _ActivityCard extends StatelessWidget {
   final String xpLabel;
   final bool isCardio;
   final bool isManual;
+  final VoidCallback? onTap;
 
   const _ActivityCard({
     required this.title,
@@ -960,6 +965,7 @@ class _ActivityCard extends StatelessWidget {
     required this.xpLabel,
     required this.isCardio,
     this.isManual = false,
+    this.onTap,
   });
 
   @override
@@ -982,7 +988,9 @@ class _ActivityCard extends StatelessWidget {
       iconData = Icons.fitness_center_rounded;
     }
 
-    return Container(
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
       decoration: WW.cardDecoration,
       clipBehavior: Clip.hardEdge,
       child: IntrinsicHeight(
@@ -1049,6 +1057,7 @@ class _ActivityCard extends StatelessWidget {
           ],
         ),
       ),
+    ),
     );
   }
 }
