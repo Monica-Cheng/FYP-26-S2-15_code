@@ -185,7 +185,7 @@ class _PlansScreenState extends State<PlansScreen> {
                 iconData: Icons.auto_awesome_rounded,
                 bgColor: WW.lavenderBg,
                 iconColor: WW.lavender,
-                onTap: () => _snack('Plan Match coming soon'),
+                onTap: () => context.push(Routes.planMatch),
               ),
             ),
             const SizedBox(width: 8),
