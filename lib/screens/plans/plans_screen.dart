@@ -196,7 +196,7 @@ class _PlansScreenState extends State<PlansScreen> {
                 iconData: Icons.grid_view_rounded,
                 bgColor: WW.chipBg,
                 iconColor: WW.primary,
-                onTap: () => _snack('Explore coming soon'),
+                onTap: () => context.push(Routes.explore),
               ),
             ),
             const SizedBox(width: 8),
