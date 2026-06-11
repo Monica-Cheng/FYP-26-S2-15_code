@@ -379,7 +379,7 @@ class _PlansScreenState extends State<PlansScreen> {
                     const SizedBox(width: 10),
                     Expanded(
                       child: GestureDetector(
-                        onTap: () => _snack('Schedule coming soon'),
+                        onTap: () => context.push(Routes.planSchedule, extra: _trackedPlan),
                         child: Container(
                           height: 42,
                           decoration: BoxDecoration(

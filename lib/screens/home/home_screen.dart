@@ -171,6 +171,7 @@ class _HomeTabState extends State<_HomeTab> {
   Map<String, dynamic>? _todaySession;
   bool _todayIsRestDay = false;
   bool _todayCompleted = false;
+  bool _isSessionCompressed = false;
   StreamSubscription<DocumentSnapshot>? _userStreamSub;
 
   @override
@@ -200,6 +201,14 @@ class _HomeTabState extends State<_HomeTab> {
             (newPlanId != _trackedPlanId || newDayIndex != _currentDayIndex) &&
                 newPlanId.isNotEmpty;
 
+        final rawCompressedDays = doc.data()?['compressedDays'];
+        bool newIsCompressed = false;
+        if (rawCompressedDays is List) {
+          final compressedSet =
+              rawCompressedDays.map((d) => (d as num).toInt()).toSet();
+          newIsCompressed = compressedSet.contains(newDayIndex);
+        }
+
         setState(() {
           _trackedPlanName =
               doc.data()?['trackedPlanName'] as String? ?? '';
@@ -208,6 +217,7 @@ class _HomeTabState extends State<_HomeTab> {
           _displayName =
               doc.data()?['displayName'] as String? ?? _displayName;
           _todayCompleted = lastCompletedDate == today;
+          _isSessionCompressed = newIsCompressed;
         });
 
         if (shouldReload) _loadTodaySession(uid, newDayIndex);
@@ -268,6 +278,14 @@ class _HomeTabState extends State<_HomeTab> {
           profile?['lastCompletedDate'] as String?;
       final today = DateTime.now().toString().substring(0, 10);
 
+      final rawCompressedDays = profile?['compressedDays'];
+      bool sessionCompressed = false;
+      if (rawCompressedDays is List) {
+        final compressedSet =
+            rawCompressedDays.map((d) => (d as num).toInt()).toSet();
+        sessionCompressed = compressedSet.contains(dayIndex);
+      }
+
       setState(() {
         _displayName = profile?['displayName'] as String?;
         _isLoadingName = false;
@@ -278,6 +296,7 @@ class _HomeTabState extends State<_HomeTab> {
         _sessionDates = sessionDates;
         _currentDayIndex = dayIndex;
         _todayCompleted = lastCompletedDate == today;
+        _isSessionCompressed = sessionCompressed;
       });
 
       if (trackedPlanId.isNotEmpty) {
@@ -346,6 +365,7 @@ class _HomeTabState extends State<_HomeTab> {
                 todayIsRestDay: _todayIsRestDay,
                 currentDayIndex: _currentDayIndex,
                 todayCompleted: _todayCompleted,
+                isCompressed: _isSessionCompressed,
               ),
             ),
           ),
@@ -786,6 +806,7 @@ class _TodayPlanCard extends StatelessWidget {
   final bool todayIsRestDay;
   final int currentDayIndex;
   final bool todayCompleted;
+  final bool isCompressed;
 
   const _TodayPlanCard({
     required this.trackedPlanName,
@@ -794,6 +815,7 @@ class _TodayPlanCard extends StatelessWidget {
     this.todayIsRestDay = false,
     this.currentDayIndex = 1,
     this.todayCompleted = false,
+    this.isCompressed = false,
   });
 
   @override
@@ -891,10 +913,14 @@ class _TodayPlanCard extends StatelessWidget {
         todaySession?['name'] as String? ?? '';
     final estimatedMinutes =
         (todaySession?['estimatedMinutes'] as num?)?.toInt() ?? 45;
-    final exercises =
+    final allExercises =
         (todaySession?['exercises'] as List<dynamic>?)
             ?.cast<Map<String, dynamic>>() ??
             [];
+    // FIX 3: filter to Primary-only when session is compressed.
+    final exercises = isCompressed
+        ? allExercises.where((e) => e['tag'] == 'Primary').toList()
+        : allExercises;
     final estimatedCals = (estimatedMinutes * 6.5).round();
 
     return Container(
@@ -951,6 +977,25 @@ class _TodayPlanCard extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
+                      if (isCompressed) ...[
+                        const SizedBox(height: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: WW.lavenderBg,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Text(
+                            '⚡ Compressed session',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: WW.lavender,
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),

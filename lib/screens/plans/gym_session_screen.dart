@@ -104,6 +104,7 @@ class _GymSessionState extends State<GymSessionScreen> {
   int _restSecs = 90;
   bool _isSaving = false;
   bool _isLoadingSession = true;
+  bool _isCompressed = false;
   bool _isRestDay = false;
   String _sessionName = 'Workout';
   int _totalSessions = 1;
@@ -170,8 +171,24 @@ class _GymSessionState extends State<GymSessionScreen> {
         return;
       }
 
-      final rawExercises =
+      List<dynamic> rawExercises =
           (session['exercises'] as List<dynamic>?) ?? [];
+
+      // FIX 3: filter to Primary only if this day is in compressedDays
+      bool isCompressed = false;
+      final compressedDaysList = profile?['compressedDays'];
+      if (compressedDaysList is List) {
+        final compressedDays =
+            compressedDaysList.map((d) => (d as num).toInt()).toSet();
+        if (compressedDays.contains(currentDayIndex)) {
+          rawExercises = rawExercises.where((e) {
+            final tag = (e as Map<String, dynamic>)['tag'] as String? ?? '';
+            return tag != 'Accessory';
+          }).toList();
+          isCompressed = true;
+        }
+      }
+
       final exercises = rawExercises.map((e) {
         final exMap = e as Map<String, dynamic>;
         final setsCount = (exMap['sets'] as num?)?.toInt() ?? 3;
@@ -193,6 +210,7 @@ class _GymSessionState extends State<GymSessionScreen> {
       if (mounted) {
         setState(() {
           _exercises = exercises;
+          _isCompressed = isCompressed;
           _sessionName = session['name'] as String? ?? 'Workout';
           _totalSessions = total;
           _isLoadingSession = false;
@@ -643,6 +661,7 @@ class _GymSessionState extends State<GymSessionScreen> {
                 ),
               ),
               _buildProgressDots(),
+              if (_isCompressed) _buildCompressedBanner(),
               Expanded(
                 child: SingleChildScrollView(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
@@ -792,6 +811,31 @@ class _GymSessionState extends State<GymSessionScreen> {
           ),
           const SizedBox(width: 6),
           _RestButton(label: 'Skip', onTap: _skipRest),
+        ],
+      ),
+    );
+  }
+
+  // ── Section 2b — Compressed session banner ───────────────────────────────
+
+  Widget _buildCompressedBanner() {
+    return Container(
+      width: double.infinity,
+      color: WW.lavenderBg,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: const [
+          Icon(Icons.bolt_rounded, color: WW.lavender, size: 14),
+          SizedBox(width: 6),
+          Text(
+            'Compressed session · Primary exercises only',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: WW.lavender,
+            ),
+          ),
         ],
       ),
     );

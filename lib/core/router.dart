@@ -25,6 +25,7 @@ import '../screens/settings/settings_screen.dart';
 import '../screens/coach/find_professional_screen.dart';
 import '../screens/plans/plan_detail_screen.dart';
 import '../screens/plans/plan_match_screen.dart';
+import '../screens/plans/plan_schedule_screen.dart';
 import '../screens/progress/activity_detail_screen.dart';
 import '../screens/splash_screen.dart';
 
@@ -56,6 +57,7 @@ class Routes {
   static const String activityDetail = '/activity-detail';
   static const String findProfessional = '/find-professional';
   static const String planMatch = '/plan-match';
+  static const String planSchedule = '/plan-schedule';
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -158,6 +160,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.planMatch,
         builder: (context, state) => const PlanMatchScreen(),
+      ),
+      GoRoute(
+        path: Routes.planSchedule,
+        builder: (context, state) => const PlanScheduleScreen(),
       ),
       // Add more routes here as you build each screen
     ],
