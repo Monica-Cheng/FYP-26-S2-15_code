@@ -567,6 +567,55 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Saves a custom user-built routine to:
+  //   1. users/{uid}/customRoutines/{auto-id}  — private copy
+  //   2. plans/{auto-id}                       — discoverable plan entry
+  // ---------------------------------------------------------------------------
+  Future<void> saveCustomRoutine({
+    required String uid,
+    required String routineName,
+    required List<Map<String, dynamic>> sessions,
+    required int daysPerWeek,
+  }) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection('customRoutines')
+        .add({
+      'name': routineName,
+      'createdAt': FieldValue.serverTimestamp(),
+      'sessions': sessions,
+      'isCustom': true,
+    });
+
+    await _db.collection(Collections.plans).add({
+      'name': routineName,
+      'level': 'Custom',
+      'type': 'Gym',
+      'daysPerWeek': daysPerWeek,
+      'description': 'Custom routine created by user',
+      'isCustom': true,
+      'createdBy': uid,
+      'sessions': sessions,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> updateCustomRoutine({
+    required String planId,
+    required String routineName,
+    required List<Map<String, dynamic>> sessions,
+    required int daysPerWeek,
+  }) async {
+    await _db.collection(Collections.plans).doc(planId).update({
+      'name': routineName,
+      'sessions': sessions,
+      'daysPerWeek': daysPerWeek,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Fetches approved and visible business partner profiles.
   // ---------------------------------------------------------------------------
   Future<List<Map<String, dynamic>>> getBusinessPartners() async {

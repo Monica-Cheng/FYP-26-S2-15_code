@@ -835,8 +835,10 @@ class _ScheduleDayCard extends StatelessWidget {
                         children: List.generate(displayExercises.length, (i) {
                           final ex = displayExercises[i];
                           final name = ex['name'] as String? ?? 'Exercise';
-                          final sets = (ex['sets'] as num?)?.toInt() ?? 3;
-                          final reps = (ex['reps'] as num?)?.toInt() ?? 10;
+                          final sets = (ex['sets'] is List)
+                              ? (ex['sets'] as List).length
+                              : (ex['sets'] as num?)?.toInt() ?? 3;
+                          final reps = (ex['reps'] as num?)?.toInt() ?? 0;
                           final tag = ex['tag'] as String? ?? '';
                           final isAccessory = tag == 'Accessory';
 
@@ -1132,7 +1134,9 @@ class _CompressSheet extends StatelessWidget {
                       children: List.generate(primary.length, (i) {
                         final ex = primary[i];
                         final name = ex['name'] as String? ?? 'Exercise';
-                        final sets = (ex['sets'] as num?)?.toInt() ?? 0;
+                        final sets = (ex['sets'] is List)
+                            ? (ex['sets'] as List).length
+                            : (ex['sets'] as num?)?.toInt() ?? 0;
                         final reps = (ex['reps'] as num?)?.toInt() ?? 0;
                         return Container(
                           padding: const EdgeInsets.symmetric(vertical: 8),

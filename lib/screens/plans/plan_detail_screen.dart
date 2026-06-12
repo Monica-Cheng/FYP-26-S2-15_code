@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
@@ -215,6 +216,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     final level = plan['level'] as String? ?? 'Beginner';
     final daysPerWeek = (plan['daysPerWeek'] as num?)?.toInt() ?? 3;
     final durationWeeks = (plan['durationWeeks'] as num?)?.toInt() ?? 8;
+    final isCustom = plan['isCustom'] == true;
     final description = plan['description'] as String? ??
         'A structured training plan designed to help you reach your fitness goals through progressive overload and consistent training.';
     final equipment =
@@ -229,7 +231,8 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
             slivers: [
               SliverToBoxAdapter(
                 child: _buildHero(
-                    name, type, level, daysPerWeek, durationWeeks),
+                    name, type, level, daysPerWeek, durationWeeks,
+                    isCustom: isCustom, plan: plan),
               ),
               SliverToBoxAdapter(child: _buildInjuryNotice()),
               SliverPadding(
@@ -268,7 +271,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
   // ── Hero ───────────────────────────────────────────────────────────────────
 
   Widget _buildHero(String name, String type, String level, int daysPerWeek,
-      int durationWeeks) {
+      int durationWeeks, {required bool isCustom, required Map<String, dynamic> plan}) {
     return Container(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -303,7 +306,9 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                     ),
                   ),
                   GestureDetector(
-                    onTap: () => _snack('Save to library coming soon'),
+                    onTap: isCustom
+                        ? () => context.push(Routes.editRoutine, extra: plan)
+                        : () => _snack('Save to library coming soon'),
                     child: Container(
                       width: 34,
                       height: 34,
@@ -311,9 +316,14 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                         color: Colors.white.withOpacity(0.18),
                         borderRadius: BorderRadius.circular(17),
                       ),
-                      child: const Center(
-                        child: Icon(Icons.bookmark_border_rounded,
-                            color: Colors.white, size: 18),
+                      child: Center(
+                        child: Icon(
+                          isCustom
+                              ? Icons.edit_rounded
+                              : Icons.bookmark_border_rounded,
+                          color: Colors.white,
+                          size: 18,
+                        ),
                       ),
                     ),
                   ),
@@ -665,6 +675,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
 
   Widget _buildStickyBar(Map<String, dynamic> plan) {
     final bottomPad = MediaQuery.of(context).padding.bottom;
+    final isCustom = plan['isCustom'] == true;
 
     if (_isTracked) {
       return Container(
@@ -737,23 +748,30 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
         children: [
           Expanded(
             child: GestureDetector(
-              onTap: () => _snack('Save to library coming soon'),
+              onTap: isCustom
+                  ? () => context.push(Routes.editRoutine, extra: plan)
+                  : () => _snack('Save to library coming soon'),
               child: Container(
                 height: 50,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(13),
                   border: Border.all(color: WW.primary, width: 1.5),
                 ),
-                child: const Center(
+                child: Center(
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.bookmark_border_rounded,
-                          color: WW.primary, size: 16),
-                      SizedBox(width: 6),
+                      Icon(
+                        isCustom
+                            ? Icons.edit_rounded
+                            : Icons.bookmark_border_rounded,
+                        color: WW.primary,
+                        size: 16,
+                      ),
+                      const SizedBox(width: 6),
                       Text(
-                        'Save',
-                        style: TextStyle(
+                        isCustom ? 'Edit Routine' : 'Save',
+                        style: const TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w700,
                           color: WW.primary,
@@ -1032,10 +1050,12 @@ class _DayCardState extends State<_DayCard> {
                       rawExercises[i] as Map<String, dynamic>;
                   final exName =
                       exMap['name'] as String? ?? 'Exercise';
-                  final sets =
-                      (exMap['sets'] as num?)?.toInt() ?? 3;
+                  final setsValue = exMap['sets'];
+                  final sets = setsValue is List
+                      ? setsValue.length
+                      : (setsValue as num?)?.toInt() ?? 3;
                   final reps =
-                      (exMap['reps'] as num?)?.toInt() ?? 10;
+                      (exMap['reps'] as num?)?.toInt() ?? 0;
                   final tag = exMap['tag'] as String? ?? '';
                   return Container(
                     padding: const EdgeInsets.symmetric(vertical: 6),

@@ -207,7 +207,7 @@ class _PlansScreenState extends State<PlansScreen> {
                 iconData: Icons.edit_rounded,
                 bgColor: WW.tealBg,
                 iconColor: WW.teal,
-                onTap: () => _snack('Build coming soon'),
+                onTap: () => context.push(Routes.buildRoutine),
               ),
             ),
           ],
