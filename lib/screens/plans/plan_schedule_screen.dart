@@ -1,5 +1,7 @@
 // lib/screens/plans/plan_schedule_screen.dart
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -20,6 +22,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
   List<Map<String, dynamic>> _sessions = [];
 
   String? _uid;
+  String? _planId;
   int _currentDayIndex = 1;
   bool _breakModeActive = false;
   String? _breakEndDate;
@@ -31,11 +34,18 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
 
   final _fs = FirestoreService();
   final _auth = AuthService();
+  StreamSubscription<Map<String, dynamic>?>? _planStreamSub;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _init());
+  }
+
+  @override
+  void dispose() {
+    _planStreamSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _init() async {
@@ -45,25 +55,49 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
       return;
     }
 
+    final planId = extra['id'] as String?;
+    // Seed from extra so the screen renders immediately while the stream loads.
     _plan = extra;
     _sessions = (extra['sessions'] as List<dynamic>?)
-            ?.map((s) => s as Map<String, dynamic>)
+            ?.map((s) => Map<String, dynamic>.from(s as Map))
             .toList() ??
         [];
 
+    // Real-time subscription: auto-refreshes when the plan doc changes in
+    // Firestore without relying on initState re-running (widget stays alive
+    // in GoRouter's stack).
+    if (planId != null && planId.isNotEmpty) {
+      _planStreamSub = _fs.getPlanStream(planId).listen((data) {
+        if (data != null && mounted) {
+          setState(() {
+            _plan = data;
+            _sessions = (data['sessions'] as List<dynamic>?)
+                    ?.map((s) => Map<String, dynamic>.from(s as Map))
+                    .toList() ??
+                [];
+            if (_sessions.isNotEmpty) {
+              _selectedWeekIdx =
+                  ((_currentDayIndex - 1) ~/ 7).clamp(0, _totalWeeks - 1);
+            }
+          });
+        }
+      });
+    }
+
     _uid = _auth.getCurrentUser()?.uid;
-    if (_uid != null) {
+    _planId = planId;
+    if (_uid != null && planId != null && planId.isNotEmpty) {
       try {
-        final profile = await _fs.getUserProfile(_uid!);
+        final progress = await _fs.getPlanProgress(_uid!, planId);
         if (!mounted) return;
 
-        final rawBreakEnd = profile?['breakEndDate'] as String?;
+        final rawBreakEnd = progress?['breakEndDate'] as String?;
         final today = DateTime.now().toString().substring(0, 10);
-        bool breakActive = profile?['breakModeActive'] as bool? ?? false;
+        bool breakActive = progress?['breakModeActive'] as bool? ?? false;
 
         if (breakActive && rawBreakEnd != null && rawBreakEnd.compareTo(today) < 0) {
           breakActive = false;
-          await _fs.updateUserProfile(_uid!, {
+          await _fs.updatePlanProgress(_uid!, planId, {
             'breakModeActive': false,
             'breakEndDate': null,
             'breakStartDate': null,
@@ -71,9 +105,9 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
           });
         }
 
-        final currentDay = (profile?['currentDayIndex'] as num?)?.toInt() ?? 1;
+        final currentDay = (progress?['currentDayIndex'] as num?)?.toInt() ?? 1;
 
-        final rawCompressedDays = profile?['compressedDays'];
+        final rawCompressedDays = progress?['compressedDays'];
         Set<int> loadedCompressedDays = {};
         if (rawCompressedDays is List) {
           loadedCompressedDays =
@@ -128,9 +162,9 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
   }
 
   Future<void> _endBreak() async {
-    if (_uid == null) return;
+    if (_uid == null || _planId == null) return;
     try {
-      await _fs.updateUserProfile(_uid!, {
+      await _fs.updatePlanProgress(_uid!, _planId!, {
         'breakModeActive': false,
         'breakEndDate': null,
         'breakStartDate': null,
@@ -149,7 +183,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
   }
 
   Future<void> _startBreak() async {
-    if (_uid == null) return;
+    if (_uid == null || _planId == null) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -183,7 +217,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
       final today = DateTime.now();
       final startStr = today.toString().substring(0, 10);
       final endStr = today.add(Duration(days: _breakDays)).toString().substring(0, 10);
-      await _fs.updateUserProfile(_uid!, {
+      await _fs.updatePlanProgress(_uid!, _planId!, {
         'breakModeActive': true,
         'breakStartDate': startStr,
         'breakEndDate': endStr,
@@ -235,7 +269,6 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
       await _fs.updateUserProfile(_uid!, {
         'trackedPlanId': '',
         'trackedPlanName': '',
-        'currentDayIndex': 1,
       });
       if (mounted) context.pop();
     } catch (_) {
@@ -255,10 +288,10 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
         session: session,
         onConfirm: (_) async {
           Navigator.of(ctx).pop();
-          if (_uid != null) {
+          if (_uid != null && _planId != null) {
             final updated = {..._compressedDays, dayIndex};
             setState(() => _compressedDays = updated);
-            await _fs.updateUserProfile(_uid!, {
+            await _fs.updatePlanProgress(_uid!, _planId!, {
               'compressedDays': updated.toList(),
             });
           }
@@ -269,16 +302,93 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
   }
 
   Future<void> _restoreDaySession(int dayIndex) async {
-    if (_uid == null) return;
+    if (_uid == null || _planId == null) return;
     setState(() => _compressedDays.remove(dayIndex));
     try {
-      await _fs.updateUserProfile(_uid!, {
+      await _fs.updatePlanProgress(_uid!, _planId!, {
         'compressedDays': _compressedDays.toList(),
       });
       if (mounted) _snack('Session restored to full workout');
     } catch (_) {
       if (mounted) _snack('Something went wrong. Please try again.');
     }
+  }
+
+  Future<void> _restartPlan() async {
+    if (_uid == null || _planId == null) return;
+    await _fs.updatePlanProgress(_uid!, _planId!, {
+      'currentDayIndex': 1,
+      'lastCompletedDate': '',
+      'lastCompletedDayIndex': 0,
+      'compressedDays': [],
+    });
+    if (!mounted) return;
+    setState(() {
+      _currentDayIndex = 1;
+      _compressedDays = {};
+      _selectedWeekIdx = 0;
+    });
+    _snack('Plan restarted from Day 1.');
+  }
+
+  Widget _buildRestartButton() {
+    return SizedBox(
+      width: double.infinity,
+      height: 48,
+      child: OutlinedButton(
+        onPressed: () async {
+          final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              backgroundColor: WW.card,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
+              title: const Text(
+                'Restart Plan?',
+                style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text),
+              ),
+              content: const Text(
+                'This will reset your progress back to Day 1. Your session history will not be deleted.',
+                style: TextStyle(fontSize: 14, color: WW.textSec),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancel',
+                      style: TextStyle(color: WW.textSec)),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  child: const Text(
+                    'Restart',
+                    style: TextStyle(
+                        color: Color(0xFFEF4444),
+                        fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+          );
+          if (confirmed == true) await _restartPlan();
+        },
+        style: OutlinedButton.styleFrom(
+          side: const BorderSide(color: Color(0xFFEF4444), width: 1.5),
+          foregroundColor: const Color(0xFFEF4444),
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(13)),
+        ),
+        child: const Text(
+          'Restart from Day 1',
+          style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFFEF4444)),
+        ),
+      ),
+    );
   }
 
   @override
@@ -368,6 +478,8 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
           const SizedBox(height: 8),
           _buildBreakModeCard(),
           const SizedBox(height: 16),
+          _buildRestartButton(),
+          const SizedBox(height: 12),
           _buildStopTrackingButton(),
         ],
       ),

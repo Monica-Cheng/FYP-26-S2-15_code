@@ -2,6 +2,9 @@
 // Plans Hub — Start Cardio CTA, Choose a Way to Train cards,
 // Tracked Plan card, and All Plans vertical list.
 
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -32,20 +35,53 @@ class _PlansScreenState extends State<PlansScreen> {
   bool _isLoading = true;
   Map<String, dynamic>? _trackedPlan;
   bool _trackedPlanLoading = true;
+  StreamSubscription<DocumentSnapshot>? _userDocSub;
 
   @override
   void initState() {
     super.initState();
     _loadPlans();
     _loadTrackedPlan();
+    _startUserDocStream();
+  }
+
+  @override
+  void dispose() {
+    _userDocSub?.cancel();
+    super.dispose();
+  }
+
+  void _startUserDocStream() {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    _userDocSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .snapshots()
+        .skip(1) // skip initial snapshot — initState already called _loadPlans()
+        .listen((snap) {
+      if (mounted) _loadPlans();
+    });
   }
 
   Future<void> _loadPlans() async {
     try {
       final plans = await _firestoreService.getPlans();
+      final uid = _authService.getCurrentUser()?.uid;
+      List<String> savedIds = [];
+      if (uid != null) {
+        savedIds = await _firestoreService.getSavedPlanIds(uid);
+      }
+      final filtered = plans.where((p) {
+        if (p['isCustom'] == true) {
+          return (p['createdBy'] as String?) == uid;
+        }
+        final id = p['id'] as String? ?? '';
+        return savedIds.contains(id);
+      }).toList();
       if (mounted) {
         setState(() {
-          _plans = plans.isNotEmpty ? plans : _kFallbackPlans;
+          _plans = filtered;
           _isLoading = false;
         });
       }
@@ -127,7 +163,7 @@ class _PlansScreenState extends State<PlansScreen> {
 
   Widget _buildStartCardioButton() {
     return GestureDetector(
-      onTap: () => _snack('Cardio tracking coming soon'),
+      onTap: () => context.push(Routes.cardioSetup),
       child: Container(
         height: 52,
         decoration: BoxDecoration(
@@ -207,7 +243,9 @@ class _PlansScreenState extends State<PlansScreen> {
                 iconData: Icons.edit_rounded,
                 bgColor: WW.tealBg,
                 iconColor: WW.teal,
-                onTap: () => context.push(Routes.buildRoutine),
+                onTap: () => context
+                    .push(Routes.buildRoutine)
+                    .then((_) => _loadPlans()),
               ),
             ),
           ],
@@ -467,7 +505,10 @@ class _PlansScreenState extends State<PlansScreen> {
                 chipBgColor: isCustom ? WW.tealBg : null,
                 onTap: () => context
                     .push(Routes.planDetail, extra: plan)
-                    .then((_) => _loadTrackedPlan()),
+                    .then((_) {
+                      _loadTrackedPlan();
+                      _loadPlans();
+                    }),
               ),
             );
           }),

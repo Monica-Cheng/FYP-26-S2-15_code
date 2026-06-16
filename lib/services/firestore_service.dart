@@ -8,6 +8,7 @@ import '../core/constants.dart';
 
 class FirestoreService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+  static const _planProgress = 'planProgress';
 
   // ---------------------------------------------------------------------------
   // Creates or merges a user document at users/{uid}.
@@ -480,6 +481,44 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Returns a single plan document by id, or null if it does not exist.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>?> getPlan(String planId) async {
+    final doc = await _db.collection(Collections.plans).doc(planId).get();
+    if (!doc.exists) return null;
+    return {'id': doc.id, ...doc.data()!};
+  }
+
+  Stream<Map<String, dynamic>?> getPlanStream(String planId) {
+    return _db
+        .collection(Collections.plans)
+        .doc(planId)
+        .snapshots()
+        .map((snap) {
+      if (!snap.exists) return null;
+      return {'id': snap.id, ...snap.data()!};
+    });
+  }
+
+  static List<Map<String, dynamic>> parseExerciseSets(
+      dynamic rawSets, int fallbackCount) {
+    if (rawSets is List) {
+      return rawSets.map((s) => Map<String, dynamic>.from(s as Map)).toList();
+    }
+    final count = (rawSets as num?)?.toInt() ?? fallbackCount;
+    return List.generate(
+      count,
+      (_) => {
+        'kg': 0.0,
+        'reps': 10,
+        'done': false,
+        'type': 'normal',
+        'restTime': 60,
+      },
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // Returns all documents from the plans collection, each map including
   // the document id as 'id'.
   // ---------------------------------------------------------------------------
@@ -491,7 +530,73 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
-  // Sets the user's tracked plan, recording start date and resetting progress.
+  // planProgress subcollection helpers — per-plan progress isolation.
+  // ---------------------------------------------------------------------------
+
+  Future<void> initPlanProgress(String uid, String planId) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_planProgress)
+        .doc(planId)
+        .set({
+      'planId': planId,
+      'currentDayIndex': 1,
+      'lastCompletedDate': '',
+      'lastCompletedDayIndex': 0,
+      'compressedDays': [],
+      'breakModeActive': false,
+      'breakStartDate': null,
+      'breakEndDate': null,
+      'breakDays': 3,
+      'trackingStartDate': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<Map<String, dynamic>?> getPlanProgress(
+      String uid, String planId) async {
+    final doc = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_planProgress)
+        .doc(planId)
+        .get();
+    if (doc.exists) return doc.data();
+    await initPlanProgress(uid, planId);
+    return {
+      'planId': planId,
+      'currentDayIndex': 1,
+      'lastCompletedDate': '',
+      'compressedDays': [],
+      'breakModeActive': false,
+      'trackingStartDate': null,
+    };
+  }
+
+  Stream<Map<String, dynamic>?> getPlanProgressStream(
+      String uid, String planId) {
+    return _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_planProgress)
+        .doc(planId)
+        .snapshots()
+        .map((snap) => snap.exists ? snap.data() : null);
+  }
+
+  Future<void> updatePlanProgress(
+      String uid, String planId, Map<String, dynamic> fields) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_planProgress)
+        .doc(planId)
+        .set(fields, SetOptions(merge: true));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sets the user's tracked plan. Progress is stored per-plan in the
+  // planProgress subcollection; only trackedPlanId/Name live on the user doc.
   // ---------------------------------------------------------------------------
   Future<void> trackPlan(
     String uid,
@@ -501,9 +606,8 @@ class FirestoreService {
     await _db.collection(Collections.users).doc(uid).update({
       'trackedPlanId': planId,
       'trackedPlanName': planName,
-      'trackingStartDate': FieldValue.serverTimestamp(),
-      'currentDayIndex': 1,
     });
+    await initPlanProgress(uid, planId);
   }
 
   // ---------------------------------------------------------------------------
@@ -527,12 +631,12 @@ class FirestoreService {
   // and lastCompletedDayIndex without changing currentDayIndex — the advance
   // happens on the next app open via checkAndAdvanceDay.
   // ---------------------------------------------------------------------------
-  Future<void> markSessionComplete(String uid, int totalSessions) async {
-    final doc = await _db.collection(Collections.users).doc(uid).get();
+  Future<void> markSessionComplete(String uid, String planId) async {
+    final progress = await getPlanProgress(uid, planId);
     final currentDayIndex =
-        (doc.data()?['currentDayIndex'] as num?)?.toInt() ?? 1;
+        (progress?['currentDayIndex'] as num?)?.toInt() ?? 1;
     final today = DateTime.now().toString().substring(0, 10);
-    await _db.collection(Collections.users).doc(uid).update({
+    await updatePlanProgress(uid, planId, {
       'lastCompletedDate': today,
       'lastCompletedDayIndex': currentDayIndex,
     });
@@ -543,9 +647,10 @@ class FirestoreService {
   // calendar day and the index has not been advanced yet.
   // Returns the effective currentDayIndex (new value or unchanged).
   // ---------------------------------------------------------------------------
-  Future<int> checkAndAdvanceDay(String uid, int totalSessions) async {
-    final doc = await _db.collection(Collections.users).doc(uid).get();
-    final data = doc.data() ?? {};
+  Future<int> checkAndAdvanceDay(
+      String uid, int totalSessions, String planId) async {
+    final progress = await getPlanProgress(uid, planId);
+    final data = progress ?? {};
     final currentDayIndex =
         (data['currentDayIndex'] as num?)?.toInt() ?? 1;
     final lastCompletedDate = data['lastCompletedDate'] as String?;
@@ -554,13 +659,11 @@ class FirestoreService {
     final today = DateTime.now().toString().substring(0, 10);
 
     if (lastCompletedDate != null &&
+        lastCompletedDate.isNotEmpty &&
         lastCompletedDate != today &&
         lastCompletedDayIndex == currentDayIndex) {
       final newIndex = (currentDayIndex % totalSessions) + 1;
-      await _db
-          .collection(Collections.users)
-          .doc(uid)
-          .update({'currentDayIndex': newIndex});
+      await updatePlanProgress(uid, planId, {'currentDayIndex': newIndex});
       return newIndex;
     }
     return currentDayIndex;
@@ -612,6 +715,158 @@ class FirestoreService {
       'sessions': sessions,
       'daysPerWeek': daysPerWeek,
       'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Deletes a custom plan from plans/{planId}, matching customRoutines docs
+  // by name, and planProgress/{planId} if it exists.
+  // ---------------------------------------------------------------------------
+  Future<void> deleteCustomPlan(
+      String uid, String planId, String planName) async {
+    await _db.collection(Collections.plans).doc(planId).delete();
+
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection('customRoutines')
+        .where('name', isEqualTo: planName)
+        .get();
+    for (final doc in snapshot.docs) {
+      await doc.reference.delete();
+    }
+
+    try {
+      await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .collection('planProgress')
+          .doc(planId)
+          .delete();
+    } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------------------
+  // Saves/unsaves an Explore plan to the user's saved plan list.
+  // ---------------------------------------------------------------------------
+  Future<void> saveExplorePlan(String uid, String planId) async {
+    await _db.collection(Collections.users).doc(uid).update({
+      'savedPlanIds': FieldValue.arrayUnion([planId]),
+    });
+  }
+
+  Future<void> unsaveExplorePlan(String uid, String planId) async {
+    await _db.collection(Collections.users).doc(uid).update({
+      'savedPlanIds': FieldValue.arrayRemove([planId]),
+    });
+  }
+
+  Future<List<String>> getSavedPlanIds(String uid) async {
+    final doc = await _db.collection(Collections.users).doc(uid).get();
+    final data = doc.data();
+    if (data == null) return [];
+    final raw = data['savedPlanIds'];
+    if (raw is List) return raw.map((e) => e.toString()).toList();
+    return [];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sets/clears a one-time override day index in planProgress.
+  // Used by Start buttons on day cards to open a specific session day.
+  // ---------------------------------------------------------------------------
+  Future<void> setOverrideDayIndex(
+      String uid, String planId, int dayIndex) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_planProgress)
+        .doc(planId)
+        .set({'overrideDayIndex': dayIndex}, SetOptions(merge: true));
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .update({
+          'overridePlanId': planId,
+          'overrideDayIndex': dayIndex,
+        });
+  }
+
+  Future<void> clearOverrideDayIndex(String uid, String planId) async {
+    try {
+      await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .collection(_planProgress)
+          .doc(planId)
+          .update({'overrideDayIndex': FieldValue.delete()});
+    } catch (_) {}
+    try {
+      await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .update({
+            'overridePlanId': FieldValue.delete(),
+            'overrideDayIndex': FieldValue.delete(),
+          });
+    } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------------------
+  // Writes a missed session record to users/{uid}/missedSessions/{yesterday}.
+  // Uses yesterday's date as the doc id so duplicate checks are O(1).
+  // ---------------------------------------------------------------------------
+  Future<void> logMissedSession(
+      String uid, String planId, int dayIndex, String reason,
+      {String? date}) async {
+    final targetDate = date ??
+        DateTime.now()
+            .subtract(const Duration(days: 1))
+            .toString()
+            .substring(0, 10);
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection('missedSessions')
+        .doc(targetDate)
+        .set({
+      'reason': reason,
+      'planId': planId,
+      'dayIndex': dayIndex,
+      'date': targetDate,
+      'timestamp': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Saves a completed cardio session to users/{uid}/sessions/{auto-id}.
+  // XP is awarded at 0.5× calories, clamped to 20–500.
+  // ---------------------------------------------------------------------------
+  Future<void> saveCardioSession({
+    required String uid,
+    required String activity,
+    required int durationSeconds,
+    required int caloriesBurned,
+    String mode = 'indoor',
+  }) async {
+    final xpEarned = (caloriesBurned * 0.5).round().clamp(20, 500);
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .add({
+      'type': 'cardio',
+      'sessionName': '$activity · ${mode == 'indoor' ? 'Indoor' : 'Outdoor'}',
+      'activity': activity,
+      'mode': mode,
+      'date': FieldValue.serverTimestamp(),
+      'createdAt': FieldValue.serverTimestamp(),
+      'durationSeconds': durationSeconds,
+      'caloriesBurned': caloriesBurned,
+      'xpEarned': xpEarned,
+      'isManuallyLogged': false,
+      'exercises': [],
+      'totalSets': 0,
+      'totalVolume': 0.0,
     });
   }
 

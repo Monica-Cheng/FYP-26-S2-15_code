@@ -1,5 +1,7 @@
 // lib/screens/plans/plan_detail_screen.dart
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -21,16 +23,43 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
   bool _overviewExpanded = false;
   bool _isTracking = false;
   bool _isTracked = false;
+  bool _isSaved = false;
+  bool _fromExplore = false;
+  Map<String, dynamic>? _planData;
+  StreamSubscription<Map<String, dynamic>?>? _planStreamSub;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _checkTrackedState());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
+      if (extra == null) return;
+      if (mounted) {
+        setState(() {
+          _planData = extra;
+          _fromExplore = (extra['fromExplore'] as bool?) ?? false;
+        });
+      }
+      final planId = extra['id'] as String?;
+      if (planId != null && planId.isNotEmpty) {
+        _planStreamSub =
+            FirestoreService().getPlanStream(planId).listen((data) {
+          if (data != null && mounted) setState(() => _planData = data);
+        });
+      }
+      _checkTrackedState();
+      _checkSavedState();
+    });
+  }
+
+  @override
+  void dispose() {
+    _planStreamSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _checkTrackedState() async {
-    final plan = GoRouterState.of(context).extra as Map<String, dynamic>?;
-    final planId = plan?['id'] as String?;
+    final planId = _planData?['id'] as String?;
     if (planId == null || planId.isEmpty) return;
     final uid = AuthService().getCurrentUser()?.uid;
     if (uid == null) return;
@@ -162,9 +191,154 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     setState(() => _isTracked = false);
   }
 
+  Future<void> _handleDeleteCustomPlan(
+      Map<String, dynamic> plan) async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    final planId = plan['id'] as String? ?? '';
+    final planName = plan['name'] as String? ?? '';
+    if (planId.isEmpty) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Delete Routine?',
+          style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w700,
+              color: WW.text),
+        ),
+        content: const Text(
+          'This will permanently delete this routine. '
+          'This cannot be undone.',
+          style: TextStyle(fontSize: 14, color: WW.textSec),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel',
+                style: TextStyle(color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Delete',
+              style: TextStyle(
+                color: Color(0xFFEF4444),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
+    await FirestoreService().deleteCustomPlan(uid, planId, planName);
+    if (!mounted) return;
+    _snack('Routine deleted.');
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (!mounted) return;
+    context.pop();
+  }
+
+  Future<void> _handleUnsaveExplorePlan(
+      Map<String, dynamic> plan) async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    final planId = plan['id'] as String? ?? '';
+    if (planId.isEmpty) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Remove from My Plans?',
+          style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w700,
+              color: WW.text),
+        ),
+        content: const Text(
+          'This plan will be removed from your saved plans.',
+          style: TextStyle(fontSize: 14, color: WW.textSec),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel',
+                style: TextStyle(color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Remove',
+              style: TextStyle(
+                color: Color(0xFFEF4444),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
+    await FirestoreService().unsaveExplorePlan(uid, planId);
+    if (!mounted) return;
+    setState(() => _isSaved = false);
+    _snack('Removed from My Plans.');
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (!mounted) return;
+    context.pop();
+  }
+
+  Future<void> _handleEditRoutine(Map<String, dynamic> plan) async {
+    await context.push<bool>(Routes.editRoutine, extra: plan);
+    // Stream subscription auto-updates _planData when Firestore changes.
+  }
+
+  Future<void> _checkSavedState() async {
+    final planId = _planData?['id'] as String?;
+    if (planId == null || planId.isEmpty) return;
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    final ids = await FirestoreService().getSavedPlanIds(uid);
+    if (!mounted) return;
+    setState(() => _isSaved = ids.contains(planId));
+  }
+
+  Future<void> _handleSavePlan(Map<String, dynamic> plan) async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    final planId = plan['id'] as String? ?? '';
+    if (planId.isEmpty) return;
+    await FirestoreService().saveExplorePlan(uid, planId);
+    if (!mounted) return;
+    setState(() => _isSaved = true);
+    _snack('Plan saved to My Plans.');
+  }
+
+  Future<void> _onStartDay(int dayIndex) async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    final planId = _planData?['id'] as String? ?? '';
+    if (planId.isEmpty) return;
+    await FirestoreService().setOverrideDayIndex(uid, planId, dayIndex);
+    if (!mounted) return;
+    context.push(Routes.gymSession);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final plan = GoRouterState.of(context).extra as Map<String, dynamic>?;
+    final plan = _planData ?? (GoRouterState.of(context).extra as Map<String, dynamic>?);
 
     if (plan == null) {
       return Scaffold(
@@ -223,6 +397,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
         (plan['equipment'] as List?)?.map((e) => e.toString()).toList() ?? [];
     final goals =
         (plan['goals'] as List?)?.map((e) => e.toString()).toList() ?? [];
+    final designedBy = plan['designedBy'] as Map<String, dynamic>?;
     return Scaffold(
       backgroundColor: WW.bg,
       body: Stack(
@@ -234,23 +409,33 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                     name, type, level, daysPerWeek, durationWeeks,
                     isCustom: isCustom, plan: plan),
               ),
-              SliverToBoxAdapter(child: _buildInjuryNotice()),
+              if (!_fromExplore && !isCustom)
+                SliverToBoxAdapter(
+                    child: _buildShortDescription(description, plan)),
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 110),
                 sliver: SliverList(
                   delegate: SliverChildListDelegate([
-                    _buildBestForCard(description),
-                    const SizedBox(height: 14),
-                    _buildExperienceLevelCard(level),
-                    const SizedBox(height: 14),
-                    _buildOverviewCard(description),
-                    const SizedBox(height: 14),
-                    _buildSessionSchedule(plan['sessions']),
-                    const SizedBox(height: 14),
-                    _buildEquipmentCard(equipment),
-                    if (goals.isNotEmpty) ...[
+                    if (_fromExplore) ...[
+                      _buildBestForCard(description),
                       const SizedBox(height: 14),
-                      _buildGoalsSection(goals),
+                      _buildExperienceLevelCard(level),
+                      const SizedBox(height: 14),
+                      _buildOverviewCard(description),
+                      const SizedBox(height: 14),
+                    ],
+                    if (designedBy != null) ...[
+                      _buildCoachCard(designedBy),
+                      const SizedBox(height: 14),
+                    ],
+                    _buildSessionSchedule(plan['sessions']),
+                    if (_fromExplore) ...[
+                      const SizedBox(height: 14),
+                      _buildEquipmentCard(equipment),
+                      if (goals.isNotEmpty) ...[
+                        const SizedBox(height: 14),
+                        _buildGoalsSection(goals),
+                      ],
                     ],
                   ]),
                 ),
@@ -305,28 +490,55 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                       ),
                     ),
                   ),
-                  GestureDetector(
-                    onTap: isCustom
-                        ? () => context.push(Routes.editRoutine, extra: plan)
-                        : () => _snack('Save to library coming soon'),
-                    child: Container(
-                      width: 34,
-                      height: 34,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.18),
-                        borderRadius: BorderRadius.circular(17),
-                      ),
-                      child: Center(
-                        child: Icon(
-                          isCustom
-                              ? Icons.edit_rounded
-                              : Icons.bookmark_border_rounded,
-                          color: Colors.white,
-                          size: 18,
+                  if (_fromExplore)
+                    GestureDetector(
+                      onTap: isCustom
+                          ? () => _handleEditRoutine(plan)
+                          : () => _snack('Save to library coming soon'),
+                      child: Container(
+                        width: 34,
+                        height: 34,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.18),
+                          borderRadius: BorderRadius.circular(17),
+                        ),
+                        child: Center(
+                          child: Icon(
+                            isCustom
+                                ? Icons.edit_rounded
+                                : Icons.bookmark_border_rounded,
+                            color: Colors.white,
+                            size: 18,
+                          ),
                         ),
                       ),
-                    ),
-                  ),
+                    )
+                  else if (!_isTracked && !isCustom)
+                    GestureDetector(
+                      onTap: _isTracking
+                          ? null
+                          : () => _handleTrackPlan(plan),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                              color: Colors.white.withOpacity(0.6),
+                              width: 1.5),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: const Text(
+                          'Track',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    )
+                  else
+                    const SizedBox(width: 34),
                 ],
               ),
             ),
@@ -346,87 +558,73 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                 ),
               ),
             ),
-            const SizedBox(height: 8),
-            // Certified row
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  width: 22,
-                  height: 22,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.25),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Center(
-                    child: Icon(Icons.verified_rounded,
-                        color: Colors.white, size: 12),
-                  ),
+            if (isCustom) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(20),
                 ),
-                const SizedBox(width: 6),
-                const Text(
-                  'WiseWorkout Certified',
+                child: const Text(
+                  'Custom Routine',
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
-                    color: Colors.white70,
+                    color: Colors.white,
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            // Tag chips
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Wrap(
-                alignment: WrapAlignment.center,
-                spacing: 6,
-                runSpacing: 6,
+              ),
+              const SizedBox(height: 20),
+            ] else ...[
+              const SizedBox(height: 8),
+              // Certified row
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  _HeroChip('$daysPerWeek days/wk'),
-                  _HeroChip('${durationWeeks}w programme'),
-                  _HeroChip(level),
-                  _HeroChip(type),
+                  Container(
+                    width: 22,
+                    height: 22,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.25),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Center(
+                      child: Icon(Icons.verified_rounded,
+                          color: Colors.white, size: 12),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  const Text(
+                    'WiseWorkout Certified',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white70,
+                    ),
+                  ),
                 ],
               ),
-            ),
-            const SizedBox(height: 20),
+              const SizedBox(height: 14),
+              // Tag chips
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    _HeroChip('$daysPerWeek days/wk'),
+                    _HeroChip('${durationWeeks}w programme'),
+                    _HeroChip(level),
+                    _HeroChip(type),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+            ],
           ],
         ),
-      ),
-    );
-  }
-
-  // ── Injury notice ──────────────────────────────────────────────────────────
-
-  Widget _buildInjuryNotice() {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 14, 16, 0),
-      padding: const EdgeInsets.fromLTRB(12, 11, 12, 11),
-      decoration: BoxDecoration(
-        color: WW.lavenderBg,
-        borderRadius: BorderRadius.circular(12),
-        border: const Border(
-          left: BorderSide(color: WW.lavender, width: 3),
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: const [
-          Icon(Icons.auto_awesome_rounded, color: WW.lavender, size: 16),
-          SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              'Some exercises adjusted for your health profile. Shoulder exercises replaced with safer alternatives.',
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: WW.lavenderText,
-                height: 1.45,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -563,6 +761,98 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     );
   }
 
+  // ── Short description (saved plan view) ───────────────────────────────────
+
+  Widget _buildShortDescription(
+      String description, Map<String, dynamic> plan) {
+    final short = plan['shortDescription'] as String?;
+    final text = short ??
+        (description.length > 120
+            ? '${description.substring(0, 120)}...'
+            : description);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+      child: Text(
+        text,
+        style: const TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w400,
+          color: WW.textSec,
+        ),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+
+  // ── Designed by coach card ─────────────────────────────────────────────────
+
+  Widget _buildCoachCard(Map<String, dynamic> designedBy) {
+    final name = designedBy['name'] as String? ?? '';
+    final title = designedBy['title'] as String? ?? '';
+    final quote = designedBy['quote'] as String?;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 4),
+      padding: const EdgeInsets.all(16),
+      decoration: WW.cardDecoration,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const CircleAvatar(
+            radius: 24,
+            backgroundColor: WW.chipBg,
+            child: Icon(Icons.person_rounded, color: WW.primary, size: 24),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Designed with',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                    color: WW.textSec,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  name,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: WW.textSec,
+                  ),
+                ),
+                if (quote != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    '"$quote"',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: WW.textSec,
+                      fontStyle: FontStyle.italic,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Plan Schedule ──────────────────────────────────────────────────────────
 
   Widget _buildSessionSchedule(dynamic rawSessions) {
@@ -594,7 +884,17 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
           ),
         ),
         const SizedBox(height: 10),
-        ...sessions.map((s) => _DayCard(sessionData: s)),
+        ...sessions.asMap().entries.map((entry) {
+          final idx = entry.key;
+          final s = entry.value;
+          final dayNumber =
+              (s['dayNumber'] as num?)?.toInt() ?? (idx + 1);
+          return _DayCard(
+            sessionData: s,
+            showStartButton: !_fromExplore,
+            onStart: _fromExplore ? null : () => _onStartDay(dayNumber),
+          );
+        }),
       ],
     );
   }
@@ -677,6 +977,33 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     final bottomPad = MediaQuery.of(context).padding.bottom;
     final isCustom = plan['isCustom'] == true;
 
+    // State A — saved Explore plan viewed from Plans tab (not fromExplore,
+    // not custom, not tracked): show "Remove from My Plans" link.
+    if (!_fromExplore && !isCustom && !_isTracked) {
+      if (!_isSaved) return const SizedBox.shrink();
+      return Container(
+        padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPad + 12),
+        decoration: const BoxDecoration(
+          color: WW.card,
+          border: Border(top: BorderSide(color: WW.border, width: 0.5)),
+        ),
+        child: GestureDetector(
+          onTap: () => _handleUnsaveExplorePlan(plan),
+          child: const Center(
+            child: Text(
+              'Remove from My Plans',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFFEF4444),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // State B — currently tracked.
     if (_isTracked) {
       return Container(
         padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPad + 12),
@@ -733,103 +1060,195 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                 ),
               ),
             ),
+            if (isCustom) ...[
+              const SizedBox(height: 8),
+              GestureDetector(
+                onTap: () => _handleDeleteCustomPlan(plan),
+                child: const Text(
+                  'Delete Routine',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFFEF4444),
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       );
     }
 
+    // State C — not tracked; either fromExplore or isCustom.
     return Container(
       padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPad + 12),
       decoration: const BoxDecoration(
         color: WW.card,
         border: Border(top: BorderSide(color: WW.border, width: 0.5)),
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: GestureDetector(
-              onTap: isCustom
-                  ? () => context.push(Routes.editRoutine, extra: plan)
-                  : () => _snack('Save to library coming soon'),
-              child: Container(
-                height: 50,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(13),
-                  border: Border.all(color: WW.primary, width: 1.5),
-                ),
-                child: Center(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        isCustom
-                            ? Icons.edit_rounded
-                            : Icons.bookmark_border_rounded,
-                        color: WW.primary,
-                        size: 16,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        isCustom ? 'Edit Routine' : 'Save',
-                        style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: WW.primary,
+          Row(
+            children: [
+              Expanded(
+                child: _fromExplore && !isCustom
+                    ? (_isSaved
+                        ? Container(
+                            height: 50,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(13),
+                              border:
+                                  Border.all(color: WW.border, width: 1.5),
+                            ),
+                            child: const Center(
+                              child: Text(
+                                'Saved ✓',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: WW.textSec,
+                                ),
+                              ),
+                            ),
+                          )
+                        : GestureDetector(
+                            onTap: () => _handleSavePlan(plan),
+                            child: Container(
+                              height: 50,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(13),
+                                border: Border.all(
+                                    color: WW.primary, width: 1.5),
+                              ),
+                              child: const Center(
+                                child: Text(
+                                  'Save to My Plans',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                    color: WW.primary,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ))
+                    : GestureDetector(
+                        onTap: isCustom
+                            ? () => _handleEditRoutine(plan)
+                            : () => _snack('Save to library coming soon'),
+                        child: Container(
+                          height: 50,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(13),
+                            border:
+                                Border.all(color: WW.primary, width: 1.5),
+                          ),
+                          child: Center(
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  isCustom
+                                      ? Icons.edit_rounded
+                                      : Icons.bookmark_border_rounded,
+                                  color: WW.primary,
+                                  size: 16,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  isCustom ? 'Edit Routine' : 'Save',
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                    color: WW.primary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
                       ),
-                    ],
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 2,
+                child: GestureDetector(
+                  onTap: _isTracking ? null : () => _handleTrackPlan(plan),
+                  child: Container(
+                    height: 50,
+                    decoration: BoxDecoration(
+                      color: WW.primary,
+                      borderRadius: BorderRadius.circular(13),
+                      boxShadow: [
+                        BoxShadow(
+                          color: WW.primary.withOpacity(0.35),
+                          blurRadius: 14,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Center(
+                      child: _isTracking
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                  color: Colors.white, strokeWidth: 2),
+                            )
+                          : const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.play_arrow_rounded,
+                                    color: Colors.white, size: 18),
+                                SizedBox(width: 6),
+                                Text(
+                                  'Track This Plan',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w800,
+                                    color: Colors.white,
+                                    letterSpacing: -0.2,
+                                  ),
+                                ),
+                              ],
+                            ),
+                    ),
                   ),
                 ),
               ),
-            ),
+            ],
           ),
-          const SizedBox(width: 10),
-          Expanded(
-            flex: 2,
-            child: GestureDetector(
-              onTap: _isTracking ? null : () => _handleTrackPlan(plan),
-              child: Container(
-                height: 50,
-                decoration: BoxDecoration(
-                  color: WW.primary,
-                  borderRadius: BorderRadius.circular(13),
-                  boxShadow: [
-                    BoxShadow(
-                      color: WW.primary.withOpacity(0.35),
-                      blurRadius: 14,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Center(
-                  child: _isTracking
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                              color: Colors.white, strokeWidth: 2),
-                        )
-                      : const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.play_arrow_rounded,
-                                color: Colors.white, size: 18),
-                            SizedBox(width: 6),
-                            Text(
-                              'Track This Plan',
-                              style: TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w800,
-                                color: Colors.white,
-                                letterSpacing: -0.2,
-                              ),
-                            ),
-                          ],
-                        ),
+          // Delete link for custom routines
+          if (isCustom) ...[
+            const SizedBox(height: 10),
+            GestureDetector(
+              onTap: () => _handleDeleteCustomPlan(plan),
+              child: const Text(
+                'Delete Routine',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFFEF4444),
                 ),
               ),
             ),
-          ),
+          ],
+          // Remove link when viewing a saved Explore plan from Explore
+          if (_fromExplore && !isCustom && _isSaved) ...[
+            const SizedBox(height: 10),
+            GestureDetector(
+              onTap: () => _handleUnsaveExplorePlan(plan),
+              child: const Text(
+                'Remove from My Plans',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFFEF4444),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -900,7 +1319,14 @@ class _SectionCard extends StatelessWidget {
 
 class _DayCard extends StatefulWidget {
   final Map<String, dynamic> sessionData;
-  const _DayCard({required this.sessionData});
+  final bool showStartButton;
+  final VoidCallback? onStart;
+
+  const _DayCard({
+    required this.sessionData,
+    this.showStartButton = false,
+    this.onStart,
+  });
 
   @override
   State<_DayCard> createState() => _DayCardState();
@@ -1030,6 +1456,26 @@ class _DayCardState extends State<_DayCard> {
                       ],
                     ),
                   ),
+                  if (widget.showStartButton) ...[
+                    FilledButton(
+                      onPressed: widget.onStart,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: WW.primary,
+                        minimumSize: const Size(56, 30),
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 10),
+                        textStyle: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      child: const Text('Start'),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                   AnimatedRotation(
                     turns: _expanded ? 0.5 : 0,
                     duration: const Duration(milliseconds: 200),

@@ -9,6 +9,8 @@ import 'package:http/http.dart' as http;
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
+import '../../services/auth_service.dart';
+import '../../services/firestore_service.dart';
 
 // ── Module-level helpers ───────────────────────────────────────────────────────
 
@@ -56,6 +58,11 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
   late Animation<double> _checkScale;
   String _wiseCoachSummary = '';
   bool _summaryLoading = true;
+  String? _planId;
+  bool _isCardio = false;
+  String _cardioActivity = '';
+  int _cardioCalories = 0;
+  int _goalMinutes = 0;
 
   @override
   void initState() {
@@ -68,8 +75,17 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       parent: _entranceCtrl,
       curve: const Interval(0.0, 0.7, curve: Curves.elasticOut),
     );
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => _generateWiseCoachSummary());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
+      _planId = extra?['planId'] as String?;
+      setState(() {
+        _isCardio = extra?['isCardio'] as bool? ?? false;
+        _cardioActivity = extra?['cardioActivity'] as String? ?? '';
+        _cardioCalories = (extra?['cardioCalories'] as num?)?.toInt() ?? 0;
+        _goalMinutes = (extra?['goalMinutes'] as num?)?.toInt() ?? 0;
+      });
+      _generateWiseCoachSummary();
+    });
   }
 
   @override
@@ -177,20 +193,30 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
     final sessionName = extra?['sessionName'] as String? ?? 'Gym Session';
     final elapsedSeconds = extra?['elapsedSeconds'] as int? ?? 0;
-    final exercises = _parseExercises(extra?['exercises']);
-    final stats = _calcStats(exercises);
-    final durationMins = elapsedSeconds ~/ 60;
-    final caloriesBurned = stats.totalSets * 8;
 
-    final prompt =
-        'You are WiseCoach, an AI fitness coach. Generate a 2-3 sentence '
-        'post-workout summary for this gym session. Be encouraging and specific.\n'
-        'Session: $sessionName\n'
-        'Duration: $durationMins minutes\n'
-        'Sets completed: ${stats.totalSets}\n'
-        'Total volume: ${stats.volume.round()} kg\n'
-        'Calories burned: $caloriesBurned kcal\n'
-        'Keep it under 60 words. Plain text only, no markdown.';
+    final String prompt;
+    if (_isCardio) {
+      final durationMins = elapsedSeconds ~/ 60;
+      prompt = 'Give a 2-sentence motivational summary for '
+          'someone who just completed a $_cardioActivity session '
+          'lasting $durationMins minutes and burned '
+          '$_cardioCalories calories. Be encouraging and specific. '
+          'Under 50 words.';
+    } else {
+      final exercises = _parseExercises(extra?['exercises']);
+      final stats = _calcStats(exercises);
+      final durationMins = elapsedSeconds ~/ 60;
+      final caloriesBurned = stats.totalSets * 8;
+      prompt =
+          'You are WiseCoach, an AI fitness coach. Generate a 2-3 sentence '
+          'post-workout summary for this gym session. Be encouraging and specific.\n'
+          'Session: $sessionName\n'
+          'Duration: $durationMins minutes\n'
+          'Sets completed: ${stats.totalSets}\n'
+          'Total volume: ${stats.volume.round()} kg\n'
+          'Calories burned: $caloriesBurned kcal\n'
+          'Keep it under 60 words. Plain text only, no markdown.';
+    }
 
     try {
       final response = await http.post(
@@ -260,20 +286,26 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        _buildStatsRow(elapsedSeconds, stats, caloriesBurned),
+                        _isCardio
+                            ? _buildCardioStatsRow(elapsedSeconds)
+                            : _buildStatsRow(elapsedSeconds, stats, caloriesBurned),
                         const SizedBox(height: 16),
-                        _buildMusclesCard(exercises),
-                        const SizedBox(height: 16),
-                        _buildPbCard(),
-                        const SizedBox(height: 16),
+                        if (!_isCardio) ...[
+                          _buildMusclesCard(exercises),
+                          const SizedBox(height: 16),
+                          _buildPbCard(),
+                          const SizedBox(height: 16),
+                        ],
                         _buildWiseCoachCard(),
                         const SizedBox(height: 16),
-                        _buildXpCard(xp),
-                        const SizedBox(height: 16),
-                        _buildBadgesCard(),
-                        const SizedBox(height: 16),
-                        _buildExercisesCard(exercises),
-                        const SizedBox(height: 20),
+                        if (!_isCardio) ...[
+                          _buildXpCard(xp),
+                          const SizedBox(height: 16),
+                          _buildBadgesCard(),
+                          const SizedBox(height: 16),
+                          _buildExercisesCard(exercises),
+                          const SizedBox(height: 20),
+                        ],
                       ],
                     ),
                   ),
@@ -412,6 +444,190 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
               ),
             ),
           ],
+        ),
+      ],
+    );
+  }
+
+  // ── Section 2b — Cardio stats row ────────────────────────────────────────
+
+  Widget _buildCardioStatsRow(int secs) {
+    final durationMins = secs ~/ 60;
+    final durationSecs = secs % 60;
+    final durationStr = durationMins > 0
+        ? '${durationMins}m ${durationSecs}s'
+        : '${durationSecs}s';
+
+    String goalStr;
+    if (_goalMinutes <= 0) {
+      goalStr = 'Open run';
+    } else if (secs >= _goalMinutes * 60) {
+      goalStr = 'Goal reached ✓';
+    } else {
+      goalStr = '$_goalMinutes min';
+    }
+
+    final actIcon = _cardioActivity == 'Run'
+        ? Icons.directions_run_rounded
+        : _cardioActivity == 'Walk'
+            ? Icons.directions_walk_rounded
+            : Icons.directions_bike_rounded;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: _StatCard(
+                label: 'Duration',
+                value: durationStr,
+                icon: Icons.timer_outlined,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _StatCard(
+                label: 'Calories',
+                value: '~$_cardioCalories kcal',
+                icon: Icons.local_fire_department_rounded,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: _StatCard(
+                label: 'Activity',
+                value: _cardioActivity,
+                icon: actIcon,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _StatCard(
+                label: 'Goal',
+                value: goalStr,
+                icon: Icons.flag_rounded,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        // Heart rate placeholder card
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: WW.card,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: WW.border, width: 0.5),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEF4444).withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.favorite_rounded,
+                  color: Color(0xFFEF4444),
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: const [
+                    Text(
+                      'Heart Rate',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: WW.text,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Connect Apple Health to unlock',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: WW.textSec,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.lock_outline_rounded,
+                size: 16,
+                color: WW.textSec,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+
+        // Pace placeholder card
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: WW.card,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: WW.border, width: 0.5),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: WW.primary.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.speed_rounded,
+                  color: WW.primary,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: const [
+                    Text(
+                      'Pace & Distance',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: WW.text,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Available with GPS outdoor run',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: WW.textSec,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.lock_outline_rounded,
+                size: 16,
+                color: WW.textSec,
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -877,7 +1093,16 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
           Expanded(
             flex: 2,
             child: GestureDetector(
-              onTap: () => context.go(Routes.home),
+              onTap: () {
+                if (!_isCardio) {
+                  final uid = AuthService().getCurrentUser()?.uid;
+                  final pid = _planId;
+                  if (uid != null && pid != null && pid.isNotEmpty) {
+                    FirestoreService().markSessionComplete(uid, pid);
+                  }
+                }
+                context.go(Routes.home);
+              },
               child: Container(
                 height: 50,
                 decoration: BoxDecoration(

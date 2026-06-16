@@ -194,13 +194,16 @@ class _ExploreScreenState extends State<ExploreScreen> {
     }
   }
 
-  // All plans: Firestore first, then catalog extras (deduped by name).
+  // All plans: non-custom Firestore first, then catalog extras (deduped by name).
   List<Map<String, dynamic>> get _allPlans {
-    final firestoreNames = _firestorePlans.map((p) => p['name']).toSet();
+    final nonCustom = _firestorePlans
+        .where((p) => p['isCustom'] != true)
+        .toList();
+    final firestoreNames = nonCustom.map((p) => p['name']).toSet();
     final extras = _kCatalogPlans
         .where((p) => !firestoreNames.contains(p['name']))
         .toList();
-    return [..._firestorePlans, ...extras];
+    return [...nonCustom, ...extras];
   }
 
   bool get _hasActiveFilter =>
@@ -281,7 +284,10 @@ class _ExploreScreenState extends State<ExploreScreen> {
     if (plan['isCatalogOnly'] == true) {
       _snack('This plan is coming soon to WiseWorkout!');
     } else {
-      context.push(Routes.planDetail, extra: plan);
+      context.push(Routes.planDetail, extra: {
+        ...plan,
+        'fromExplore': true,
+      });
     }
   }
 

@@ -6,11 +6,13 @@
 
 import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/constants.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
@@ -41,6 +43,9 @@ class _ExerciseData {
   String note;
   int restTime; // seconds; 0 = Off
   final List<_SetData> sets;
+  final bool isCardio;
+  final String cardioActivity;
+  final int cardioMinutes;
 
   _ExerciseData({
     required this.name,
@@ -48,6 +53,9 @@ class _ExerciseData {
     this.note = '',
     this.restTime = 90,
     required this.sets,
+    this.isCardio = false,
+    this.cardioActivity = '',
+    this.cardioMinutes = 30,
   });
 }
 
@@ -107,7 +115,7 @@ class _GymSessionState extends State<GymSessionScreen> {
   bool _isCompressed = false;
   bool _isRestDay = false;
   String _sessionName = 'Workout';
-  int _totalSessions = 1;
+  String _planId = '';
 
   Timer? _elapsedTimer;
   Timer? _restTimer;
@@ -132,30 +140,121 @@ class _GymSessionState extends State<GymSessionScreen> {
         return;
       }
 
-      final results = await Future.wait<Map<String, dynamic>?>([
-        FirestoreService().getUserProfile(uid),
-        FirestoreService().getTrackedPlan(uid),
-      ]);
+      // Check user doc for a one-time plan+day override
+      // (set by Start button on any day card in All Plans)
+      final userDoc = await FirebaseFirestore.instance
+          .collection(Collections.users)
+          .doc(uid)
+          .get();
+      final userData = userDoc.data();
+      final overridePlanId = userData?['overridePlanId'] as String?;
+      final overrideDay =
+          (userData?['overrideDayIndex'] as num?)?.toInt();
 
-      final profile = results[0];
-      final plan = results[1];
+      // Determine which plan to load
+      Map<String, dynamic>? plan;
+      String planId;
+      int effectiveDayIndex;
 
-      if (plan == null) {
-        if (mounted) setState(() => _isLoadingSession = false);
+      if (overridePlanId != null &&
+          overridePlanId.isNotEmpty &&
+          overrideDay != null) {
+        // FREE SESSION: load the specific plan and day from Start button
+        // Clear the override immediately (fire and forget)
+        FirestoreService().clearOverrideDayIndex(uid, overridePlanId);
+
+        // Fetch the override plan directly
+        final planDoc = await FirebaseFirestore.instance
+            .collection(Collections.plans)
+            .doc(overridePlanId)
+            .get();
+        if (!planDoc.exists) {
+          if (mounted) setState(() => _isLoadingSession = false);
+          return;
+        }
+        plan = {'id': planDoc.id, ...planDoc.data()!};
+        planId = overridePlanId;
+        effectiveDayIndex = overrideDay;
+        _planId = planId;
+        // No compression check for free sessions
+      } else {
+        // TRACKED SESSION: existing logic
+        plan = await FirestoreService().getTrackedPlan(uid);
+        if (plan == null) {
+          if (mounted) setState(() => _isLoadingSession = false);
+          return;
+        }
+        planId = plan['id'] as String? ?? '';
+        _planId = planId;
+
+        final progress = planId.isNotEmpty
+            ? await FirestoreService().getPlanProgress(uid, planId)
+            : null;
+        final currentDayIndex =
+            (progress?['currentDayIndex'] as num?)?.toInt() ?? 1;
+        effectiveDayIndex = currentDayIndex;
+
+        final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
+        final total = sessions.length;
+        if (sessions.isEmpty) {
+          if (mounted) setState(() => _isLoadingSession = false);
+          return;
+        }
+
+        final sessionIdx = (effectiveDayIndex - 1) % total;
+        final session = sessions[sessionIdx] as Map<String, dynamic>;
+        final isRest = session['isRestDay'] == true;
+
+        if (isRest) {
+          if (mounted) {
+            setState(() {
+              _isRestDay = true;
+              _sessionName = session['name'] as String? ?? 'Rest';
+              _isLoadingSession = false;
+            });
+          }
+          return;
+        }
+
+        List<dynamic> rawExercises =
+            (session['exercises'] as List<dynamic>?) ?? [];
+
+        bool isCompressed = false;
+        final compressedDaysList = progress?['compressedDays'];
+        if (compressedDaysList is List) {
+          final compressedDays =
+              compressedDaysList.map((d) => (d as num).toInt()).toSet();
+          if (compressedDays.contains(effectiveDayIndex)) {
+            rawExercises = rawExercises.where((e) {
+              final tag =
+                  (e as Map<String, dynamic>)['tag'] as String? ?? '';
+              return tag != 'Accessory';
+            }).toList();
+            isCompressed = true;
+          }
+        }
+
+        final exercises = _parseExercises(rawExercises, isListSets: null);
+        if (mounted) {
+          setState(() {
+            _exercises = exercises;
+            _isCompressed = isCompressed;
+            _sessionName = session['name'] as String? ?? 'Workout';
+            _isLoadingSession = false;
+          });
+        }
         return;
       }
 
-      final currentDayIndex =
-          (profile?['currentDayIndex'] as num?)?.toInt() ?? 1;
+      // FREE SESSION path continues here
       final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
       final total = sessions.length;
-
       if (sessions.isEmpty) {
         if (mounted) setState(() => _isLoadingSession = false);
         return;
       }
 
-      final sessionIdx = (currentDayIndex - 1) % total;
+      final sessionIdx = (effectiveDayIndex - 1) % total;
       final session = sessions[sessionIdx] as Map<String, dynamic>;
       final isRest = session['isRestDay'] == true;
 
@@ -164,61 +263,72 @@ class _GymSessionState extends State<GymSessionScreen> {
           setState(() {
             _isRestDay = true;
             _sessionName = session['name'] as String? ?? 'Rest';
-            _totalSessions = total;
             _isLoadingSession = false;
           });
         }
         return;
       }
 
-      List<dynamic> rawExercises =
+      final rawExercises =
           (session['exercises'] as List<dynamic>?) ?? [];
-
-      // FIX 3: filter to Primary only if this day is in compressedDays
-      bool isCompressed = false;
-      final compressedDaysList = profile?['compressedDays'];
-      if (compressedDaysList is List) {
-        final compressedDays =
-            compressedDaysList.map((d) => (d as num).toInt()).toSet();
-        if (compressedDays.contains(currentDayIndex)) {
-          rawExercises = rawExercises.where((e) {
-            final tag = (e as Map<String, dynamic>)['tag'] as String? ?? '';
-            return tag != 'Accessory';
-          }).toList();
-          isCompressed = true;
-        }
-      }
-
-      final exercises = rawExercises.map((e) {
-        final exMap = e as Map<String, dynamic>;
-        final setsCount = (exMap['sets'] as num?)?.toInt() ?? 3;
-        final restTime = (exMap['restTime'] as num?)?.toInt() ?? 90;
-        return _ExerciseData(
-          name: exMap['name'] as String? ?? 'Exercise',
-          muscle: exMap['muscle'] as String? ?? '',
-          restTime: restTime,
-          sets: List.generate(
-            setsCount,
-            (i) => _SetData(
-              prev: '—',
-              type: i == 0 ? _SetType.warmup : _SetType.normal,
-            ),
-          ),
-        );
-      }).toList();
+      final exercises = _parseExercises(rawExercises, isListSets: null);
 
       if (mounted) {
         setState(() {
           _exercises = exercises;
-          _isCompressed = isCompressed;
+          _isCompressed = false;
           _sessionName = session['name'] as String? ?? 'Workout';
-          _totalSessions = total;
           _isLoadingSession = false;
         });
       }
     } catch (_) {
       if (mounted) setState(() => _isLoadingSession = false);
     }
+  }
+
+  List<_ExerciseData> _parseExercises(
+      List<dynamic> rawExercises, {required bool? isListSets}) {
+    return rawExercises.map((e) {
+      final exMap = e as Map<String, dynamic>;
+      final restTime = (exMap['restTime'] as num?)?.toInt() ?? 90;
+      final rawSets = exMap['sets'];
+      final wasListSets = rawSets is List;
+      final parsedSets = FirestoreService.parseExerciseSets(rawSets, 3);
+      final List<_SetData> sets =
+          parsedSets.asMap().entries.map((entry) {
+        final i = entry.key;
+        final s = entry.value;
+        final typeStr = s['type'] as String? ?? 'N';
+        final _SetType type;
+        if (!wasListSets) {
+          type = i == 0 ? _SetType.warmup : _SetType.normal;
+        } else {
+          type = typeStr == 'W'
+              ? _SetType.warmup
+              : typeStr == 'D'
+                  ? _SetType.dropSet
+                  : _SetType.normal;
+        }
+        return _SetData(
+          prev: '—',
+          type: type,
+          kg: wasListSets ? s['kg']?.toString() ?? '' : '',
+          reps: wasListSets ? s['reps']?.toString() ?? '' : '',
+        );
+      }).toList();
+      final isCardio = exMap['isCardio'] as bool? ?? false;
+      final cardioActivity = exMap['cardioActivity'] as String? ?? 'Run';
+      final cardioMinutes = (exMap['cardioMinutes'] as num?)?.toInt() ?? 30;
+      return _ExerciseData(
+        name: exMap['name'] as String? ?? 'Exercise',
+        muscle: exMap['muscle'] as String? ?? '',
+        restTime: restTime,
+        sets: sets,
+        isCardio: isCardio,
+        cardioActivity: cardioActivity,
+        cardioMinutes: cardioMinutes,
+      );
+    }).toList();
   }
 
   @override
@@ -317,6 +427,7 @@ class _GymSessionState extends State<GymSessionScreen> {
     final sessionData = {
       'sessionName': _sessionName,
       'elapsedSeconds': _elapsed,
+      'planId': _planId,
       'exercises': _exercises
           .map((e) => {
                 'name': e.name,
@@ -348,8 +459,6 @@ class _GymSessionState extends State<GymSessionScreen> {
           'reason': 'Completed ${sessionData['sessionName']} · $totalCompletedSets sets',
           'type': 'gym',
         });
-        await FirestoreService()
-            .markSessionComplete(uid, _totalSessions);
       } else {
         print('saveGymSession skipped: no authenticated user');
       }
@@ -667,7 +776,9 @@ class _GymSessionState extends State<GymSessionScreen> {
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
                   child: Column(
                     children: [
-                      _buildExerciseCard(),
+                      _exercises[_exIdx].isCardio
+                          ? _buildCardioPlaceholderCard(_exercises[_exIdx])
+                          : _buildExerciseCard(),
                     ],
                   ),
                 ),
@@ -1111,6 +1222,124 @@ class _GymSessionState extends State<GymSessionScreen> {
                 contentPadding: EdgeInsets.symmetric(vertical: 10),
               ),
               style: const TextStyle(fontSize: 12, color: WW.text),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Section 4b — Cardio placeholder card ─────────────────────────────────
+
+  Widget _buildCardioPlaceholderCard(_ExerciseData ex) {
+    final icon = ex.cardioActivity == 'Run'
+        ? Icons.directions_run_rounded
+        : ex.cardioActivity == 'Walk'
+            ? Icons.directions_walk_rounded
+            : Icons.directions_bike_rounded;
+    final color = ex.cardioActivity == 'Run'
+        ? WW.teal
+        : ex.cardioActivity == 'Walk'
+            ? const Color(0xFF22C55E)
+            : WW.lavender;
+
+    return Container(
+      decoration: WW.cardDecoration,
+      clipBehavior: Clip.hardEdge,
+      child: Column(
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.all(16),
+            color: WW.elevated,
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(icon, color: color, size: 24),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        ex.name,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: WW.text,
+                        ),
+                      ),
+                      Text(
+                        '${ex.cardioActivity} · '
+                        '${ex.cardioMinutes} min · Indoor/Outdoor',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: WW.textSec,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Start button
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: GestureDetector(
+              onTap: () => context.push(
+                Routes.cardioSetup,
+                extra: {
+                  'fromPlan': true,
+                  'planActivity': ex.cardioActivity,
+                  'planMinutes': ex.cardioMinutes,
+                },
+              ),
+              child: Container(
+                width: double.infinity,
+                height: 50,
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(13),
+                  boxShadow: [
+                    BoxShadow(
+                      color: color.withValues(alpha: 0.35),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Center(
+                  child: Text(
+                    'Start ${ex.cardioActivity}',
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // Info note
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Text(
+              'Complete your cardio session, then come back '
+              'and tap Next to continue.',
+              style: const TextStyle(
+                fontSize: 12,
+                color: WW.textSec,
+              ),
+              textAlign: TextAlign.center,
             ),
           ),
         ],

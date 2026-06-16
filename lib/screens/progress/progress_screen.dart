@@ -39,8 +39,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
   int _weekTotalSessions = 0;
   int _weekGymSessions = 0;
   bool _chartsLoading = true;
+  List<Map<String, dynamic>> _checkIns = [];
+  bool _checkInsLoading = true;
 
-  static const List<String> _subtabLabels = ['Charts', 'Activities', 'XP History'];
+  static const List<String> _subtabLabels = ['Charts', 'Activities', 'XP History', 'Check-ins'];
   static const List<String> _timeLabels = ['This Week', 'This Month', 'This Year'];
   static const List<String> _actLabels = ['All', 'Gym', 'Cardio', 'Manual'];
 
@@ -70,6 +72,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
     _loadXpData();
     _loadXpEvents();
     _loadChartData();
+    _loadCheckIns();
   }
 
   Future<void> _loadChartData() async {
@@ -92,6 +95,37 @@ class _ProgressScreenState extends State<ProgressScreen> {
       });
     } catch (_) {
       if (mounted) setState(() => _chartsLoading = false);
+    }
+  }
+
+  Future<void> _loadCheckIns() async {
+    try {
+      final uid = AuthService().getCurrentUser()?.uid;
+      if (uid == null) {
+        if (mounted) setState(() => _checkInsLoading = false);
+        return;
+      }
+      final snapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .collection('missedSessions')
+          .orderBy('timestamp', descending: true)
+          .get();
+      final items = snapshot.docs.map((doc) {
+        final data = doc.data();
+        return {
+          'id': doc.id,
+          ...data,
+        };
+      }).toList();
+      if (mounted) {
+        setState(() {
+          _checkIns = items;
+          _checkInsLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _checkInsLoading = false);
     }
   }
 
@@ -207,6 +241,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   _buildChartsTab(),
                   _buildActivitiesTab(),
                   _buildXpTab(),
+                  _buildCheckInsTab(),
                 ],
               ),
             ),
@@ -260,36 +295,40 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
   Widget _buildSubtabs() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-      child: Row(
-        children: List.generate(_subtabLabels.length, (i) {
-          final active = i == _subtab;
-          return Padding(
-            padding: EdgeInsets.only(right: i < _subtabLabels.length - 1 ? 8 : 0),
-            child: GestureDetector(
-              onTap: () => setState(() => _subtab = i),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                height: 32,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                decoration: BoxDecoration(
-                  color: active ? WW.primary : const Color(0xFFF2F2F7),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Center(
-                  child: Text(
-                    _subtabLabels[i],
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: active ? Colors.white : WW.textSec,
+      padding: const EdgeInsets.only(bottom: 12),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Row(
+          children: List.generate(_subtabLabels.length, (i) {
+            final active = i == _subtab;
+            return Padding(
+              padding: EdgeInsets.only(right: i < _subtabLabels.length - 1 ? 8 : 0),
+              child: GestureDetector(
+                onTap: () => setState(() => _subtab = i),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  height: 32,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  decoration: BoxDecoration(
+                    color: active ? WW.primary : const Color(0xFFF2F2F7),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Center(
+                    child: Text(
+                      _subtabLabels[i],
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: active ? Colors.white : WW.textSec,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          );
-        }),
+            );
+          }),
+        ),
       ),
     );
   }
@@ -942,6 +981,229 @@ class _ProgressScreenState extends State<ProgressScreen> {
               color: WW.textSec,
             ),
             textAlign: TextAlign.right,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // CHECK-INS TAB
+  // ══════════════════════════════════════════════════════════════════════════
+
+  static const Map<String, Map<String, dynamic>> _reasonData = {
+    'busy': {
+      'label': 'Too busy',
+      'sub': 'Not enough time',
+      'icon': Icons.access_time_rounded,
+      'color': Color(0xFF6C7EE8),
+    },
+    'sick': {
+      'label': 'Not feeling well',
+      'sub': 'Unwell or fatigued',
+      'icon': Icons.thermostat_rounded,
+      'color': Color(0xFFEF4444),
+    },
+    'injured': {
+      'label': 'Injured',
+      'sub': 'Needed to adapt',
+      'icon': Icons.shield_outlined,
+      'color': Color(0xFFF59E0B),
+    },
+    'rest': {
+      'label': 'Needed rest',
+      'sub': 'Body needed recovery',
+      'icon': Icons.nightlight_round,
+      'color': Color(0xFF4BB8CC),
+    },
+    'skip': {
+      'label': 'Just skipped',
+      'sub': 'No particular reason',
+      'icon': Icons.skip_next_rounded,
+      'color': Color(0xFF8A8A9E),
+    },
+  };
+
+  Widget _buildCheckInsTab() {
+    if (_checkInsLoading) {
+      return const Center(
+          child: CircularProgressIndicator(color: WW.primary));
+    }
+
+    if (_checkIns.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 64,
+              height: 64,
+              decoration: BoxDecoration(
+                color: WW.elevated,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Icon(
+                Icons.check_circle_outline_rounded,
+                size: 32,
+                color: WW.textSec,
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'No missed sessions logged',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                color: WW.text,
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Your check-in history will appear here.',
+              style: TextStyle(fontSize: 13, color: WW.textSec),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 100),
+      itemCount: _checkIns.length,
+      itemBuilder: (context, index) {
+        final item = _checkIns[index];
+        return _buildCheckInCard(item);
+      },
+    );
+  }
+
+  Widget _buildCheckInCard(Map<String, dynamic> item) {
+    final reason = item['reason'] as String? ?? 'skip';
+    final date = item['date'] as String? ?? '';
+    final dayIndex = (item['dayIndex'] as num?)?.toInt() ?? 1;
+    final planId = item['planId'] as String? ?? '';
+    final rd = _reasonData[reason] ?? _reasonData['skip']!;
+    final iconColor = rd['color'] as Color;
+    final icon = rd['icon'] as IconData;
+    final label = rd['label'] as String;
+    final sub = rd['sub'] as String;
+
+    String displayDate = date;
+    try {
+      final parts = date.split('-');
+      if (parts.length == 3) {
+        final dt = DateTime(
+            int.parse(parts[0]), int.parse(parts[1]), int.parse(parts[2]));
+        const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+        const months = [
+          'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+        ];
+        displayDate =
+            '${days[dt.weekday - 1]}, ${dt.day} ${months[dt.month - 1]}';
+      }
+    } catch (_) {}
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: WW.card,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: WW.border, width: 0.5),
+        boxShadow: WW.shadow,
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: iconColor.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: iconColor, size: 22),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: WW.text,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      displayDate,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: WW.textSec,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  sub,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: WW.textSec,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: WW.elevated,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    'Day $dayIndex',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: WW.textSec,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: GestureDetector(
+                    onTap: () async {
+                      await context.push(
+                        Routes.missedCheckin,
+                        extra: {
+                          'planId': planId,
+                          'planName': '',
+                          'missedDayIndex': dayIndex,
+                          'existingDate': date,
+                        },
+                      );
+                      setState(() => _checkInsLoading = true);
+                      _loadCheckIns();
+                    },
+                    child: const Text(
+                      'Change reason',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: WW.primary,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),

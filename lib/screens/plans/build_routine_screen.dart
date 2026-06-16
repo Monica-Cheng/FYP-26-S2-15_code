@@ -1,5 +1,6 @@
 // lib/screens/plans/build_routine_screen.dart
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -10,7 +11,7 @@ import '../../services/firestore_service.dart';
 // ── Exercise library ───────────────────────────────────────────────────────────
 
 const _kMuscleFilters = [
-  'All', 'Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Glutes',
+  'All', 'Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Glutes', 'Cardio',
 ];
 
 const _kExerciseLibrary = <Map<String, String>>[
@@ -51,6 +52,11 @@ const _kExerciseLibrary = <Map<String, String>>[
   {'name': 'Hip Thrust', 'muscle': 'Glutes'},
   {'name': 'Glute Bridge', 'muscle': 'Glutes'},
   {'name': 'Cable Kickback', 'muscle': 'Glutes'},
+  {'name': 'Treadmill Run', 'muscle': 'Cardio', 'equipment': 'Treadmill', 'tag': 'Cardio'},
+  {'name': 'Stationary Bike', 'muscle': 'Cardio', 'equipment': 'Bike Machine', 'tag': 'Cardio'},
+  {'name': 'Rowing Machine', 'muscle': 'Cardio', 'equipment': 'Rowing Machine', 'tag': 'Cardio'},
+  {'name': 'Elliptical', 'muscle': 'Cardio', 'equipment': 'Elliptical', 'tag': 'Cardio'},
+  {'name': 'Stair Climber', 'muscle': 'Cardio', 'equipment': 'Stair Machine', 'tag': 'Cardio'},
 ];
 
 // ── Muscle color helpers ───────────────────────────────────────────────────────
@@ -71,6 +77,8 @@ Color _muscleColor(String muscle) {
       return const Color(0xFFEF4444);
     case 'Glutes':
       return const Color(0xFFD97706);
+    case 'Cardio':
+      return WW.teal;
     default:
       return WW.textSec;
   }
@@ -92,6 +100,8 @@ Color _muscleBg(String muscle) {
       return const Color(0xFFFFF0F0);
     case 'Glutes':
       return const Color(0xFFFEF3C7);
+    case 'Cardio':
+      return WW.tealBg;
     default:
       return WW.elevated;
   }
@@ -168,6 +178,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
   late List<Map<String, dynamic>> _days;
   bool _hasChanges = false;
   bool _isSaving = false;
+  bool _isLoading = false;
   String? _existingPlanId;
 
   // Unique id counter (string keys for controllers etc.)
@@ -188,15 +199,41 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _initFromExtra());
   }
 
-  void _initFromExtra() {
+  Future<void> _initFromExtra() async {
     final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
-    if (extra == null || extra['isCustom'] != true) return;
+    if (extra == null) return;
 
-    final rawSessions = (extra['sessions'] as List<dynamic>?)
+    final planId = extra['id'] as String?;
+
+    if (planId != null && planId.isNotEmpty) {
+      setState(() {
+        _isLoading = true;
+        _existingPlanId = planId;
+      });
+      try {
+        final plan = await FirestoreService().getPlan(planId);
+        if (!mounted) return;
+        if (plan == null) {
+          _snack('Could not load routine');
+          setState(() => _isLoading = false);
+          return;
+        }
+        _populateFromPlan(plan);
+      } catch (e) {
+        if (!mounted) return;
+        _snack('Failed to load routine');
+        setState(() => _isLoading = false);
+      }
+    } else if (extra['isCustom'] == true) {
+      _populateFromPlan(extra);
+    }
+  }
+
+  void _populateFromPlan(Map<String, dynamic> plan) {
+    final rawSessions = (plan['sessions'] as List<dynamic>?)
             ?.map((s) => s as Map<String, dynamic>)
             .toList() ??
         [];
-    if (rawSessions.isEmpty) return;
 
     final mappedDays = rawSessions.map((session) {
       final rawExs = (session['exercises'] as List<dynamic>?)
@@ -211,18 +248,18 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           sets = (rawSets as List<dynamic>).map((s) {
             final sm = s as Map<String, dynamic>;
             final sid = _nextId();
-            return {
+            return <String, dynamic>{
               'id': sid,
               'type': sm['type'] as String? ?? 'N',
-              'kg': sm['kg'] as String? ?? '',
-              'reps': sm['reps'] as String? ?? '',
+              'kg': sm['kg']?.toString() ?? '',
+              'reps': sm['reps']?.toString() ?? '',
             };
           }).toList();
         } else {
           sets = [_newSet()];
         }
 
-        return {
+        return <String, dynamic>{
           'id': _nextId(),
           'name': ex['name'] as String? ?? '',
           'muscle': ex['muscle'] as String? ?? '',
@@ -233,7 +270,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         };
       }).toList();
 
-      return {
+      return <String, dynamic>{
         'id': _nextId(),
         'label': session['day'] as String? ?? session['name'] as String? ?? 'Day',
         'exercises': exercises,
@@ -241,10 +278,11 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
     }).toList();
 
     setState(() {
-      _routineName = extra['name'] as String? ?? 'My Custom Routine';
-      _existingPlanId = extra['id'] as String?;
+      _routineName = plan['name'] as String? ?? 'My Custom Routine';
+      _existingPlanId = plan['id'] as String?;
       _days = mappedDays.isNotEmpty ? mappedDays : [_newDay('Day 1')];
       _activeDay = 0;
+      _isLoading = false;
     });
   }
 
@@ -619,6 +657,181 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
     );
   }
 
+  // ── Cardio sheet ───────────────────────────────────────────────────────────
+
+  void _showCardioSheet() {
+    String selectedActivity = 'Run';
+    int selectedMinutes = 30;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModal) => Padding(
+          padding: EdgeInsets.fromLTRB(
+              20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Add Cardio Block',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  color: WW.text,
+                ),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'Indoor/outdoor choice is made when starting the session.',
+                style: TextStyle(fontSize: 12, color: WW.textSec),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: ['Run', 'Walk', 'Cycle'].map((activity) {
+                  final isSelected = selectedActivity == activity;
+                  final icon = activity == 'Run'
+                      ? Icons.directions_run_rounded
+                      : activity == 'Walk'
+                          ? Icons.directions_walk_rounded
+                          : Icons.directions_bike_rounded;
+                  return Expanded(
+                    child: GestureDetector(
+                      onTap: () =>
+                          setModal(() => selectedActivity = activity),
+                      child: Container(
+                        margin: const EdgeInsets.only(right: 8),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        decoration: BoxDecoration(
+                          color: isSelected ? WW.primary : WW.elevated,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Column(
+                          children: [
+                            Icon(icon,
+                                color:
+                                    isSelected ? Colors.white : WW.textSec,
+                                size: 22),
+                            const SizedBox(height: 4),
+                            Text(
+                              activity,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color:
+                                    isSelected ? Colors.white : WW.textSec,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Duration (minutes)',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: WW.text,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                height: 120,
+                decoration: BoxDecoration(
+                  color: WW.elevated,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: CupertinoPicker(
+                  itemExtent: 36,
+                  scrollController: FixedExtentScrollController(
+                    initialItem: selectedMinutes - 1,
+                  ),
+                  onSelectedItemChanged: (index) {
+                    setModal(() => selectedMinutes = index + 1);
+                  },
+                  children: List.generate(
+                    120,
+                    (i) => Center(
+                      child: Text(
+                        '${i + 1} min',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: WW.text,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              GestureDetector(
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _addCardioBlock(selectedActivity, selectedMinutes);
+                },
+                child: Container(
+                  width: double.infinity,
+                  height: 50,
+                  decoration: BoxDecoration(
+                    color: WW.teal,
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                  child: const Center(
+                    child: Text(
+                      'Add Cardio Block',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _addCardioBlock(String activity, int minutes) {
+    setState(() {
+      (_days[_activeDay]['exercises'] as List<Map<String, dynamic>>)
+          .add({
+        'id': DateTime.now().millisecondsSinceEpoch.toString(),
+        'name': '$activity ${minutes}min',
+        'muscle': 'Cardio',
+        'restTime': 0,
+        'note': '',
+        'showNote': false,
+        'isCardio': true,
+        'cardioActivity': activity,
+        'cardioMinutes': minutes,
+        'sets': [
+          {
+            'id': '1',
+            'type': 'N',
+            'kg': '',
+            'reps': minutes.toString(),
+          }
+        ],
+      });
+      _hasChanges = true;
+    });
+    _snack('$activity block added to ${_days[_activeDay]['label']}.');
+  }
+
   // ── Save ───────────────────────────────────────────────────────────────────
 
   Future<void> _saveRoutine() async {
@@ -663,6 +876,11 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
             'note': ex['note'],
             'tag': 'Primary',
             'sets': sets,
+            if (ex['isCardio'] == true) ...{
+              'isCardio': true,
+              'cardioActivity': ex['cardioActivity'] ?? 'Run',
+              'cardioMinutes': ex['cardioMinutes'] ?? 30,
+            },
           };
         }).toList();
 
@@ -700,8 +918,8 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
 
       if (mounted) {
         setState(() => _hasChanges = false);
-        _snack(_isEditMode ? 'Routine updated!' : 'Routine saved!');
-        context.pop();
+        _snack(_isEditMode ? 'Routine updated.' : 'Routine saved to All Plans.');
+        context.pop(_isEditMode);
       }
     } catch (e) {
       print('Save error: $e');
@@ -724,7 +942,13 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           children: [
             _buildTopBar(),
             _buildDayTabs(),
-            Expanded(child: _buildExerciseList()),
+            Expanded(
+              child: _isLoading
+                  ? const Center(
+                      child: CircularProgressIndicator(color: WW.primary),
+                    )
+                  : _buildExerciseList(),
+            ),
           ],
         ),
       ),
@@ -828,7 +1052,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: _days.length + (_days.length < 7 ? 1 : 0),
+        itemCount: _days.length + 1,
         itemBuilder: (ctx, i) {
           // "+" add day tab
           if (i == _days.length) {
@@ -1006,7 +1230,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
               const SizedBox(width: 10),
               Expanded(
                 child: GestureDetector(
-                  onTap: () => _snack('Cardio coming soon'),
+                  onTap: _showCardioSheet,
                   child: Container(
                     height: 48,
                     decoration: BoxDecoration(
@@ -1063,6 +1287,8 @@ class _ExerciseCard extends StatefulWidget {
 
 class _ExerciseCardState extends State<_ExerciseCard> {
   bool _menuOpen = false;
+  OverlayEntry? _overlayEntry;
+  final LayerLink _layerLink = LayerLink();
   late final TextEditingController _noteCtrl;
 
   @override
@@ -1074,6 +1300,7 @@ class _ExerciseCardState extends State<_ExerciseCard> {
 
   @override
   void dispose() {
+    _closeMenu();
     _noteCtrl.dispose();
     super.dispose();
   }
@@ -1109,22 +1336,114 @@ class _ExerciseCardState extends State<_ExerciseCard> {
     widget.onChanged();
   }
 
+  void _toggleMenu() {
+    if (_menuOpen) {
+      _closeMenu();
+    } else {
+      _openMenu();
+    }
+  }
+
+  void _openMenu() {
+    final showNote = _ex['showNote'] as bool? ?? false;
+
+    _overlayEntry = OverlayEntry(
+      builder: (context) => Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: _closeMenu,
+              behavior: HitTestBehavior.opaque,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Positioned(
+            width: 180,
+            child: CompositedTransformFollower(
+              link: _layerLink,
+              showWhenUnlinked: false,
+              offset: const Offset(-140, 28),
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: WW.card,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: WW.border, width: 0.5),
+                    boxShadow: WW.shadow,
+                  ),
+                  child: IntrinsicWidth(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _menuItem(
+                          icon: Icons.sticky_note_2_outlined,
+                          label: showNote ? 'Hide Note' : 'Add Note',
+                          onTap: () {
+                            _closeMenu();
+                            setState(() => _ex['showNote'] = !showNote);
+                            widget.onChanged();
+                          },
+                        ),
+                        _menuItem(
+                          icon: Icons.swap_horiz_rounded,
+                          label: 'Replace Exercise',
+                          onTap: () {
+                            _closeMenu();
+                            widget.onSnack('Replace coming soon');
+                          },
+                        ),
+                        _menuItem(
+                          icon: Icons.delete_outline_rounded,
+                          label: 'Delete Exercise',
+                          color: const Color(0xFFEF4444),
+                          onTap: () {
+                            _closeMenu();
+                            widget.onDelete();
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    setState(() => _menuOpen = true);
+    Overlay.of(context).insert(_overlayEntry!);
+  }
+
+  void _closeMenu() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+    if (mounted) setState(() => _menuOpen = false);
+  }
+
   @override
   Widget build(BuildContext context) {
     final name = _ex['name'] as String? ?? '';
     final muscle = _ex['muscle'] as String? ?? '';
     final restTime = _ex['restTime'] as int? ?? 90;
     final showNote = _ex['showNote'] as bool? ?? false;
+    final isCardio = _ex['isCardio'] as bool? ?? false;
+    final cardioActivity = _ex['cardioActivity'] as String? ?? '';
+    final cardioMinutes = _ex['cardioMinutes'] as int? ?? 30;
     final mc = _muscleColor(muscle);
     final mb = _muscleBg(muscle);
     final isOff = restTime == 0;
 
-    return Container(
-      decoration: WW.cardDecoration,
-      clipBehavior: Clip.hardEdge,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+    return Stack(
+      children: [
+        Container(
+          decoration: WW.cardDecoration,
+          clipBehavior: Clip.hardEdge,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
           // ── Header ────────────────────────────────────────────────────────
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 10, 8, 6),
@@ -1166,6 +1485,7 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                           letterSpacing: -0.1,
                         ),
                       ),
+                      if (!isCardio) ...[
                       const SizedBox(height: 2),
                       // Rest timer pill
                       GestureDetector(
@@ -1207,160 +1527,132 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                         ),
                       ),
                     ],
+                    ],
                   ),
                 ),
                 // ⓘ info button
-                GestureDetector(
-                  onTap: () => widget.onSnack('Exercise info coming soon'),
-                  child: Container(
-                    width: 30,
-                    height: 30,
-                    decoration: const BoxDecoration(
-                      color: WW.elevated,
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Center(
-                      child: Icon(Icons.info_outline,
-                          size: 16, color: WW.primary),
+                if (!isCardio) ...[
+                  GestureDetector(
+                    onTap: () => widget.onSnack('Exercise info coming soon'),
+                    child: Container(
+                      width: 30,
+                      height: 30,
+                      decoration: const BoxDecoration(
+                        color: WW.elevated,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Center(
+                        child: Icon(Icons.info_outline,
+                            size: 16, color: WW.primary),
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 6),
+                  const SizedBox(width: 6),
+                ],
                 // ⋮ more menu
-                Stack(
-                  children: [
-                    GestureDetector(
-                      onTap: () => setState(() => _menuOpen = !_menuOpen),
-                      child: const Padding(
-                        padding: EdgeInsets.all(4),
-                        child: Icon(Icons.more_vert_rounded,
-                            size: 18, color: WW.textSec),
-                      ),
-                    ),
-                    if (_menuOpen) ...[
-                      Positioned.fill(
-                        child: GestureDetector(
-                          onTap: () => setState(() => _menuOpen = false),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
-            ),
-          ),
-
-          // ── Dropdown menu ─────────────────────────────────────────────────
-          if (_menuOpen)
-            Stack(
-              children: [
-                Positioned.fill(
+                CompositedTransformTarget(
+                  link: _layerLink,
                   child: GestureDetector(
-                    onTap: () => setState(() => _menuOpen = false),
-                    behavior: HitTestBehavior.opaque,
-                  ),
-                ),
-                Align(
-                  alignment: Alignment.topRight,
-                  child: Container(
-                    margin: const EdgeInsets.only(right: 8, top: 0),
-                    decoration: BoxDecoration(
-                      color: WW.card,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: WW.border, width: 0.5),
-                      boxShadow: WW.shadow,
-                    ),
-                    child: IntrinsicWidth(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _menuItem(
-                            icon: Icons.sticky_note_2_outlined,
-                            label: showNote ? 'Hide Note' : 'Add Note',
-                            onTap: () {
-                              setState(() {
-                                _ex['showNote'] = !showNote;
-                                _menuOpen = false;
-                              });
-                              widget.onChanged();
-                            },
-                          ),
-                          _menuItem(
-                            icon: Icons.swap_horiz_rounded,
-                            label: 'Replace Exercise',
-                            onTap: () {
-                              setState(() => _menuOpen = false);
-                              widget.onSnack('Replace coming soon');
-                            },
-                          ),
-                          _menuItem(
-                            icon: Icons.delete_outline_rounded,
-                            label: 'Delete Exercise',
-                            color: const Color(0xFFEF4444),
-                            onTap: () {
-                              setState(() => _menuOpen = false);
-                              widget.onDelete();
-                            },
-                          ),
-                        ],
-                      ),
+                    onTap: _toggleMenu,
+                    child: const Padding(
+                      padding: EdgeInsets.all(4),
+                      child: Icon(Icons.more_vert_rounded,
+                          size: 18, color: WW.textSec),
                     ),
                   ),
                 ),
               ],
             ),
-
-          // ── Set table header ───────────────────────────────────────────────
-          const Padding(
-            padding: EdgeInsets.fromLTRB(14, 4, 14, 2),
-            child: Row(
-              children: [
-                SizedBox(
-                    width: 24,
-                    child: Text('SET', style: _kColHdr, textAlign: TextAlign.center)),
-                SizedBox(width: 5),
-                SizedBox(
-                    width: 32,
-                    child: Text('TYPE', style: _kColHdr, textAlign: TextAlign.center)),
-                SizedBox(width: 5),
-                Expanded(
-                    child: Text('PREV', style: _kColHdr, textAlign: TextAlign.center)),
-                SizedBox(width: 5),
-                SizedBox(
-                    width: 50,
-                    child: Text('KG', style: _kColHdr, textAlign: TextAlign.center)),
-                SizedBox(width: 5),
-                SizedBox(
-                    width: 44,
-                    child: Text('REPS', style: _kColHdr, textAlign: TextAlign.center)),
-              ],
-            ),
           ),
 
-          // ── Set rows ───────────────────────────────────────────────────────
-          ...List.generate(_sets.length, (si) => _buildSetRow(si)),
-
-          // ── + Add Set ──────────────────────────────────────────────────────
-          InkWell(
-            onTap: _addSet,
-            child: Container(
-              width: double.infinity,
-              height: 34,
-              decoration: const BoxDecoration(
-                border: Border(top: BorderSide(color: WW.elevated, width: 1)),
+          if (isCardio) ...[
+            // Cardio summary row — no sets, no columns
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 4, 14, 12),
+              child: Row(
+                children: [
+                  Icon(
+                    cardioActivity == 'Run'
+                        ? Icons.directions_run_rounded
+                        : cardioActivity == 'Walk'
+                            ? Icons.directions_walk_rounded
+                            : Icons.directions_bike_rounded,
+                    size: 16,
+                    color: WW.teal,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '$cardioActivity · $cardioMinutes min',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: WW.textSec,
+                    ),
+                  ),
+                  const Spacer(),
+                  const Text(
+                    'Indoor/outdoor at session start',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: WW.textSec,
+                    ),
+                  ),
+                ],
               ),
-              child: const Center(
-                child: Text(
-                  '+ Add Set',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: WW.primary,
+            ),
+          ] else ...[
+            // ── Set table header ─────────────────────────────────────────────
+            const Padding(
+              padding: EdgeInsets.fromLTRB(14, 4, 14, 2),
+              child: Row(
+                children: [
+                  SizedBox(
+                      width: 24,
+                      child: Text('SET', style: _kColHdr, textAlign: TextAlign.center)),
+                  SizedBox(width: 5),
+                  SizedBox(
+                      width: 32,
+                      child: Text('TYPE', style: _kColHdr, textAlign: TextAlign.center)),
+                  SizedBox(width: 5),
+                  Expanded(
+                      child: Text('PREV', style: _kColHdr, textAlign: TextAlign.center)),
+                  SizedBox(width: 5),
+                  SizedBox(
+                      width: 50,
+                      child: Text('KG', style: _kColHdr, textAlign: TextAlign.center)),
+                  SizedBox(width: 5),
+                  SizedBox(
+                      width: 44,
+                      child: Text('REPS', style: _kColHdr, textAlign: TextAlign.center)),
+                ],
+              ),
+            ),
+
+            // ── Set rows ─────────────────────────────────────────────────────
+            ...List.generate(_sets.length, (si) => _buildSetRow(si)),
+
+            // ── + Add Set ─────────────────────────────────────────────────────
+            InkWell(
+              onTap: _addSet,
+              child: Container(
+                width: double.infinity,
+                height: 34,
+                decoration: const BoxDecoration(
+                  border: Border(top: BorderSide(color: WW.elevated, width: 1)),
+                ),
+                child: const Center(
+                  child: Text(
+                    '+ Add Set',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: WW.primary,
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
+          ],
 
           // ── Note field ─────────────────────────────────────────────────────
           if (showNote)
@@ -1386,8 +1678,10 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                 maxLines: null,
               ),
             ),
-        ],
-      ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 

@@ -173,6 +173,12 @@ class _HomeTabState extends State<_HomeTab> {
   bool _todayCompleted = false;
   bool _isSessionCompressed = false;
   StreamSubscription<DocumentSnapshot>? _userStreamSub;
+  StreamSubscription<Map<String, dynamic>?>? _progressStreamSub;
+  bool _showMissedBanner = false;
+  String _missedSessionDate = '';
+  String _missedPlanId = '';
+  String _missedPlanName = '';
+  int _missedDayIndex = 1;
 
   @override
   void initState() {
@@ -192,35 +198,48 @@ class _HomeTabState extends State<_HomeTab> {
       if (doc.exists && mounted) {
         final newPlanId =
             doc.data()?['trackedPlanId'] as String? ?? '';
-        final newDayIndex =
-            (doc.data()?['currentDayIndex'] as num?)?.toInt() ?? 1;
-        final lastCompletedDate =
-            doc.data()?['lastCompletedDate'] as String?;
-        final today = DateTime.now().toString().substring(0, 10);
-        final shouldReload =
-            (newPlanId != _trackedPlanId || newDayIndex != _currentDayIndex) &&
-                newPlanId.isNotEmpty;
-
-        final rawCompressedDays = doc.data()?['compressedDays'];
-        bool newIsCompressed = false;
-        if (rawCompressedDays is List) {
-          final compressedSet =
-              rawCompressedDays.map((d) => (d as num).toInt()).toSet();
-          newIsCompressed = compressedSet.contains(newDayIndex);
-        }
-
+        final planChanged = newPlanId != _trackedPlanId;
         setState(() {
           _trackedPlanName =
               doc.data()?['trackedPlanName'] as String? ?? '';
           _trackedPlanId = newPlanId;
-          _currentDayIndex = newDayIndex;
           _displayName =
               doc.data()?['displayName'] as String? ?? _displayName;
-          _todayCompleted = lastCompletedDate == today;
-          _isSessionCompressed = newIsCompressed;
         });
+        if (planChanged && newPlanId.isNotEmpty) {
+          _startProgressStream(uid, newPlanId);
+          _loadTodaySession(uid, _currentDayIndex);
+        }
+      }
+    });
+  }
 
-        if (shouldReload) _loadTodaySession(uid, newDayIndex);
+  void _startProgressStream(String uid, String planId) {
+    _progressStreamSub?.cancel();
+    _progressStreamSub = _firestoreService
+        .getPlanProgressStream(uid, planId)
+        .listen((progress) {
+      if (progress == null || !mounted) return;
+      final newDayIndex =
+          (progress['currentDayIndex'] as num?)?.toInt() ?? 1;
+      final lastCompletedDate =
+          progress['lastCompletedDate'] as String?;
+      final today = DateTime.now().toString().substring(0, 10);
+      final rawCompressedDays = progress['compressedDays'];
+      bool newIsCompressed = false;
+      if (rawCompressedDays is List) {
+        final compressedSet =
+            rawCompressedDays.map((d) => (d as num).toInt()).toSet();
+        newIsCompressed = compressedSet.contains(newDayIndex);
+      }
+      final dayChanged = newDayIndex != _currentDayIndex;
+      setState(() {
+        _currentDayIndex = newDayIndex;
+        _todayCompleted = lastCompletedDate == today;
+        _isSessionCompressed = newIsCompressed;
+      });
+      if (dayChanged && _trackedPlanId.isNotEmpty) {
+        _loadTodaySession(uid, newDayIndex);
       }
     });
   }
@@ -229,10 +248,12 @@ class _HomeTabState extends State<_HomeTab> {
     try {
       final plan = await _firestoreService.getTrackedPlan(uid);
       if (plan == null || !mounted) return;
+      final planId = plan['id'] as String? ?? '';
+      if (planId.isEmpty) return;
       final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
       if (sessions.isEmpty) return;
-      final effectiveDayIndex =
-          await _firestoreService.checkAndAdvanceDay(uid, sessions.length);
+      final effectiveDayIndex = await _firestoreService
+          .checkAndAdvanceDay(uid, sessions.length, planId);
       final sessionIdx = (effectiveDayIndex - 1) % sessions.length;
       final session = sessions[sessionIdx] as Map<String, dynamic>;
       if (!mounted) return;
@@ -244,9 +265,138 @@ class _HomeTabState extends State<_HomeTab> {
     } catch (_) {}
   }
 
+  Future<void> _checkMissedSession(String uid) async {
+    try {
+      final yesterday = DateTime.now()
+          .subtract(const Duration(days: 1))
+          .toString()
+          .substring(0, 10);
+      final today = DateTime.now().toString().substring(0, 10);
+
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .get();
+      final userData = userDoc.data();
+      final trackedPlanId = userData?['trackedPlanId'] as String?;
+      final trackedPlanName =
+          userData?['trackedPlanName'] as String? ?? '';
+      if (trackedPlanId == null || trackedPlanId.isEmpty) return;
+
+      final progressDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .collection('planProgress')
+          .doc(trackedPlanId)
+          .get();
+      final progress = progressDoc.data();
+      if (progress == null) return;
+
+      final lastCompletedDate =
+          progress['lastCompletedDate'] as String? ?? '';
+      final currentDayIndex =
+          (progress['currentDayIndex'] as num?)?.toInt() ?? 1;
+      final breakModeActive =
+          progress['breakModeActive'] as bool? ?? false;
+
+      if (breakModeActive) return;
+      if (lastCompletedDate == yesterday || lastCompletedDate == today) return;
+
+      final missedDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .collection('missedSessions')
+          .doc(yesterday)
+          .get();
+      if (missedDoc.exists) return;
+
+      if (!mounted) return;
+      setState(() {
+        _missedSessionDate = yesterday;
+        _missedPlanId = trackedPlanId;
+        _missedPlanName = trackedPlanName;
+        _missedDayIndex = currentDayIndex;
+        _showMissedBanner = true;
+      });
+    } catch (_) {}
+  }
+
+  Widget _buildMissedBanner() {
+    if (!_showMissedBanner) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF3C7),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.warning_amber_rounded,
+              color: Color(0xFFF59E0B), size: 22),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Missed yesterday\'s session',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF92400E),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _missedPlanName,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFFB45309),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          GestureDetector(
+            onTap: () {
+              setState(() => _showMissedBanner = false);
+              context.push(Routes.missedCheckin, extra: {
+                'planId': _missedPlanId,
+                'planName': _missedPlanName,
+                'missedDayIndex': _missedDayIndex,
+              });
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF59E0B),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Text(
+                'Log reason',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _userStreamSub?.cancel();
+    _progressStreamSub?.cancel();
     super.dispose();
   }
 
@@ -270,21 +420,7 @@ class _HomeTabState extends State<_HomeTab> {
       final todaysCal = results[2] as int;
       final streak = results[3] as int;
       final sessionDates = results[4] as Set<String>;
-      final dayIndex =
-          (profile?['currentDayIndex'] as num?)?.toInt() ?? 1;
-      final trackedPlanId =
-          profile?['trackedPlanId'] as String? ?? '';
-      final lastCompletedDate =
-          profile?['lastCompletedDate'] as String?;
-      final today = DateTime.now().toString().substring(0, 10);
-
-      final rawCompressedDays = profile?['compressedDays'];
-      bool sessionCompressed = false;
-      if (rawCompressedDays is List) {
-        final compressedSet =
-            rawCompressedDays.map((d) => (d as num).toInt()).toSet();
-        sessionCompressed = compressedSet.contains(dayIndex);
-      }
+      final trackedPlanId = profile?['trackedPlanId'] as String? ?? '';
 
       setState(() {
         _displayName = profile?['displayName'] as String?;
@@ -294,13 +430,16 @@ class _HomeTabState extends State<_HomeTab> {
         _todaysCalories = todaysCal;
         _streakDays = streak;
         _sessionDates = sessionDates;
-        _currentDayIndex = dayIndex;
-        _todayCompleted = lastCompletedDate == today;
-        _isSessionCompressed = sessionCompressed;
+        _trackedPlanId = trackedPlanId;
+        _trackedPlanName = profile?['trackedPlanName'] as String? ?? '';
       });
 
       if (trackedPlanId.isNotEmpty) {
-        _loadTodaySession(uid, dayIndex);
+        _startProgressStream(uid, trackedPlanId);
+        // Progress stream will trigger _loadTodaySession via dayChanged logic,
+        // but call it immediately so the home screen isn't blank while streaming.
+        _loadTodaySession(uid, _currentDayIndex);
+        _checkMissedSession(uid);
       }
     } catch (_) {
       if (mounted) setState(() => _isLoadingName = false);
@@ -343,7 +482,13 @@ class _HomeTabState extends State<_HomeTab> {
           ),
           SliverToBoxAdapter(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+              padding: const EdgeInsets.only(top: 16),
+              child: _buildMissedBanner(),
+            ),
+          ),
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
               child: Text(
                 "Today's Plan",
                 style: const TextStyle(
@@ -1031,9 +1176,13 @@ class _TodayPlanCard extends StatelessWidget {
           // Exercise list — show first 5, "+N more" if needed
           ...exercises.take(5).map((e) {
             final name = e['name'] as String? ?? 'Exercise';
-            final sets = (e['sets'] as num?)?.toInt() ?? 3;
-            final reps = (e['reps'] as num?)?.toInt() ?? 10;
-            return _exerciseTile(name, '$sets × $reps reps');
+            final setsCount =
+                FirestoreService.parseExerciseSets(e['sets'], 3).length;
+            final reps = (e['reps'] as num?)?.toInt();
+            final label = reps != null && reps > 0
+                ? '$setsCount × $reps reps'
+                : '$setsCount sets';
+            return _exerciseTile(name, label);
           }),
           if (exercises.length > 5)
             Padding(

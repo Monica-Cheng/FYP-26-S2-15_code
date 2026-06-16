@@ -18,6 +18,7 @@ import '../screens/plans/gym_session_screen.dart';
 import '../screens/onboarding/onboarding_walkthrough_screen.dart';
 import '../screens/plans/post_session_summary_screen.dart';
 import '../screens/home/manual_activity_log_screen.dart';
+import '../screens/home/missed_checkin_screen.dart';
 import '../screens/profile/edit_profile_screen.dart';
 import '../screens/profile/profile_screen.dart';
 import '../screens/settings/health_profile_screen.dart';
@@ -29,6 +30,8 @@ import '../screens/plans/build_routine_screen.dart';
 import '../screens/plans/explore_screen.dart';
 import '../screens/plans/plan_schedule_screen.dart';
 import '../screens/progress/activity_detail_screen.dart';
+import '../screens/cardio/cardio_setup_screen.dart';
+import '../screens/cardio/cardio_session_screen.dart';
 import '../screens/splash_screen.dart';
 
 // Route path constants — use these instead of hardcoding strings
@@ -55,6 +58,7 @@ class Routes {
   static const String healthProfile = '/health-profile';
   static const String editProfile = '/edit-profile';
   static const String manualActivityLog = '/manual-activity-log';
+  static const String missedCheckin = '/missed-checkin';
   static const String planDetail = '/plan-detail';
   static const String activityDetail = '/activity-detail';
   static const String findProfessional = '/find-professional';
@@ -63,6 +67,8 @@ class Routes {
   static const String explore = '/explore';
   static const String buildRoutine = '/build-routine';
   static const String editRoutine = '/edit-routine';
+  static const String cardioSetup = '/cardio-setup';
+  static const String cardioSession = '/cardio-session';
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -151,6 +157,10 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const ManualActivityLogScreen(),
       ),
       GoRoute(
+        path: Routes.missedCheckin,
+        builder: (context, state) => const MissedCheckinScreen(),
+      ),
+      GoRoute(
         path: Routes.planDetail,
         builder: (context, state) => const PlanDetailScreen(),
       ),
@@ -181,6 +191,14 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.editRoutine,
         builder: (context, state) => const BuildRoutineScreen(),
+      ),
+      GoRoute(
+        path: Routes.cardioSetup,
+        builder: (context, state) => const CardioSetupScreen(),
+      ),
+      GoRoute(
+        path: Routes.cardioSession,
+        builder: (context, state) => const CardioSessionScreen(),
       ),
       // Add more routes here as you build each screen
     ],
