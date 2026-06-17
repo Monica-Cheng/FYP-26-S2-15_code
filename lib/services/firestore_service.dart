@@ -883,4 +883,54 @@ class FirestoreService {
         .map((doc) => {'id': doc.id, ...doc.data()})
         .toList();
   }
+
+  // ---------------------------------------------------------------------------
+  // Save a weight entry for today to users/{uid}/weightLogs/{date}.
+  // Uses the date string as the doc id so one entry per day is enforced.
+  // ---------------------------------------------------------------------------
+  Future<void> saveWeightEntry(String uid, double weightKg) async {
+    final date = DateTime.now()
+        .toString()
+        .substring(0, 10); // yyyy-MM-dd
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection('weightLogs')
+        .doc(date)
+        .set({
+      'weightKg': weightKg,
+      'date': date,
+      'timestamp': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Get all weight log entries ordered by date ascending.
+  // ---------------------------------------------------------------------------
+  Future<List<Map<String, dynamic>>> getWeightLogs(String uid) async {
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection('weightLogs')
+        .orderBy('date', descending: false)
+        .get();
+    return snapshot.docs.map((doc) {
+      return {'id': doc.id, ...doc.data()};
+    }).toList();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stream of weight logs for live updates, ordered by date ascending.
+  // ---------------------------------------------------------------------------
+  Stream<List<Map<String, dynamic>>> getWeightLogsStream(String uid) {
+    return _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection('weightLogs')
+        .orderBy('date', descending: false)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => {'id': doc.id, ...doc.data()})
+            .toList());
+  }
 }

@@ -1,16 +1,21 @@
 // lib/screens/plans/post_session_summary_screen.dart
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
+import 'package:share_plus/share_plus.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../widgets/share_card_widget.dart';
 
 // ── Module-level helpers ───────────────────────────────────────────────────────
 
@@ -53,6 +58,7 @@ class PostSessionSummaryScreen extends StatefulWidget {
 
 class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     with SingleTickerProviderStateMixin {
+  bool _isSharing = false;
   bool _exercisesExpanded = false;
   late AnimationController _entranceCtrl;
   late Animation<double> _checkScale;
@@ -253,6 +259,121 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         _wiseCoachSummary = 'Great session! Keep up the consistency.';
         _summaryLoading = false;
       });
+    }
+  }
+
+  // ── Share ─────────────────────────────────────────────────────────────────
+
+  void _snack(String msg) => ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(msg),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+
+  Future<void> _captureAndShare() async {
+    if (_isSharing) return;
+    setState(() => _isSharing = true);
+    try {
+      final extra =
+          GoRouterState.of(context).extra as Map<String, dynamic>?;
+      final sessionName =
+          extra?['sessionName'] as String? ?? 'Workout';
+      final elapsedSeconds =
+          extra?['elapsedSeconds'] as int? ?? 0;
+      final date = extra?['date'] is DateTime
+          ? extra!['date'] as DateTime
+          : DateTime.now();
+      final exercises = _parseExercises(extra?['exercises']);
+      final stats = _calcStats(exercises);
+      final caloriesBurned = _isCardio
+          ? _cardioCalories
+          : stats.totalSets * 8;
+
+      // Build the widget
+      final cardWidget = ShareCardWidget(
+        sessionName: sessionName,
+        isCardio: _isCardio,
+        cardioActivity: _cardioActivity,
+        elapsedSeconds: elapsedSeconds,
+        calories: caloriesBurned,
+        totalSets: stats.totalSets,
+        volume: stats.volume,
+        goalMinutes: _goalMinutes,
+        date: date,
+      );
+
+      // Render off-tree at fixed size
+      const cardWidth = 360.0;
+      final repaintBoundary = RenderRepaintBoundary();
+      final renderView = RenderView(
+        view: View.of(context),
+        child: RenderPositionedBox(
+          alignment: Alignment.topLeft,
+          child: repaintBoundary,
+        ),
+        configuration: ViewConfiguration(
+          logicalConstraints: BoxConstraints.tight(
+            const Size(cardWidth, 800),
+          ),
+          devicePixelRatio: 3.0,
+        ),
+      );
+
+      final pipelineOwner = PipelineOwner();
+      final buildOwner = BuildOwner(focusManager: FocusManager());
+
+      pipelineOwner.rootNode = renderView;
+      renderView.prepareInitialFrame();
+
+      final rootElement = RenderObjectToWidgetAdapter<RenderBox>(
+        container: repaintBoundary,
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: MediaQuery(
+            data: MediaQueryData.fromView(View.of(context)),
+            child: cardWidget,
+          ),
+        ),
+      ).attachToRenderTree(buildOwner);
+
+      buildOwner.buildScope(rootElement);
+      buildOwner.finalizeTree();
+
+      pipelineOwner.flushLayout();
+      pipelineOwner.flushCompositingBits();
+      pipelineOwner.flushPaint();
+
+      final image = await repaintBoundary.toImage(pixelRatio: 3.0);
+      final byteData = await image.toByteData(
+          format: ui.ImageByteFormat.png);
+
+      if (byteData == null) {
+        _snack('Could not generate share card.');
+        setState(() => _isSharing = false);
+        return;
+      }
+
+      final bytes = byteData.buffer.asUint8List();
+      // Use dart:io Directory.systemTemp to avoid JNI issues
+      // on Android emulator. Works on both real devices and
+      // emulators without needing platform channels.
+      final Directory tempDir = Directory.systemTemp;
+      final file = File(
+          '${tempDir.path}/wiseworkout_session_'
+          '${DateTime.now().millisecondsSinceEpoch}.png');
+      await file.writeAsBytes(bytes);
+
+      await Share.shareXFiles(
+        [XFile(file.path)],
+        text: 'Just crushed a session on WiseWorkout! 💪',
+      );
+    } catch (e, stack) {
+      debugPrint('Share error: $e');
+      debugPrint('Stack: $stack');
+      _snack('Could not share. Please try again.');
+    } finally {
+      if (mounted) setState(() => _isSharing = false);
     }
   }
 
@@ -1062,29 +1183,42 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         children: [
           Expanded(
             child: GestureDetector(
-              onTap: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Share coming soon'),
-                    behavior: SnackBarBehavior.floating,
-                  ),
-                );
-              },
+              onTap: _isSharing ? null : _captureAndShare,
               child: Container(
                 height: 50,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: WW.primary, width: 1.5),
-                ),
-                child: const Center(
-                  child: Text(
-                    'Share',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: WW.primary,
-                    ),
+                  border: Border.all(
+                    color: _isSharing ? WW.border : WW.primary,
+                    width: 1.5,
                   ),
+                ),
+                child: Center(
+                  child: _isSharing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            color: WW.primary,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.ios_share_rounded,
+                                color: WW.primary, size: 16),
+                            SizedBox(width: 6),
+                            Text(
+                              'Share',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: WW.primary,
+                              ),
+                            ),
+                          ],
+                        ),
                 ),
               ),
             ),

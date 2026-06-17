@@ -54,6 +54,9 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
   bool _calorieGoalActive = false;
   bool _isSavingCalorie = false;
   bool _showCalorieSuccess = false;
+  bool _weightGoalActive = false;
+  bool _isSavingWeight = false;
+  bool _showWeightSuccess = false;
   final _dailyCalCtrl = TextEditingController();
   final _weeklyCalCtrl = TextEditingController();
   final _monthlyCalCtrl = TextEditingController();
@@ -127,6 +130,7 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
           _weeklyCalCtrl.text = weeklyCal;
           _monthlyCalCtrl.text = monthlyCal;
           _goalWeightCtrl.text = goalWeight;
+          _weightGoalActive = data['weightGoalActive'] as bool? ?? (_goalWeightCtrl.text.isNotEmpty);
           _goalDate = goalDate;
 
           _prefGoal = data['primaryGoal'] as String? ?? '';
@@ -339,8 +343,6 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
         'dailyCalorieGoal': int.tryParse(_dailyCalCtrl.text),
         'weeklyCalorieGoal': int.tryParse(_weeklyCalCtrl.text),
         'monthlyCalorieGoal': int.tryParse(_monthlyCalCtrl.text),
-        'goalWeight': double.tryParse(_goalWeightCtrl.text),
-        'goalDate': _goalDate?.toIso8601String().substring(0, 10),
       });
       if (!mounted) return;
       setState(() {
@@ -354,6 +356,32 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
       if (mounted) {
         setState(() => _isSavingCalorie = false);
         _snack('Failed to save goals. Please try again.');
+      }
+    }
+  }
+
+  Future<void> _saveWeightGoal() async {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    setState(() => _isSavingWeight = true);
+    try {
+      await _firestore.updateUserProfile(uid, {
+        'goalWeight': double.tryParse(_goalWeightCtrl.text),
+        'goalDate': _goalDate?.toIso8601String().substring(0, 10),
+        'weightGoalActive': _weightGoalActive,
+      });
+      if (!mounted) return;
+      setState(() {
+        _isSavingWeight = false;
+        _showWeightSuccess = true;
+      });
+      Future.delayed(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _showWeightSuccess = false);
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _isSavingWeight = false);
+        _snack('Failed to save weight goal. Please try again.');
       }
     }
   }
@@ -860,9 +888,87 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
                   hint: 'Auto-calculated',
                   note: 'Auto-calculated from weekly × 4.',
                 ),
-                _calDivider(),
+                const SizedBox(height: 16),
+                _saveBtn(
+                  label: 'Save calorie goals',
+                  loading: _isSavingCalorie,
+                  onTap: _saveCalorieGoals,
+                ),
+                if (_showCalorieSuccess) ...[
+                  const SizedBox(height: 10),
+                  _successBanner('Goals saved!'),
+                ],
+              ],
+            ),
+          ),
+        ],
+        // ── Weight Goal Tracking ─────────────────────────────────────────────
+        const SizedBox(height: 24),
+        const Text(
+          'WEIGHT GOAL TRACKING',
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            color: WW.textSec,
+            letterSpacing: 0.5,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: WW.cardDecoration,
+          child: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: WW.tealBg,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.monitor_weight_outlined,
+                    color: WW.teal, size: 20),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Track weight goals',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: WW.text,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Set a target weight and date.',
+                      style: TextStyle(fontSize: 12, color: WW.textSec),
+                    ),
+                  ],
+                ),
+              ),
+              Switch(
+                value: _weightGoalActive,
+                onChanged: (val) =>
+                    setState(() => _weightGoalActive = val),
+                activeColor: WW.teal,
+              ),
+            ],
+          ),
+        ),
+        if (_weightGoalActive) ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: WW.cardDecoration,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 const Text(
-                  'Weight loss goal',
+                  'Weight goal',
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
@@ -870,24 +976,70 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                _calField(
-                  label: 'Goal weight (optional)',
-                  ctrl: _goalWeightCtrl,
-                  hint: '—',
-                  unit: 'kg',
-                  note: 'Track body composition changes in Progress.',
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Goal weight (optional)',
+                        style: TextStyle(fontSize: 13, color: WW.textSec),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 80,
+                      child: TextField(
+                        controller: _goalWeightCtrl,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: WW.text,
+                        ),
+                        decoration: const InputDecoration(
+                          hintText: '—',
+                          isDense: true,
+                          border: UnderlineInputBorder(
+                            borderSide:
+                                BorderSide(color: WW.primary, width: 1.5),
+                          ),
+                          focusedBorder: UnderlineInputBorder(
+                            borderSide:
+                                BorderSide(color: WW.primary, width: 2),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    const Text('kg',
+                        style: TextStyle(fontSize: 13, color: WW.textSec)),
+                  ],
                 ),
-                _calDivider(),
-                // Target date picker row
+                const Divider(height: 24, color: WW.elevated),
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: _pickGoalDate,
                   child: Row(
                     children: [
                       const Expanded(
-                        child: Text(
-                          'Target date (optional)',
-                          style: TextStyle(fontSize: 13, color: WW.textSec),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Target date (optional)',
+                              style: TextStyle(
+                                  fontSize: 13, color: WW.textSec),
+                            ),
+                            SizedBox(height: 2),
+                            Text(
+                              'Shows a countdown on your Home screen.',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: WW.textSec,
+                                fontStyle: FontStyle.italic,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                       Container(
@@ -895,7 +1047,8 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
                             horizontal: 8, vertical: 4),
                         decoration: const BoxDecoration(
                           border: Border(
-                            bottom: BorderSide(color: WW.primary, width: 1.5),
+                            bottom:
+                                BorderSide(color: WW.primary, width: 1.5),
                           ),
                         ),
                         child: Text(
@@ -910,24 +1063,60 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 4),
-                const Text(
-                  'Shows a countdown on your Home screen.',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: WW.textSec,
-                    fontStyle: FontStyle.italic,
+                const SizedBox(height: 16),
+                GestureDetector(
+                  onTap: _isSavingWeight ? null : _saveWeightGoal,
+                  child: Container(
+                    width: double.infinity,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: WW.teal,
+                      borderRadius: BorderRadius.circular(13),
+                      boxShadow: [
+                        BoxShadow(
+                          color: WW.teal.withOpacity(0.3),
+                          blurRadius: 10,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Center(
+                      child: _isSavingWeight
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                  color: Colors.white, strokeWidth: 2),
+                            )
+                          : const Text(
+                              'Save Weight Goal',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white,
+                              ),
+                            ),
+                    ),
                   ),
                 ),
-                const SizedBox(height: 16),
-                _saveBtn(
-                  label: 'Save calorie goals',
-                  loading: _isSavingCalorie,
-                  onTap: _saveCalorieGoals,
-                ),
-                if (_showCalorieSuccess) ...[
+                if (_showWeightSuccess) ...[
                   const SizedBox(height: 10),
-                  _successBanner('Goals saved!'),
+                  const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.check_circle_rounded,
+                          color: WW.teal, size: 16),
+                      SizedBox(width: 6),
+                      Text(
+                        'Weight goal saved!',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: WW.teal,
+                        ),
+                      ),
+                    ],
+                  ),
                 ],
               ],
             ),

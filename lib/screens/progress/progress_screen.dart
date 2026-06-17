@@ -1,4 +1,6 @@
 // lib/screens/progress/progress_screen.dart
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
@@ -42,6 +44,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
   List<Map<String, dynamic>> _checkIns = [];
   bool _checkInsLoading = true;
 
+  List<Map<String, dynamic>> _weightLogs = [];
+  bool _weightLoading = true;
+  double? _goalWeight;
+  bool _weightExpanded = true;
+  StreamSubscription<List<Map<String, dynamic>>>? _weightSub;
+  StreamSubscription<DocumentSnapshot>? _userDocSub;
+
   static const List<String> _subtabLabels = ['Charts', 'Activities', 'XP History', 'Check-ins'];
   static const List<String> _timeLabels = ['This Week', 'This Month', 'This Year'];
   static const List<String> _actLabels = ['All', 'Gym', 'Cardio', 'Manual'];
@@ -73,6 +82,16 @@ class _ProgressScreenState extends State<ProgressScreen> {
     _loadXpEvents();
     _loadChartData();
     _loadCheckIns();
+    _loadGoalWeight();
+    _startUserDocStream();
+    _startWeightStream();
+  }
+
+  @override
+  void dispose() {
+    _weightSub?.cancel();
+    _userDocSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadChartData() async {
@@ -176,6 +195,177 @@ class _ProgressScreenState extends State<ProgressScreen> {
     } catch (_) {
       if (mounted) setState(() => _sessionsLoading = false);
     }
+  }
+
+  Future<void> _loadGoalWeight() async {
+    try {
+      final uid = AuthService().getCurrentUser()?.uid;
+      if (uid == null) return;
+      final profile = await FirestoreService().getUserProfile(uid);
+      if (!mounted) return;
+      final raw = profile?['goalWeight'];
+      setState(() {
+        _goalWeight = raw is num
+            ? raw.toDouble()
+            : double.tryParse(raw?.toString() ?? '');
+      });
+    } catch (_) {}
+  }
+
+  void _startUserDocStream() {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    _userDocSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .snapshots()
+        .listen((snap) {
+      if (!mounted) return;
+      final data = snap.data();
+      if (data == null) return;
+      final raw = data['goalWeight'];
+      final newGoal = raw is num
+          ? raw.toDouble()
+          : double.tryParse(raw?.toString() ?? '');
+      if (newGoal != _goalWeight) {
+        setState(() => _goalWeight = newGoal);
+      }
+    });
+  }
+
+  void _startWeightStream() {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) {
+      setState(() => _weightLoading = false);
+      return;
+    }
+    _weightSub = FirestoreService()
+        .getWeightLogsStream(uid)
+        .listen((logs) {
+      if (mounted) {
+        setState(() {
+          _weightLogs = logs;
+          _weightLoading = false;
+        });
+      }
+    }, onError: (_) {
+      if (mounted) setState(() => _weightLoading = false);
+    });
+  }
+
+  Future<void> _logWeight(double weightKg) async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    await FirestoreService().saveWeightEntry(uid, weightKg);
+  }
+
+  void _showLogWeightSheet() {
+    final controller = TextEditingController();
+    if (_weightLogs.isNotEmpty) {
+      final last = _weightLogs.last['weightKg'];
+      if (last is num) {
+        controller.text = last.toStringAsFixed(1);
+      }
+    }
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(
+            20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Log Weight',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w800,
+                color: WW.text,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Today · ${DateTime.now().toString().substring(0, 10)}',
+              style: const TextStyle(fontSize: 12, color: WW.textSec),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: controller,
+                    keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true),
+                    autofocus: true,
+                    style: const TextStyle(
+                      fontSize: 32,
+                      fontWeight: FontWeight.w800,
+                      color: WW.text,
+                    ),
+                    decoration: const InputDecoration(
+                      hintText: '70.0',
+                      hintStyle: TextStyle(
+                          color: WW.border,
+                          fontSize: 32,
+                          fontWeight: FontWeight.w800),
+                      border: InputBorder.none,
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const Text(
+                  'kg',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w600,
+                    color: WW.textSec,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            GestureDetector(
+              onTap: () async {
+                final val = double.tryParse(controller.text);
+                if (val == null || val <= 0 || val > 300) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text('Please enter a valid weight'),
+                    behavior: SnackBarBehavior.floating,
+                  ));
+                  return;
+                }
+                Navigator.of(ctx).pop();
+                await _logWeight(val);
+              },
+              child: Container(
+                width: double.infinity,
+                height: 50,
+                decoration: BoxDecoration(
+                  color: WW.primary,
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: const Center(
+                  child: Text(
+                    'Save Weight',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   List<Map<String, dynamic>> get _filteredSessions {
@@ -355,6 +545,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
           _buildGymChart(),
           const SizedBox(height: 12),
           _buildStatCardsRow(),
+          const SizedBox(height: 12),
+          _buildWeightSection(),
         ],
       ),
     );
@@ -711,6 +903,394 @@ class _ProgressScreenState extends State<ProgressScreen> {
           ),
         );
       }),
+    );
+  }
+
+  Widget _buildWeightSection() {
+    double? startWeight;
+    double? currentWeight;
+    double? change;
+
+    if (_weightLogs.isNotEmpty) {
+      final first = _weightLogs.first['weightKg'];
+      final last = _weightLogs.last['weightKg'];
+      startWeight = first is num ? first.toDouble() : null;
+      currentWeight = last is num ? last.toDouble() : null;
+      if (startWeight != null && currentWeight != null) {
+        change = currentWeight - startWeight;
+      }
+    }
+
+    final spots = <FlSpot>[];
+    for (int i = 0; i < _weightLogs.length; i++) {
+      final w = _weightLogs[i]['weightKg'];
+      if (w is num) {
+        spots.add(FlSpot(i.toDouble(), w.toDouble()));
+      }
+    }
+
+    double minY = 40;
+    double maxY = 120;
+    if (spots.isNotEmpty) {
+      final weights = spots.map((s) => s.y).toList();
+      minY = (weights.reduce((a, b) => a < b ? a : b) - 3).clamp(30, 200);
+      maxY = (weights.reduce((a, b) => a > b ? a : b) + 3).clamp(50, 250);
+      if (_goalWeight != null) {
+        minY = minY.clamp(0, _goalWeight! - 2);
+        maxY = maxY < _goalWeight! + 2 ? _goalWeight! + 2 : maxY;
+      }
+    }
+
+    return Container(
+      decoration: WW.cardDecoration,
+      clipBehavior: Clip.hardEdge,
+      child: Column(
+        children: [
+          GestureDetector(
+            onTap: () =>
+                setState(() => _weightExpanded = !_weightExpanded),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+              child: Row(
+                children: [
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: WW.tealBg,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(
+                      Icons.monitor_weight_outlined,
+                      color: WW.teal,
+                      size: 18,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Text(
+                      'Track Weight',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: WW.text,
+                      ),
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: _showLogWeightSheet,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: WW.primary,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Text(
+                        '+ Log',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Icon(
+                    _weightExpanded
+                        ? Icons.keyboard_arrow_up_rounded
+                        : Icons.keyboard_arrow_down_rounded,
+                    color: WW.textSec,
+                    size: 20,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_weightExpanded) ...[
+            const Divider(height: 1, color: WW.elevated),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: _weightLoading
+                  ? const Center(
+                      child: CircularProgressIndicator(color: WW.primary))
+                  : _weightLogs.isEmpty
+                      ? Column(
+                          children: [
+                            const Icon(Icons.monitor_weight_outlined,
+                                size: 36, color: WW.border),
+                            const SizedBox(height: 8),
+                            const Text(
+                              'No weight logged yet',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                color: WW.textSec,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            const Text(
+                              'Tap "+ Log" to record your first weight',
+                              style: TextStyle(
+                                  fontSize: 12, color: WW.textSec),
+                            ),
+                            if (_goalWeight != null) ...[
+                              const SizedBox(height: 12),
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: WW.tealBg,
+                                  borderRadius:
+                                      BorderRadius.circular(10),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.flag_rounded,
+                                        color: WW.teal, size: 14),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      'Goal: ${_goalWeight!.toStringAsFixed(1)} kg',
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                        color: WW.teal,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 8),
+                          ],
+                        )
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(
+                              height: 160,
+                              child: LineChart(
+                                LineChartData(
+                                  minY: minY,
+                                  maxY: maxY,
+                                  gridData:
+                                      const FlGridData(show: false),
+                                  borderData:
+                                      FlBorderData(show: false),
+                                  titlesData: const FlTitlesData(
+                                    leftTitles: AxisTitles(
+                                        sideTitles: SideTitles(
+                                            showTitles: false)),
+                                    rightTitles: AxisTitles(
+                                        sideTitles: SideTitles(
+                                            showTitles: false)),
+                                    topTitles: AxisTitles(
+                                        sideTitles: SideTitles(
+                                            showTitles: false)),
+                                    bottomTitles: AxisTitles(
+                                        sideTitles: SideTitles(
+                                            showTitles: false)),
+                                  ),
+                                  lineBarsData: [
+                                    LineChartBarData(
+                                      spots: spots.length == 1
+                                          ? [spots[0], FlSpot(spots[0].x + 0.001, spots[0].y)]
+                                          : spots,
+                                      isCurved: true,
+                                      color: WW.primary,
+                                      barWidth: 2.5,
+                                      dotData: FlDotData(
+                                        show: true,
+                                        getDotPainter: (spot, percent,
+                                            bar, index) {
+                                          return FlDotCirclePainter(
+                                            radius: 4,
+                                            color: WW.primary,
+                                            strokeWidth: 2,
+                                            strokeColor: Colors.white,
+                                          );
+                                        },
+                                      ),
+                                      belowBarData: BarAreaData(
+                                        show: true,
+                                        color: WW.primary
+                                            .withOpacity(0.08),
+                                      ),
+                                    ),
+                                    if (_goalWeight != null)
+                                      LineChartBarData(
+                                        spots: spots.isEmpty
+                                            ? [
+                                                FlSpot(0, _goalWeight!),
+                                                FlSpot(1, _goalWeight!),
+                                              ]
+                                            : spots.length == 1
+                                                ? [
+                                                    FlSpot(0, _goalWeight!),
+                                                    FlSpot(1, _goalWeight!),
+                                                  ]
+                                                : [
+                                                    FlSpot(0, _goalWeight!),
+                                                    FlSpot(
+                                                        (spots.length - 1)
+                                                            .toDouble(),
+                                                        _goalWeight!),
+                                                  ],
+                                        isCurved: false,
+                                        color: WW.teal,
+                                        barWidth: 1.5,
+                                        dashArray: [6, 4],
+                                        dotData: const FlDotData(
+                                            show: false),
+                                        belowBarData:
+                                            BarAreaData(show: false),
+                                      ),
+                                  ],
+                                  lineTouchData: LineTouchData(
+                                    touchTooltipData:
+                                        LineTouchTooltipData(
+                                      getTooltipColor: (_) =>
+                                          WW.primaryDark,
+                                      getTooltipItems: (touchedSpots) {
+                                        return touchedSpots.map((spot) {
+                                          if (spot.barIndex == 1) {
+                                            return LineTooltipItem(
+                                              'Goal: ${_goalWeight!.toStringAsFixed(1)} kg',
+                                              const TextStyle(
+                                                color: WW.teal,
+                                                fontSize: 11,
+                                                fontWeight:
+                                                    FontWeight.w600,
+                                              ),
+                                            );
+                                          }
+                                          final idx = spot.x.toInt();
+                                          final date =
+                                              idx < _weightLogs.length
+                                                  ? _weightLogs[idx]
+                                                          ['date']
+                                                      as String? ??
+                                                      ''
+                                                  : '';
+                                          return LineTooltipItem(
+                                            '${spot.y.toStringAsFixed(1)} kg\n$date',
+                                            const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          );
+                                        }).toList();
+                                      },
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                if (currentWeight != null)
+                                  Text(
+                                    '${currentWeight.toStringAsFixed(1)} kg',
+                                    style: const TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.w800,
+                                      color: WW.text,
+                                    ),
+                                  ),
+                                const SizedBox(width: 8),
+                                if (change != null)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: change <= 0
+                                          ? WW.tealBg
+                                          : const Color(0xFFFEF3C7),
+                                      borderRadius:
+                                          BorderRadius.circular(6),
+                                    ),
+                                    child: Text(
+                                      '${change >= 0 ? '+' : ''}${change.toStringAsFixed(1)} kg',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                        color: change <= 0
+                                            ? WW.teal
+                                            : const Color(0xFFF59E0B),
+                                      ),
+                                    ),
+                                  ),
+                                const Spacer(),
+                                if (_goalWeight != null)
+                                  Row(
+                                    children: [
+                                      const Icon(Icons.flag_rounded,
+                                          color: WW.teal, size: 13),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        'Goal: ${_goalWeight!.toStringAsFixed(1)} kg',
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          color: WW.teal,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            const Text(
+                              'Recent entries',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: WW.textSec,
+                                letterSpacing: 0.4,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            ..._weightLogs.reversed.take(5).map((log) {
+                              final w = log['weightKg'];
+                              final d = log['date'] as String? ?? '';
+                              final wStr = w is num
+                                  ? '${w.toStringAsFixed(1)} kg'
+                                  : '--';
+                              return Padding(
+                                padding:
+                                    const EdgeInsets.only(bottom: 6),
+                                child: Row(
+                                  children: [
+                                    Text(
+                                      d,
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: WW.textSec,
+                                      ),
+                                    ),
+                                    const Spacer(),
+                                    Text(
+                                      wStr,
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
+                                        color: WW.text,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }),
+                            const SizedBox(height: 4),
+                          ],
+                        ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
