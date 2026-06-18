@@ -847,6 +847,8 @@ class FirestoreService {
     required int durationSeconds,
     required int caloriesBurned,
     String mode = 'indoor',
+    double? avgHeartRate,
+    double? maxHeartRate,
   }) async {
     final xpEarned = (caloriesBurned * 0.5).round().clamp(20, 500);
     await _db
@@ -867,6 +869,8 @@ class FirestoreService {
       'exercises': [],
       'totalSets': 0,
       'totalVolume': 0.0,
+      'avgHeartRate': ?avgHeartRate,
+      'maxHeartRate': ?maxHeartRate,
     });
   }
 

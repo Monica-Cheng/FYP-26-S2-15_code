@@ -26,6 +26,10 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSHealthShareUsageDescription</key>
+	<string>WiseWorkout reads your heart rate, steps, and calories to enhance your workout summaries.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>WiseWorkout may write workout data to Apple Health.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

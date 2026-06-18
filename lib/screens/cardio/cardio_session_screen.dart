@@ -9,6 +9,7 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../services/health_service.dart';
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,10 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
   Timer? _timer;
   double _weightKg = 70.0;
   String? _uid;
+  double? _liveHeartRate;
+  bool _healthPermissionGranted = false;
+  Timer? _heartRateTimer;
+  DateTime? _sessionStartTime;
 
   @override
   void initState() {
@@ -46,12 +51,15 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
       });
       _loadUserWeight();
       _startTimer();
+      _sessionStartTime = DateTime.now();
+      _initHealthKit();
     });
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _heartRateTimer?.cancel();
     super.dispose();
   }
 
@@ -78,6 +86,19 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
             ? 3.5
             : 6.0;
     return met * _weightKg * (_elapsedSeconds / 3600);
+  }
+
+  Future<void> _initHealthKit() async {
+    final granted = await HealthService().requestPermissions();
+    if (!mounted) return;
+    setState(() => _healthPermissionGranted = granted);
+    if (granted) {
+      _heartRateTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+        final hr = await HealthService().getLatestHeartRate();
+        if (!mounted) return;
+        setState(() => _liveHeartRate = hr);
+      });
+    }
   }
 
   // ── Timer ─────────────────────────────────────────────────────────────────
@@ -115,12 +136,25 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
     final uid = _uid;
     if (uid != null) {
       try {
+        double? avgHR;
+        double? maxHR;
+        if (_sessionStartTime != null) {
+          final hrData = await HealthService()
+              .getHeartRateInRange(_sessionStartTime!, DateTime.now());
+          if (hrData.isNotEmpty) {
+            final bpms = hrData.map((e) => e.bpm).toList();
+            avgHR = bpms.reduce((a, b) => a + b) / bpms.length;
+            maxHR = bpms.reduce((a, b) => a > b ? a : b);
+          }
+        }
         await FirestoreService().saveCardioSession(
           uid: uid,
           activity: _activity,
           durationSeconds: _elapsedSeconds,
           caloriesBurned: _calories.round(),
           mode: 'indoor',
+          avgHeartRate: avgHR,
+          maxHeartRate: maxHR,
         );
       } catch (_) {}
     }
@@ -382,6 +416,30 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
                       ),
                       const Text(
                         'Time',
+                        style: TextStyle(fontSize: 11, color: WW.textSec),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(width: 1, height: 40, color: WW.border),
+                Expanded(
+                  child: Column(
+                    children: [
+                      const Icon(Icons.favorite_rounded,
+                          color: Color(0xFFEF4444), size: 18),
+                      const SizedBox(height: 4),
+                      Text(
+                        _liveHeartRate != null
+                            ? '${_liveHeartRate!.round()} bpm'
+                            : '--',
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                          color: WW.text,
+                        ),
+                      ),
+                      const Text(
+                        'Heart Rate',
                         style: TextStyle(fontSize: 11, color: WW.textSec),
                       ),
                     ],

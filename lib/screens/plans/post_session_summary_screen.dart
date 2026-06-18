@@ -15,6 +15,7 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../services/health_service.dart';
 import '../../widgets/share_card_widget.dart';
 
 // ── Module-level helpers ───────────────────────────────────────────────────────
@@ -69,6 +70,9 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
   String _cardioActivity = '';
   int _cardioCalories = 0;
   int _goalMinutes = 0;
+  double? _avgHeartRate;
+  double? _maxHeartRate;
+  bool _heartRateLoaded = false;
 
   @override
   void initState() {
@@ -90,6 +94,9 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         _cardioCalories = (extra?['cardioCalories'] as num?)?.toInt() ?? 0;
         _goalMinutes = (extra?['goalMinutes'] as num?)?.toInt() ?? 0;
       });
+      if (_isCardio) {
+        _loadHeartRateData();
+      }
       _generateWiseCoachSummary();
     });
   }
@@ -98,6 +105,47 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
   void dispose() {
     _entranceCtrl.dispose();
     super.dispose();
+  }
+
+  // ── Heart rate loader ─────────────────────────────────────────────────────
+
+  Future<void> _loadHeartRateData() async {
+    try {
+      final uid = AuthService().getCurrentUser()?.uid;
+      if (uid == null) {
+        setState(() => _heartRateLoaded = true);
+        return;
+      }
+      final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
+      final avg = extra?['avgHeartRate'] as double?;
+      final max = extra?['maxHeartRate'] as double?;
+      if (avg != null && max != null) {
+        setState(() {
+          _avgHeartRate = avg;
+          _maxHeartRate = max;
+          _heartRateLoaded = true;
+        });
+        return;
+      }
+      final granted = await HealthService().requestPermissions();
+      if (granted) {
+        final now = DateTime.now();
+        final points = await HealthService().getHeartRateInRange(
+          now.subtract(const Duration(hours: 2)),
+          now,
+        );
+        if (points.isNotEmpty) {
+          final bpms = points.map((p) => p.bpm).toList();
+          setState(() {
+            _avgHeartRate = bpms.reduce((a, b) => a + b) / bpms.length;
+            _maxHeartRate = bpms.reduce((a, b) => a > b ? a : b);
+            _heartRateLoaded = true;
+          });
+          return;
+        }
+      }
+    } catch (_) {}
+    setState(() => _heartRateLoaded = true);
   }
 
   // ── Data helpers ──────────────────────────────────────────────────────────
@@ -638,7 +686,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         ),
         const SizedBox(height: 16),
 
-        // Heart rate placeholder card
+        // Heart rate card
         Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
@@ -665,8 +713,8 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  children: const [
-                    Text(
+                  children: [
+                    const Text(
                       'Heart Rate',
                       style: TextStyle(
                         fontSize: 13,
@@ -674,22 +722,31 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                         color: WW.text,
                       ),
                     ),
-                    SizedBox(height: 2),
-                    Text(
-                      'Connect Apple Health to unlock',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: WW.textSec,
+                    const SizedBox(height: 2),
+                    if (!_heartRateLoaded)
+                      const Text(
+                        'Loading...',
+                        style: TextStyle(fontSize: 12, color: WW.textSec),
+                      )
+                    else if (_avgHeartRate != null && _maxHeartRate != null)
+                      Text(
+                        'Avg ${_avgHeartRate!.round()} bpm · Max ${_maxHeartRate!.round()} bpm',
+                        style: const TextStyle(fontSize: 12, color: WW.textSec),
+                      )
+                    else
+                      const Text(
+                        'Connect Apple Health to unlock',
+                        style: TextStyle(fontSize: 12, color: WW.textSec),
                       ),
-                    ),
                   ],
                 ),
               ),
-              const Icon(
-                Icons.lock_outline_rounded,
-                size: 16,
-                color: WW.textSec,
-              ),
+              if (_avgHeartRate == null)
+                const Icon(
+                  Icons.lock_outline_rounded,
+                  size: 16,
+                  color: WW.textSec,
+                ),
             ],
           ),
         ),
