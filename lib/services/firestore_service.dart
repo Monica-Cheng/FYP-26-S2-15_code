@@ -606,6 +606,7 @@ class FirestoreService {
     await _db.collection(Collections.users).doc(uid).update({
       'trackedPlanId': planId,
       'trackedPlanName': planName,
+      'savedPlanIds': FieldValue.arrayUnion([planId]),
     });
     await initPlanProgress(uid, planId);
   }

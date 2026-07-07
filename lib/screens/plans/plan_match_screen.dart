@@ -108,6 +108,7 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
   Map<String, dynamic>? _matchedPlan;
   int _matchScore = 0;
   bool _isTracking = false;
+  bool _isSaved = false;
 
   final _auth = AuthService();
   final _firestore = FirestoreService();
@@ -193,22 +194,35 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
       for (final plan in plans) {
         int score = 0;
 
+        // Level match is now worth 6 points (was 3) — most important factor
+        final matchLevel = plan['matchLevel'] as String? ?? '';
+        final levelMatches = matchLevel.toLowerCase() == _level.toLowerCase();
+        if (levelMatches) score += 6;
+
+        // Goal match — 3 points
         final matchGoals = (plan['matchGoals'] as List<dynamic>?)
                 ?.map((e) => e.toString().toLowerCase())
-                .toList() ??
-            [];
+                .toList() ?? [];
         if (matchGoals.contains(_goal.toLowerCase())) score += 3;
 
-        final matchSport = plan['matchSport'] as String? ?? '';
-        if (matchSport == _sport || _sport == 'Both' || matchSport == 'Both') {
-          score += 3;
-        }
+        // Sport match — fuzzy contains-based comparison, 3 points
+        final matchSport = (plan['matchSport'] as String? ?? '').toLowerCase();
+        final userSport = _sport.toLowerCase();
+        final sportMatches = matchSport == userSport ||
+            matchSport.contains(userSport.split(' ').first) ||
+            userSport.contains(matchSport.split(' ').first) ||
+            matchSport == 'both' ||
+            userSport == 'both';
+        if (sportMatches) score += 3;
 
-        final matchLevel = plan['matchLevel'] as String? ?? '';
-        if (matchLevel.toLowerCase() == _level.toLowerCase()) score += 3;
-
+        // Days per week — within +/-1, 2 points
         final planDays = (plan['daysPerWeek'] as num?)?.toInt() ?? 3;
         if ((planDays - _days).abs() <= 1) score += 2;
+
+        // Hard penalty: if level does not match at all, heavily
+        // deprioritize this plan so a correct-level plan always wins
+        // when one exists
+        if (!levelMatches) score -= 4;
 
         if (score > bestScore) {
           bestScore = score;
@@ -240,11 +254,28 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
       } catch (_) {}
     }
     if (!mounted) return;
-    setState(() => _isTracking = false);
+    setState(() {
+      _isTracking = false;
+      _isSaved = true;
+    });
     context.go(Routes.home);
   }
 
-  int get _matchPercent => ((_matchScore / 11) * 100).round().clamp(0, 100);
+  Future<void> _savePlan() async {
+    final plan = _matchedPlan;
+    if (plan == null) return;
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      await _firestore.saveExplorePlan(uid, plan['id'] as String? ?? '');
+      if (mounted) {
+        setState(() => _isSaved = true);
+        _snack('Saved to My Plans.');
+      }
+    } catch (_) {}
+  }
+
+  int get _matchPercent => ((_matchScore / 14) * 100).round().clamp(0, 100);
 
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -881,7 +912,7 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
 
         // Save to All Plans
         GestureDetector(
-          onTap: () => _snack('Saved to your plans!'),
+          onTap: _isSaved ? null : _savePlan,
           child: Container(
             width: double.infinity,
             height: 48,
@@ -889,16 +920,19 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
               borderRadius: BorderRadius.circular(14),
               border: Border.all(color: WW.primary, width: 1.5),
             ),
-            child: const Center(
+            child: Center(
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.bookmark_border_rounded,
-                      color: WW.primary, size: 18),
-                  SizedBox(width: 6),
+                  Icon(
+                    _isSaved ? Icons.bookmark_rounded : Icons.bookmark_border_rounded,
+                    color: WW.primary,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 6),
                   Text(
-                    'Save to All Plans',
-                    style: TextStyle(
+                    _isSaved ? 'Saved to My Plans' : 'Save to My Plans',
+                    style: const TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w700,
                       color: WW.primary,

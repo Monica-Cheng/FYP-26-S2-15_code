@@ -41,8 +41,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
   int _weekTotalSessions = 0;
   int _weekGymSessions = 0;
   bool _chartsLoading = true;
-  List<Map<String, dynamic>> _checkIns = [];
   bool _checkInsLoading = true;
+  Stream<QuerySnapshot>? _checkInsStream;
 
   List<Map<String, dynamic>> _weightLogs = [];
   bool _weightLoading = true;
@@ -117,35 +117,22 @@ class _ProgressScreenState extends State<ProgressScreen> {
     }
   }
 
-  Future<void> _loadCheckIns() async {
-    try {
-      final uid = AuthService().getCurrentUser()?.uid;
-      if (uid == null) {
-        if (mounted) setState(() => _checkInsLoading = false);
-        return;
-      }
-      final snapshot = await FirebaseFirestore.instance
+  void _loadCheckIns() {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) {
+      if (mounted) setState(() => _checkInsLoading = false);
+      return;
+    }
+    setState(() {
+      _checkInsStream = FirebaseFirestore.instance
           .collection('users')
           .doc(uid)
           .collection('missedSessions')
           .orderBy('timestamp', descending: true)
-          .get();
-      final items = snapshot.docs.map((doc) {
-        final data = doc.data();
-        return {
-          'id': doc.id,
-          ...data,
-        };
-      }).toList();
-      if (mounted) {
-        setState(() {
-          _checkIns = items;
-          _checkInsLoading = false;
-        });
-      }
-    } catch (_) {
-      if (mounted) setState(() => _checkInsLoading = false);
-    }
+          .limit(50)
+          .snapshots();
+      _checkInsLoading = false;
+    });
   }
 
   Future<void> _loadXpData() async {
@@ -1605,55 +1592,64 @@ class _ProgressScreenState extends State<ProgressScreen> {
   };
 
   Widget _buildCheckInsTab() {
-    if (_checkInsLoading) {
-      return const Center(
-          child: CircularProgressIndicator(color: WW.primary));
-    }
-
-    if (_checkIns.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 64,
-              height: 64,
-              decoration: BoxDecoration(
-                color: WW.elevated,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Icon(
-                Icons.check_circle_outline_rounded,
-                size: 32,
-                color: WW.textSec,
-              ),
+    return StreamBuilder<QuerySnapshot>(
+      stream: _checkInsStream,
+      builder: (context, snapshot) {
+        if (_checkInsLoading ||
+            snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(
+              child: CircularProgressIndicator(color: WW.primary));
+        }
+        final checkIns = snapshot.data?.docs.map((doc) {
+              final data = doc.data() as Map<String, dynamic>;
+              return {'id': doc.id, ...data};
+            }).toList() ??
+            [];
+        if (checkIns.isEmpty) {
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 64,
+                  height: 64,
+                  decoration: BoxDecoration(
+                    color: WW.elevated,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Icon(
+                    Icons.check_circle_outline_rounded,
+                    size: 32,
+                    color: WW.textSec,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'No missed sessions logged',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Your check-in history will appear here.',
+                  style: TextStyle(fontSize: 13, color: WW.textSec),
+                  textAlign: TextAlign.center,
+                ),
+              ],
             ),
-            const SizedBox(height: 16),
-            const Text(
-              'No missed sessions logged',
-              style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w700,
-                color: WW.text,
-              ),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Your check-in history will appear here.',
-              style: TextStyle(fontSize: 13, color: WW.textSec),
-              textAlign: TextAlign.center,
-            ),
-          ],
-        ),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 100),
-      itemCount: _checkIns.length,
-      itemBuilder: (context, index) {
-        final item = _checkIns[index];
-        return _buildCheckInCard(item);
+          );
+        }
+        return ListView.builder(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 100),
+          itemCount: checkIns.length,
+          itemBuilder: (context, index) {
+            final item = checkIns[index];
+            return _buildCheckInCard(item);
+          },
+        );
       },
     );
   }
@@ -1769,8 +1765,6 @@ class _ProgressScreenState extends State<ProgressScreen> {
                           'existingDate': date,
                         },
                       );
-                      setState(() => _checkInsLoading = true);
-                      _loadCheckIns();
                     },
                     child: const Text(
                       'Change reason',

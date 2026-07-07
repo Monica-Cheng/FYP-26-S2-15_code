@@ -83,36 +83,52 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
   }
 
   Future<void> _handleTrackPlan(Map<String, dynamic> plan) async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+
+    String? currentTrackedName;
+    try {
+      final profile = await FirestoreService().getUserProfile(uid);
+      final currentTrackedId = profile?['trackedPlanId'] as String?;
+      if (currentTrackedId != null &&
+          currentTrackedId.isNotEmpty &&
+          currentTrackedId != plan['id']) {
+        currentTrackedName = profile?['trackedPlanName'] as String?;
+      }
+    } catch (_) {}
+
+    final isSwitching = currentTrackedName != null && currentTrackedName.isNotEmpty;
+
+    if (!mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: WW.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text(
-          'Track this plan?',
-          style: TextStyle(
+        title: Text(
+          isSwitching ? 'Switch to this plan?' : 'Track this plan?',
+          style: const TextStyle(
             fontSize: 17,
             fontWeight: FontWeight.w700,
             color: WW.text,
           ),
         ),
-        content: const Text(
-          'This will replace your current tracked plan.',
-          style: TextStyle(fontSize: 14, color: WW.textSec),
+        content: Text(
+          isSwitching
+              ? 'You are currently tracking "$currentTrackedName". Switching will stop tracking it, but your progress will be saved.'
+              : 'This plan will be added to My Plans and tracked as your active plan.',
+          style: const TextStyle(fontSize: 14, color: WW.textSec),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text(
-              'Cancel',
-              style: TextStyle(color: WW.textSec),
-            ),
+            child: const Text('Cancel', style: TextStyle(color: WW.textSec)),
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text(
-              'Confirm',
-              style: TextStyle(
+            child: Text(
+              isSwitching ? 'Switch' : 'Track',
+              style: const TextStyle(
                 color: WW.primary,
                 fontWeight: FontWeight.w700,
               ),
@@ -125,21 +141,18 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
 
     setState(() => _isTracking = true);
     try {
-      final uid = AuthService().getCurrentUser()?.uid;
-      if (uid != null) {
-        await FirestoreService().trackPlan(
-          uid,
-          plan['id'] as String? ?? '',
-          plan['name'] as String? ?? 'Unnamed Plan',
-        );
-      }
+      await FirestoreService().trackPlan(
+        uid,
+        plan['id'] as String? ?? '',
+        plan['name'] as String? ?? 'Unnamed Plan',
+      );
     } catch (_) {}
     if (!mounted) return;
     setState(() {
       _isTracking = false;
       _isTracked = true;
+      _isSaved = true;
     });
-    context.pop();
   }
 
   Future<void> _handleUntrackPlan() async {
@@ -494,7 +507,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                     GestureDetector(
                       onTap: isCustom
                           ? () => _handleEditRoutine(plan)
-                          : () => _snack('Save to library coming soon'),
+                          : (_isSaved ? null : () => _handleSavePlan(plan)),
                       child: Container(
                         width: 34,
                         height: 34,
@@ -506,7 +519,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                           child: Icon(
                             isCustom
                                 ? Icons.edit_rounded
-                                : Icons.bookmark_border_rounded,
+                                : (_isSaved ? Icons.bookmark_rounded : Icons.bookmark_border_rounded),
                             color: Colors.white,
                             size: 18,
                           ),
@@ -1136,7 +1149,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                     : GestureDetector(
                         onTap: isCustom
                             ? () => _handleEditRoutine(plan)
-                            : () => _snack('Save to library coming soon'),
+                            : (_isSaved ? null : () => _handleSavePlan(plan)),
                         child: Container(
                           height: 50,
                           decoration: BoxDecoration(
@@ -1151,13 +1164,13 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                                 Icon(
                                   isCustom
                                       ? Icons.edit_rounded
-                                      : Icons.bookmark_border_rounded,
+                                      : (_isSaved ? Icons.bookmark_rounded : Icons.bookmark_border_rounded),
                                   color: WW.primary,
                                   size: 16,
                                 ),
                                 const SizedBox(width: 6),
                                 Text(
-                                  isCustom ? 'Edit Routine' : 'Save',
+                                  isCustom ? 'Edit Routine' : (_isSaved ? 'Saved' : 'Save'),
                                   style: const TextStyle(
                                     fontSize: 13,
                                     fontWeight: FontWeight.w700,
