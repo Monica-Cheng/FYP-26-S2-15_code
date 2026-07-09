@@ -29,6 +29,9 @@ dependencies:
   google_sign_in: ^6.2.1
   http: ^1.2.0
   health: ^12.0.0
+  flutter_local_notifications: ^18.0.0
+  timezone: ^0.10.1
+  flutter_timezone: ^1.0.8
   share_plus: ^10.1.4
   path_provider: ^2.1.5
   flutter_dotenv: ^5.1.0

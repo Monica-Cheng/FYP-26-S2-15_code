@@ -7,6 +7,7 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../services/notification_service.dart';
 
 // Danger red and support green — specific accent colors not in WW palette
 const _kRed = Color(0xFFEF4444);
@@ -27,6 +28,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   bool _pushNotif = true;
   bool _workoutReminders = true;
+  TimeOfDay _reminderTime = const TimeOfDay(hour: 7, minute: 0);
   bool _streakAlerts = true;
   bool _wiseCoachMessages = true;
   bool _prefsLoading = true;
@@ -38,6 +40,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     _userEmail = _auth.getCurrentUser()?.email;
     _loadPrefs();
+    NotificationService().init();
   }
 
   Future<void> _loadPrefs() async {
@@ -54,6 +57,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _workoutReminders = profile?['workoutReminders'] as bool? ?? true;
         _streakAlerts = profile?['streakAlerts'] as bool? ?? true;
         _wiseCoachMessages = profile?['wiseCoachMessages'] as bool? ?? true;
+        final savedHour = profile?['reminderHour'] as int?;
+        final savedMinute = profile?['reminderMinute'] as int?;
+        if (savedHour != null && savedMinute != null) {
+          _reminderTime = TimeOfDay(hour: savedHour, minute: savedMinute);
+        }
         _prefsLoading = false;
       });
     } catch (_) {
@@ -70,8 +78,116 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'workoutReminders': _workoutReminders,
         'streakAlerts': _streakAlerts,
         'wiseCoachMessages': _wiseCoachMessages,
+        'reminderHour': _reminderTime.hour,
+        'reminderMinute': _reminderTime.minute,
       });
     } catch (_) {}
+    if (_workoutReminders) {
+      await NotificationService().scheduleDailyWorkoutReminder(_reminderTime);
+    } else {
+      await NotificationService().cancelWorkoutReminder();
+    }
+  }
+
+  Future<void> _showReminderTimePicker() async {
+    await NotificationService().requestPermissions();
+    if (!mounted) return;
+    TimeOfDay tempTime = _reminderTime;
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) => Padding(
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 40),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36, height: 4,
+                  decoration: BoxDecoration(
+                    color: WW.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Workout Reminder Time',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: WW.primaryDark),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'We will remind you to work out at this time every day.',
+                style: TextStyle(fontSize: 13, color: WW.textSec, height: 1.5),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                height: 180,
+                child: CupertinoTimerPicker(
+                  mode: CupertinoTimerPickerMode.hm,
+                  initialTimerDuration: Duration(
+                    hours: tempTime.hour,
+                    minutes: tempTime.minute,
+                  ),
+                  onTimerDurationChanged: (duration) {
+                    setModalState(() {
+                      tempTime = TimeOfDay(
+                        hour: duration.inHours,
+                        minute: duration.inMinutes % 60,
+                      );
+                    });
+                  },
+                ),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: ElevatedButton(
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    setState(() {
+                      _reminderTime = tempTime;
+                      _workoutReminders = true;
+                    });
+                    await NotificationService()
+                        .scheduleDailyWorkoutReminder(tempTime);
+                    await _savePrefs();
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'Reminder set for ${tempTime.format(context)}',
+                          ),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: WW.primary,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    elevation: 0,
+                  ),
+                  child: const Text(
+                    'Save Reminder',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _snack(String msg) {
@@ -178,8 +294,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         icon: Icons.access_time_rounded,
                         iconBg: WW.teal,
                         title: 'Preferred Workout Time',
-                        right: _valueText('07:00'),
-                        onTap: () => _snack('Workout time coming soon'),
+                        right: _valueText(
+                          '${_reminderTime.hour.toString().padLeft(2, '0')}:${_reminderTime.minute.toString().padLeft(2, '0')}',
+                        ),
+                        onTap: _showReminderTimePicker,
                       ),
                       _row(
                         icon: Icons.local_fire_department_rounded,
@@ -210,15 +328,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             _savePrefs();
                           }),
                         ),
-                        _row(
-                          icon: Icons.fitness_center_rounded,
-                          iconBg: WW.primary,
-                          title: 'Workout Reminders',
-                          chevron: false,
-                          right: _buildToggle(_workoutReminders, (v) {
-                            setState(() => _workoutReminders = v);
-                            _savePrefs();
-                          }),
+                        GestureDetector(
+                          onTap: _showReminderTimePicker,
+                          child: _row(
+                            icon: Icons.fitness_center_rounded,
+                            iconBg: WW.primary,
+                            title: 'Workout Reminders',
+                            chevron: false,
+                            right: _buildToggle(_workoutReminders, (val) async {
+                              if (val) {
+                                await _showReminderTimePicker();
+                              } else {
+                                setState(() => _workoutReminders = false);
+                                await NotificationService().cancelWorkoutReminder();
+                                await _savePrefs();
+                              }
+                            }),
+                          ),
                         ),
                         _row(
                           icon: Icons.local_fire_department_rounded,
