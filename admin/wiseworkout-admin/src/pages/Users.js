@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
-import { collection, getDocs, doc, updateDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, deleteDoc } from 'firebase/firestore';
 
 function Users() {
   const [users, setUsers] = useState([]);
@@ -25,6 +25,11 @@ function Users() {
     const newStatus = currentStatus === 'suspended' ? 'active' : 'suspended';
     await updateDoc(doc(db, 'users', userId), { accountStatus: newStatus });
     setUsers(prev => prev.map(u => u.id === userId ? { ...u, accountStatus: newStatus } : u));
+  };
+  const handleDelete = async (userId) => {
+    if (!window.confirm('Permanently delete this user? This cannot be undone.')) return;
+    await deleteDoc(doc(db, 'users', userId));
+    setUsers(prev => prev.filter(u => u.id !== userId));
   };
 
   const filtered = users.filter(u =>
@@ -104,6 +109,17 @@ function Users() {
                     }}
                   >
                     {user.accountStatus === 'suspended' ? 'Reinstate' : 'Suspend'}
+                  </button>
+
+                  <button
+                    onClick={() => handleDelete(user.id)}
+                    style={{
+                      padding: '6px 14px', borderRadius: '6px', fontSize: '12px',
+                      border: 'none', backgroundColor: '#ffeeee', color: '#cc0000',
+                      fontWeight: '500', marginLeft: '8px',
+                    }}
+                  >
+                    Delete
                   </button>
                 </td>
               </tr>

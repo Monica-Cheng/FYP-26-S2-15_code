@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
-import { collection, getDocs, addDoc, deleteDoc, doc } from 'firebase/firestore';
+import { collection, getDocs, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
 
 function Exercises() {
   const [exercises, setExercises] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({ name: '', muscleGroup: '', equipment: '', difficulty: 'Beginner' });
   const [saving, setSaving] = useState(false);
 
@@ -28,17 +29,29 @@ function Exercises() {
     if (!form.name.trim()) return;
     setSaving(true);
     try {
-      const docRef = await addDoc(collection(db, 'exercises'), {
-        ...form,
-        createdAt: new Date().toISOString(),
-      });
-      setExercises(prev => [...prev, { id: docRef.id, ...form }]);
+      if (editingId) {
+        await updateDoc(doc(db, 'exercises', editingId), form);
+        setExercises(prev => prev.map(e => e.id === editingId ? { ...e, ...form } : e));
+        setEditingId(null);
+      } else {
+        const docRef = await addDoc(collection(db, 'exercises'), {
+          ...form,
+          createdAt: new Date().toISOString(),
+        });
+        setExercises(prev => [...prev, { id: docRef.id, ...form }]);
+      }
       setForm({ name: '', muscleGroup: '', equipment: '', difficulty: 'Beginner' });
       setShowForm(false);
     } catch (err) {
       console.error(err);
     }
     setSaving(false);
+  };
+
+  const handleEdit = (ex) => {
+    setForm({ name: ex.name || '', muscleGroup: ex.muscleGroup || '', equipment: ex.equipment || '', difficulty: ex.difficulty || 'Beginner' });
+    setEditingId(ex.id);
+    setShowForm(true);
   };
 
   const handleDelete = async (id) => {
@@ -59,11 +72,8 @@ function Exercises() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
         <h1 style={{ fontSize: '24px', fontWeight: '700' }}>Exercises</h1>
         <button
-          onClick={() => setShowForm(!showForm)}
-          style={{
-            padding: '10px 20px', borderRadius: '8px', border: 'none',
-            backgroundColor: '#6c63ff', color: 'white', fontSize: '14px', fontWeight: '500',
-          }}
+          onClick={() => { setShowForm(!showForm); setEditingId(null); setForm({ name: '', muscleGroup: '', equipment: '', difficulty: 'Beginner' }); }}
+          style={{ padding: '10px 20px', borderRadius: '8px', border: 'none', backgroundColor: '#6c63ff', color: 'white', fontSize: '14px', fontWeight: '500' }}
         >
           + Add Exercise
         </button>
@@ -71,10 +81,10 @@ function Exercises() {
       <p style={{ color: '#888', fontSize: '14px', marginBottom: '24px' }}>{exercises.length} exercises in library</p>
 
       {showForm && (
-        <div style={{
-          backgroundColor: 'white', borderRadius: '12px', padding: '24px', marginBottom: '24px',
-        }}>
-          <h2 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '16px' }}>New Exercise</h2>
+        <div style={{ backgroundColor: 'white', borderRadius: '12px', padding: '24px', marginBottom: '24px' }}>
+          <h2 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '16px' }}>
+            {editingId ? 'Edit Exercise' : 'New Exercise'}
+          </h2>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {[
               { label: 'Exercise Name', key: 'name', placeholder: 'e.g. Bench Press' },
@@ -87,10 +97,7 @@ function Exercises() {
                   value={form[field.key]}
                   onChange={e => setForm(prev => ({ ...prev, [field.key]: e.target.value }))}
                   placeholder={field.placeholder}
-                  style={{
-                    width: '100%', padding: '10px 14px', borderRadius: '8px',
-                    border: '1px solid #ddd', fontSize: '14px', outline: 'none',
-                  }}
+                  style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '1px solid #ddd', fontSize: '14px', outline: 'none' }}
                 />
               </div>
             ))}
@@ -99,10 +106,7 @@ function Exercises() {
               <select
                 value={form.difficulty}
                 onChange={e => setForm(prev => ({ ...prev, difficulty: e.target.value }))}
-                style={{
-                  width: '100%', padding: '10px 14px', borderRadius: '8px',
-                  border: '1px solid #ddd', fontSize: '14px', outline: 'none',
-                }}
+                style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '1px solid #ddd', fontSize: '14px', outline: 'none' }}
               >
                 <option>Beginner</option>
                 <option>Intermediate</option>
@@ -113,19 +117,13 @@ function Exercises() {
               <button
                 onClick={handleAdd}
                 disabled={saving}
-                style={{
-                  padding: '10px 24px', borderRadius: '8px', border: 'none',
-                  backgroundColor: '#6c63ff', color: 'white', fontSize: '14px', fontWeight: '500',
-                }}
+                style={{ padding: '10px 24px', borderRadius: '8px', border: 'none', backgroundColor: '#6c63ff', color: 'white', fontSize: '14px', fontWeight: '500' }}
               >
-                {saving ? 'Saving...' : 'Save Exercise'}
+                {saving ? 'Saving...' : editingId ? 'Update Exercise' : 'Save Exercise'}
               </button>
               <button
-                onClick={() => setShowForm(false)}
-                style={{
-                  padding: '10px 24px', borderRadius: '8px', border: '1px solid #ddd',
-                  backgroundColor: 'white', fontSize: '14px',
-                }}
+                onClick={() => { setShowForm(false); setEditingId(null); }}
+                style={{ padding: '10px 24px', borderRadius: '8px', border: '1px solid #ddd', backgroundColor: 'white', fontSize: '14px' }}
               >
                 Cancel
               </button>
@@ -138,10 +136,7 @@ function Exercises() {
         placeholder="Search exercises..."
         value={search}
         onChange={e => setSearch(e.target.value)}
-        style={{
-          width: '100%', padding: '10px 14px', borderRadius: '8px',
-          border: '1px solid #ddd', fontSize: '14px', marginBottom: '20px', outline: 'none',
-        }}
+        style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '1px solid #ddd', fontSize: '14px', marginBottom: '20px', outline: 'none' }}
       />
 
       <div style={{ backgroundColor: 'white', borderRadius: '12px', overflow: 'hidden' }}>
@@ -168,13 +163,16 @@ function Exercises() {
                     {ex.difficulty || 'Beginner'}
                   </span>
                 </td>
-                <td style={{ padding: '14px 16px' }}>
+                <td style={{ padding: '14px 16px', display: 'flex', gap: '8px' }}>
+                  <button
+                    onClick={() => handleEdit(ex)}
+                    style={{ padding: '6px 14px', borderRadius: '6px', fontSize: '12px', border: 'none', backgroundColor: '#f0f0ff', color: '#6c63ff', fontWeight: '500' }}
+                  >
+                    Edit
+                  </button>
                   <button
                     onClick={() => handleDelete(ex.id)}
-                    style={{
-                      padding: '6px 14px', borderRadius: '6px', fontSize: '12px',
-                      border: 'none', backgroundColor: '#fff0f0', color: '#cc3333', fontWeight: '500',
-                    }}
+                    style={{ padding: '6px 14px', borderRadius: '6px', fontSize: '12px', border: 'none', backgroundColor: '#fff0f0', color: '#cc3333', fontWeight: '500' }}
                   >
                     Delete
                   </button>
