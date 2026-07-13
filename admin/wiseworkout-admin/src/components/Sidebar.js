@@ -6,6 +6,8 @@ const menuItems = [
   { id: 'businessPartners', label: 'Business Partners', icon: '🤝' },
   { id: 'exercises', label: 'Exercises', icon: '💪' },
   { id: 'settings', label: 'Settings', icon: '⚙️' },
+  { id: 'analytics', label: 'Analytics', icon: '📈' },
+  { id: 'challenges', label: 'Challenges', icon: '🏆' },
 ];
 
 function Sidebar({ currentPage, setCurrentPage, onLogout }) {

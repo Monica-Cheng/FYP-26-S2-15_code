@@ -5,6 +5,8 @@ import Users from './pages/Users';
 import BusinessPartners from './pages/BusinessPartners';
 import Exercises from './pages/Exercises';
 import Settings from './pages/Settings';
+import Analytics from './pages/Analytics';
+import Challenges from './pages/Challenges';
 import Login from './pages/Login';
 import './App.css';
 
@@ -23,6 +25,8 @@ function App() {
       case 'businessPartners': return <BusinessPartners />;
       case 'exercises': return <Exercises />;
       case 'settings': return <Settings />;
+      case 'analytics': return <Analytics />;
+      case 'challenges': return <Challenges />;
       default: return <Dashboard />;
     }
   };
