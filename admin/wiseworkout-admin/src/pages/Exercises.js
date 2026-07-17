@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
 import { collection, getDocs, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
+import * as XLSX from 'xlsx';
 
 function Exercises() {
   const [exercises, setExercises] = useState([]);
@@ -60,6 +61,33 @@ function Exercises() {
     setExercises(prev => prev.filter(e => e.id !== id));
   };
 
+  const handleExcelUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      const workbook = XLSX.read(evt.target.result, { type: 'binary' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet);
+      let added = 0;
+      for (const row of rows) {
+        const exercise = {
+          name: row['name'] || row['Name'] || '',
+          muscleGroup: row['muscleGroup'] || row['Muscle Group'] || '',
+          equipment: row['equipment'] || row['Equipment'] || '',
+          difficulty: row['difficulty'] || row['Difficulty'] || 'Beginner',
+          createdAt: new Date().toISOString(),
+        };
+        if (!exercise.name) continue;
+        const docRef = await addDoc(collection(db, 'exercises'), exercise);
+        setExercises(prev => [...prev, { id: docRef.id, ...exercise }]);
+        added++;
+      }
+      alert(`Successfully uploaded ${added} exercises.`);
+    };
+    reader.readAsBinaryString(file);
+  };
+
   const filtered = exercises.filter(e =>
     (e.name || '').toLowerCase().includes(search.toLowerCase()) ||
     (e.muscleGroup || '').toLowerCase().includes(search.toLowerCase())
@@ -71,12 +99,27 @@ function Exercises() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
         <h1 style={{ fontSize: '24px', fontWeight: '700' }}>Exercises</h1>
-        <button
-          onClick={() => { setShowForm(!showForm); setEditingId(null); setForm({ name: '', muscleGroup: '', equipment: '', difficulty: 'Beginner' }); }}
-          style={{ padding: '10px 20px', borderRadius: '8px', border: 'none', backgroundColor: '#6c63ff', color: 'white', fontSize: '14px', fontWeight: '500' }}
-        >
-          + Add Exercise
-        </button>
+        <div style={{ display: 'flex', gap: '12px' }}>
+          <button
+            onClick={() => { setShowForm(!showForm); setEditingId(null); setForm({ name: '', muscleGroup: '', equipment: '', difficulty: 'Beginner' }); }}
+            style={{ padding: '10px 20px', borderRadius: '8px', border: 'none', backgroundColor: '#6c63ff', color: 'white', fontSize: '14px', fontWeight: '500', cursor: 'pointer' }}
+          >
+            + Add Exercise
+          </button>
+          <label style={{
+            padding: '10px 20px', borderRadius: '8px', border: 'none',
+            backgroundColor: '#06d6a0', color: 'white', fontSize: '14px',
+            fontWeight: '500', cursor: 'pointer',
+          }}>
+            📤 Upload Excel
+            <input
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              style={{ display: 'none' }}
+              onChange={handleExcelUpload}
+            />
+          </label>
+        </div>
       </div>
       <p style={{ color: '#888', fontSize: '14px', marginBottom: '24px' }}>{exercises.length} exercises in library</p>
 
