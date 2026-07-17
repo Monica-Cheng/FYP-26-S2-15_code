@@ -21,9 +21,12 @@ function BusinessPartners() {
     fetchPartners();
   }, []);
 
-  const updateStatus = async (id, status) => {
-    await updateDoc(doc(db, 'businessPartners', id), { status });
-    setPartners(prev => prev.map(p => p.id === id ? { ...p, status } : p));
+  
+  const updateStatus = async (id, status, reason = '') => {
+    const updateData = { status };
+    if (reason) updateData.rejectionReason = reason;
+    await updateDoc(doc(db, 'businessPartners', id), updateData);
+    setPartners(prev => prev.map(p => p.id === id ? { ...p, status, rejectionReason: reason } : p));
   };
 
   const filtered = filter === 'all' ? partners : partners.filter(p => p.status === filter);
@@ -84,8 +87,13 @@ function BusinessPartners() {
                   >
                     Approve
                   </button>
+                  
+
                   <button
-                    onClick={() => updateStatus(partner.id, 'rejected')}
+                    onClick={() => {
+                      const reason = window.prompt('Enter rejection reason for the applicant:');
+                      if (reason !== null) updateStatus(partner.id, 'rejected', reason);
+                    }}
                     style={{
                       padding: '8px 16px', borderRadius: '8px', fontSize: '13px',
                       border: 'none', backgroundColor: '#ff6b6b', color: 'white', fontWeight: '500',
@@ -93,6 +101,8 @@ function BusinessPartners() {
                   >
                     Reject
                   </button>
+
+        
                 </>
               )}
 

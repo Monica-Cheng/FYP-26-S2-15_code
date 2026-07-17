@@ -7,6 +7,7 @@ import Exercises from './pages/Exercises';
 import Settings from './pages/Settings';
 import Analytics from './pages/Analytics';
 import Challenges from './pages/Challenges';
+import Plans from './pages/Plans';
 import Login from './pages/Login';
 import './App.css';
 
@@ -27,6 +28,7 @@ function App() {
       case 'settings': return <Settings />;
       case 'analytics': return <Analytics />;
       case 'challenges': return <Challenges />;
+      case 'plans': return <Plans />;
       default: return <Dashboard />;
     }
   };

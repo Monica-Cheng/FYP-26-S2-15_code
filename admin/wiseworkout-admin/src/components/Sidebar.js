@@ -8,6 +8,7 @@ const menuItems = [
   { id: 'settings', label: 'Settings', icon: '⚙️' },
   { id: 'analytics', label: 'Analytics', icon: '📈' },
   { id: 'challenges', label: 'Challenges', icon: '🏆' },
+  { id: 'plans', label: 'Plans', icon: '📋' },
 ];
 
 function Sidebar({ currentPage, setCurrentPage, onLogout }) {
