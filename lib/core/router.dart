@@ -32,6 +32,7 @@ import '../screens/plans/plan_schedule_screen.dart';
 import '../screens/progress/activity_detail_screen.dart';
 import '../screens/cardio/cardio_setup_screen.dart';
 import '../screens/cardio/cardio_session_screen.dart';
+import '../screens/nutrition/nutrition_scan_screen.dart';
 import '../screens/splash_screen.dart';
 
 // Route path constants — use these instead of hardcoding strings
@@ -69,6 +70,7 @@ class Routes {
   static const String editRoutine = '/edit-routine';
   static const String cardioSetup = '/cardio-setup';
   static const String cardioSession = '/cardio-session';
+  static const String nutritionScan = '/nutrition-scan';
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -199,6 +201,12 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.cardioSession,
         builder: (context, state) => const CardioSessionScreen(),
+      ),
+      GoRoute(
+        path: Routes.nutritionScan,
+        builder: (context, state) => NutritionScanScreen(
+          startInDescribeMode: state.extra == 'describe',
+        ),
       ),
       // Add more routes here as you build each screen
     ],

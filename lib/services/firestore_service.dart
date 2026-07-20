@@ -938,4 +938,203 @@ class FirestoreService {
             .map((doc) => {'id': doc.id, ...doc.data()})
             .toList());
   }
+
+  // ---------------------------------------------------------------------------
+  // Saves a logged meal (from AI photo scan or manual text description) to
+  // users/{uid}/nutritionLogs/{auto-id}. Uses add() so each call creates a
+  // unique document, matching the pattern used by saveGymSession.
+  // ---------------------------------------------------------------------------
+  Future<void> saveNutritionLog(
+    String uid, {
+    required String foodName,
+    required int calories,
+    required String source, // 'scan' or 'manual'
+    int? proteinG,
+    int? carbsG,
+    int? fatG,
+    String? confidence, // 'high' | 'medium' | 'low'
+    String? notes,
+  }) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.nutritionLogs)
+        .add({
+      'foodName': foodName,
+      'calories': calories,
+      'source': source,
+      'proteinG': proteinG,
+      'carbsG': carbsG,
+      'fatG': fatG,
+      'confidence': confidence,
+      'notes': notes,
+      'date': FieldValue.serverTimestamp(),
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Returns all meals logged today (since local midnight) for users/{uid},
+  // newest first.
+  // ---------------------------------------------------------------------------
+  Future<List<Map<String, dynamic>>> getTodaysNutritionLogs(String uid) async {
+    final now = DateTime.now();
+    final midnight = DateTime(now.year, now.month, now.day);
+
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.nutritionLogs)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(midnight))
+        .orderBy('date', descending: true)
+        .get();
+
+    return snapshot.docs
+        .map((doc) => {'id': doc.id, ...doc.data()})
+        .toList();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sums calories across all meals logged today (since local midnight) for
+  // users/{uid}. Returns 0 if no meals have been logged yet.
+  // ---------------------------------------------------------------------------
+  Future<int> getTodaysNutritionCalories(String uid) async {
+    final logs = await getTodaysNutritionLogs(uid);
+    int total = 0;
+    for (final log in logs) {
+      total += (log['calories'] as num?)?.toInt() ?? 0;
+    }
+    return total;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // FEED / POSTS
+  // A real, shared Firestore feed (top-level `posts` collection) so a
+  // logged meal can be posted and seen by other users of the app — not a
+  // mock. NOTE: this app does not yet have a real friend-relationship
+  // system (Club's "Friends" tab is currently static mock data), so this
+  // feed is app-wide for now, newest first. Once real friend
+  // relationships exist, swap the query below for a `where('uid', whereIn:
+  // friendUids)` filter to scope it to friends only.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ---------------------------------------------------------------------------
+  // Creates a feed post. imageBase64 is optional (omit for text-described
+  // meals with no photo). Denormalizes authorName/authorInitial onto the
+  // post itself so the feed can render without an extra read per post.
+  // ---------------------------------------------------------------------------
+  Future<void> createFeedPost({
+    required String uid,
+    required String authorName,
+    required String foodName,
+    required int calories,
+    int? proteinG,
+    int? carbsG,
+    int? fatG,
+    String? imageBase64,
+    String? caption,
+  }) async {
+    final initial =
+        authorName.trim().isNotEmpty ? authorName.trim()[0].toUpperCase() : '?';
+
+    await _db.collection(Collections.posts).add({
+      'uid': uid,
+      'authorName': authorName,
+      'authorInitial': initial,
+      'type': 'meal',
+      'foodName': foodName,
+      'calories': calories,
+      'proteinG': proteinG,
+      'carbsG': carbsG,
+      'fatG': fatG,
+      'imageBase64': imageBase64,
+      'caption': caption,
+      'reactionCount': 0,
+      'commentCount': 0,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live stream of the most recent feed posts, newest first.
+  // ---------------------------------------------------------------------------
+  Stream<List<Map<String, dynamic>>> getFeedPostsStream({int limit = 50}) {
+    return _db
+        .collection(Collections.posts)
+        .orderBy('createdAt', descending: true)
+        .limit(limit)
+        .snapshots()
+        .map((snapshot) =>
+            snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Toggles a 🔥 reaction on a post for the given user (one reaction per
+  // user per post — tapping again removes it). Keeps a denormalized
+  // reactionCount on the post doc so the feed can show a count without an
+  // extra read.
+  // ---------------------------------------------------------------------------
+  Future<void> toggleReaction(String postId, String uid) async {
+    final postRef = _db.collection(Collections.posts).doc(postId);
+    final reactionRef = postRef.collection('reactions').doc(uid);
+    final existing = await reactionRef.get();
+
+    if (existing.exists) {
+      await reactionRef.delete();
+      await postRef.update({'reactionCount': FieldValue.increment(-1)});
+    } else {
+      await reactionRef.set({
+        'type': 'fire',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      await postRef.update({'reactionCount': FieldValue.increment(1)});
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Whether the given user has already reacted to a post — used to show
+  // the reaction button as filled/active.
+  // ---------------------------------------------------------------------------
+  Stream<bool> hasReactedStream(String postId, String uid) {
+    return _db
+        .collection(Collections.posts)
+        .doc(postId)
+        .collection('reactions')
+        .doc(uid)
+        .snapshots()
+        .map((doc) => doc.exists);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Adds a comment to a post and increments its denormalized commentCount.
+  // ---------------------------------------------------------------------------
+  Future<void> addComment(
+    String postId, {
+    required String uid,
+    required String authorName,
+    required String text,
+  }) async {
+    final postRef = _db.collection(Collections.posts).doc(postId);
+    await postRef.collection('comments').add({
+      'uid': uid,
+      'authorName': authorName,
+      'text': text,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+    await postRef.update({'commentCount': FieldValue.increment(1)});
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live stream of comments on a post, oldest first.
+  // ---------------------------------------------------------------------------
+  Stream<List<Map<String, dynamic>>> getCommentsStream(String postId) {
+    return _db
+        .collection(Collections.posts)
+        .doc(postId)
+        .collection('comments')
+        .orderBy('createdAt', descending: false)
+        .snapshots()
+        .map((snapshot) =>
+            snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+  }
 }

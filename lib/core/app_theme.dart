@@ -36,6 +36,8 @@ class WW {
 
   // Accent
   static const Color gold = Color(0xFFF59E0B);
+  static const Color lightBlue = Color(0xFF7EC8E3);
+  static const Color lightYellow = Color(0xFFF5D76E);
 
   // Shadows
   static List<BoxShadow> get shadow => [

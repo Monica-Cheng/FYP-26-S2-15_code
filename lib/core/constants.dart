@@ -10,6 +10,8 @@ class Collections {
   static const String sessions = 'sessions';
   static const String xpEvents = 'xpEvents';
   static const String challenges = 'challenges';
+  static const String nutritionLogs = 'nutritionLogs';
+  static const String posts = 'posts';
 }
 
 class AppConstants {

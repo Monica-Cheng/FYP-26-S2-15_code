@@ -14,6 +14,7 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../widgets/quick_add_sheet.dart';
 import '../plans/plans_screen.dart';
 import '../coach/coach_screen.dart';
 import '../club/club_screen.dart';
@@ -51,8 +52,38 @@ class _HomeScreenState extends State<HomeScreen> {
   void _onTabTap(int index) => setState(() => _selectedIndex = index);
 
   void _onFabTap() {
-    context.push(Routes.manualActivityLog)
-        .then((_) => _homeTabKey.currentState?._loadUserData());
+    showQuickAddSheet(context, [
+      QuickAddOption(
+        icon: Icons.camera_alt_rounded,
+        iconColor: WW.lavender,
+        iconBg: WW.lavenderBg,
+        title: 'Scan Food',
+        subtitle: 'Snap a photo for instant calories',
+        onTap: () => context
+            .push(Routes.nutritionScan)
+            .then((_) => _homeTabKey.currentState?._loadUserData()),
+      ),
+      QuickAddOption(
+        icon: Icons.edit_note_rounded,
+        iconColor: WW.teal,
+        iconBg: WW.tealBg,
+        title: 'Describe a Meal',
+        subtitle: 'Type what you ate instead',
+        onTap: () => context
+            .push(Routes.nutritionScan, extra: 'describe')
+            .then((_) => _homeTabKey.currentState?._loadUserData()),
+      ),
+      QuickAddOption(
+        icon: Icons.fitness_center_rounded,
+        iconColor: WW.gold,
+        iconBg: WW.gold.withValues(alpha: 0.14),
+        title: 'Log Activity',
+        subtitle: 'Manually add a workout or exercise',
+        onTap: () => context
+            .push(Routes.manualActivityLog)
+            .then((_) => _homeTabKey.currentState?._loadUserData()),
+      ),
+    ]);
   }
 
   @override
@@ -161,6 +192,7 @@ class _HomeTabState extends State<_HomeTab> {
   String? _displayName;
   bool _isLoadingName = true;
   int _todaysCalories = 0;
+  int _caloriesEaten = 0;
   int _dailyCalorieGoal = 500;
   bool _calorieGoalActive = false;
   int _streakDays = 0;
@@ -411,6 +443,7 @@ class _HomeTabState extends State<_HomeTab> {
         _firestoreService.getUserProfile(uid),
         _firestoreService.getUserCalorieGoal(uid),
         _firestoreService.getTodaysCalories(uid),
+        _firestoreService.getTodaysNutritionCalories(uid),
         _firestoreService.calculateStreak(uid),
         _firestoreService.getSessionDates(uid, days: 30),
       ]);
@@ -418,8 +451,9 @@ class _HomeTabState extends State<_HomeTab> {
       final profile = results[0] as Map<String, dynamic>?;
       final calGoal = results[1] as Map<String, dynamic>;
       final todaysCal = results[2] as int;
-      final streak = results[3] as int;
-      final sessionDates = results[4] as Set<String>;
+      final caloriesEaten = results[3] as int;
+      final streak = results[4] as int;
+      final sessionDates = results[5] as Set<String>;
       final trackedPlanId = profile?['trackedPlanId'] as String? ?? '';
 
       setState(() {
@@ -428,6 +462,7 @@ class _HomeTabState extends State<_HomeTab> {
         _calorieGoalActive = calGoal['calorieGoalActive'] as bool? ?? false;
         _dailyCalorieGoal = calGoal['dailyCalorieGoal'] as int? ?? 500;
         _todaysCalories = todaysCal;
+        _caloriesEaten = caloriesEaten;
         _streakDays = streak;
         _sessionDates = sessionDates;
         _trackedPlanId = trackedPlanId;
@@ -475,6 +510,7 @@ class _HomeTabState extends State<_HomeTab> {
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
               child: _CalorieRingCard(
                 calories: _todaysCalories,
+                caloriesEaten: _caloriesEaten,
                 goal: _dailyCalorieGoal,
                 goalActive: _calorieGoalActive,
               ),
@@ -758,24 +794,34 @@ class _DayCell extends StatelessWidget {
 
 class _CalorieRingCard extends StatelessWidget {
   final int calories;
+  final int caloriesEaten;
   final int goal;
   final bool goalActive;
 
   const _CalorieRingCard({
     required this.calories,
+    required this.caloriesEaten,
     required this.goal,
     required this.goalActive,
   });
 
   @override
   Widget build(BuildContext context) {
-    final remaining = (goal - calories).clamp(0, goal);
-    final progress = (goal > 0 ? calories / goal : 0.0).clamp(0.0, 1.0);
+    // Not clamped — legitimately grows past the goal if burned > eaten.
+    // e.g. goal=700, burned=238, eaten=350 -> left = 700-238+350 = 812.
+    final left = goal - calories + caloriesEaten;
+    final total = caloriesEaten + calories + left;
+    final intakeFraction = total > 0 ? caloriesEaten / total : 0.0;
+    final burnedFraction = total > 0 ? calories / total : 0.0;
+    final leftFraction = total > 0 ? left / total : 0.0;
 
     return Container(
       decoration: WW.cardDecoration,
       padding: const EdgeInsets.all(16),
-      child: goalActive ? _buildGoalMode(calories, goal, remaining, progress) : _buildSimpleMode(),
+      child: goalActive
+          ? _buildGoalMode(caloriesEaten, calories, goal, left, intakeFraction,
+              burnedFraction, leftFraction)
+          : _buildSimpleMode(),
     );
   }
 
@@ -806,7 +852,14 @@ class _CalorieRingCard extends StatelessWidget {
     );
   }
 
-  Widget _buildGoalMode(int calories, int goal, int remaining, double progress) {
+  Widget _buildGoalMode(
+      int caloriesEaten,
+      int caloriesBurned,
+      int goal,
+      int left,
+      double intakeFraction,
+      double burnedFraction,
+      double leftFraction) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
@@ -819,13 +872,17 @@ class _CalorieRingCard extends StatelessWidget {
             children: [
               CustomPaint(
                 size: const Size(104, 104),
-                painter: _CalorieRingPainter(progress),
+                painter: _CalorieRingPainter(
+                  intakeFraction: intakeFraction,
+                  burnedFraction: burnedFraction,
+                  leftFraction: leftFraction,
+                ),
               ),
               Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    '$calories',
+                    '$left',
                     style: const TextStyle(
                       fontSize: 22,
                       fontWeight: FontWeight.w800,
@@ -834,7 +891,7 @@ class _CalorieRingCard extends StatelessWidget {
                     ),
                   ),
                   const Text(
-                    'kcal',
+                    'kcal left',
                     style: TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w500,
@@ -866,11 +923,11 @@ class _CalorieRingCard extends StatelessWidget {
                 style: const TextStyle(fontSize: 12, color: WW.textSec),
               ),
               const SizedBox(height: 10),
-              _statRow(WW.primary, 'Gym', '$calories kcal'),
+              _statRow(WW.lightBlue, 'Cal Intake', '$caloriesEaten kcal'),
               const SizedBox(height: 6),
-              _statRow(WW.teal, 'Cardio', '0 kcal'),
+              _statRow(WW.lightYellow, 'Gym or Cardio', '$caloriesBurned kcal'),
               const SizedBox(height: 6),
-              _statRow(WW.textSec, 'Left', '$remaining kcal'),
+              _statRow(WW.border, 'Left', '$left kcal'),
             ],
           ),
         ),
@@ -903,43 +960,53 @@ class _CalorieRingCard extends StatelessWidget {
 }
 
 class _CalorieRingPainter extends CustomPainter {
-  final double progress; // 0.0–1.0
+  // Single ring, three adjacent arcs that always sum to exactly the full
+  // circle (intakeFraction + burnedFraction + leftFraction == 1.0) — no
+  // capping/overflow logic needed since all three are derived from the
+  // same total.
+  final double intakeFraction;
+  final double burnedFraction;
+  final double leftFraction;
 
-  const _CalorieRingPainter(this.progress);
+  const _CalorieRingPainter({
+    required this.intakeFraction,
+    required this.burnedFraction,
+    required this.leftFraction,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    const strokeWidth = 7.0;
+    const strokeWidth = 8.0;
     final radius = (size.width - strokeWidth) / 2;
     const startAngle = -math.pi / 2; // top of circle
+    final rect = Rect.fromCircle(center: center, radius: radius);
 
-    // Background track
-    final trackPaint = Paint()
-      ..color = WW.chipBg
-      ..strokeWidth = strokeWidth
-      ..style = PaintingStyle.stroke;
-    canvas.drawCircle(center, radius, trackPaint);
-
-    // Progress arc
-    if (progress > 0) {
-      final arcPaint = Paint()
-        ..color = WW.primary
+    void drawSegment(Color color, double startFraction, double sweepFraction) {
+      if (sweepFraction <= 0) return;
+      final paint = Paint()
+        ..color = color
         ..strokeWidth = strokeWidth
-        ..strokeCap = StrokeCap.round
         ..style = PaintingStyle.stroke;
       canvas.drawArc(
-        Rect.fromCircle(center: center, radius: radius),
-        startAngle,
-        2 * math.pi * progress,
+        rect,
+        startAngle + 2 * math.pi * startFraction,
+        2 * math.pi * sweepFraction,
         false,
-        arcPaint,
+        paint,
       );
     }
+
+    drawSegment(WW.lightBlue, 0, intakeFraction);
+    drawSegment(WW.lightYellow, intakeFraction, burnedFraction);
+    drawSegment(WW.border, intakeFraction + burnedFraction, leftFraction);
   }
 
   @override
-  bool shouldRepaint(_CalorieRingPainter old) => old.progress != progress;
+  bool shouldRepaint(_CalorieRingPainter old) =>
+      old.intakeFraction != intakeFraction ||
+      old.burnedFraction != burnedFraction ||
+      old.leftFraction != leftFraction;
 }
 
 // ── Today's Plan card ─────────────────────────────────────────────────────────
