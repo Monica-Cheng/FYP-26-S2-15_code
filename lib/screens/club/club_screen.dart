@@ -2,6 +2,9 @@
 import 'package:flutter/material.dart';
 
 import '../../core/app_theme.dart';
+import '../../services/auth_service.dart';
+import '../../services/firestore_service.dart';
+import '../../widgets/feed_post_card.dart';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -161,8 +164,28 @@ class _ClubScreenState extends State<ClubScreen> {
   int _subtab = 0;
   String _searchQuery = '';
 
-  static const _subtabLabels = ['Leaderboard', 'Challenges', 'Friends'];
+  final _firestoreService = FirestoreService();
+  final _authService = AuthService();
+  String _myName = 'You';
+
+  static const _subtabLabels = ['Leaderboard', 'Challenges', 'Friends', 'Feed'];
   static const _kDivider = Color(0xFFE8EAF8);
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMyName();
+  }
+
+  Future<void> _loadMyName() async {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    final profile = await _firestoreService.getUserProfile(uid);
+    final name = profile?['displayName'] as String?;
+    if (mounted && name != null && name.isNotEmpty) {
+      setState(() => _myName = name);
+    }
+  }
 
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -194,6 +217,7 @@ class _ClubScreenState extends State<ClubScreen> {
                   _buildLeaderboardTab(),
                   _buildChallengesTab(),
                   _buildFriendsTab(),
+                  _buildFeedTab(),
                 ],
               ),
             ),
@@ -1036,6 +1060,75 @@ class _ClubScreenState extends State<ClubScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // FEED TAB — real Firestore-backed posts (not mock). App-wide for now,
+  // since this app doesn't yet have a real friend-relationship system to
+  // scope it to friends only (see note on FirestoreService.getFeedPostsStream).
+  // ══════════════════════════════════════════════════════════════════════════
+
+  Widget _buildFeedTab() {
+    final uid = _authService.getCurrentUser()?.uid ?? '';
+
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: _firestoreService.getFeedPostsStream(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(
+            child: CircularProgressIndicator(color: WW.primary),
+          );
+        }
+        if (snapshot.hasError) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(
+                'Could not load the feed. ${snapshot.error}',
+                style: WW.labelMed,
+                textAlign: TextAlign.center,
+              ),
+            ),
+          );
+        }
+
+        final posts = snapshot.data ?? [];
+        if (posts.isEmpty) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.dynamic_feed_rounded,
+                      size: 40, color: WW.textSec),
+                  const SizedBox(height: 12),
+                  const Text('No posts yet', style: WW.titleMed),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Scan or describe a meal, then tap "Post to Feed" '
+                    'to share it here.',
+                    style: WW.labelMed,
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+
+        return ListView.builder(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
+          itemCount: posts.length,
+          itemBuilder: (context, i) => FeedPostCard(
+            post: posts[i],
+            currentUid: uid,
+            currentUserName: _myName,
+            firestoreService: _firestoreService,
+          ),
+        );
+      },
     );
   }
 }
