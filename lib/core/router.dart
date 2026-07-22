@@ -24,6 +24,7 @@ import '../screens/profile/profile_screen.dart';
 import '../screens/settings/health_profile_screen.dart';
 import '../screens/settings/settings_screen.dart';
 import '../screens/coach/find_professional_screen.dart';
+import '../screens/plans/exercise_detail_screen.dart';
 import '../screens/plans/plan_detail_screen.dart';
 import '../screens/plans/plan_match_screen.dart';
 import '../screens/plans/build_routine_screen.dart';
@@ -61,6 +62,7 @@ class Routes {
   static const String manualActivityLog = '/manual-activity-log';
   static const String missedCheckin = '/missed-checkin';
   static const String planDetail = '/plan-detail';
+  static const String exerciseDetail = '/exercise-detail';
   static const String activityDetail = '/activity-detail';
   static const String findProfessional = '/find-professional';
   static const String planMatch = '/plan-match';
@@ -132,7 +134,11 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: Routes.gymSession,
-        builder: (context, state) => const GymSessionScreen(),
+        builder: (context, state) {
+          final extra = state.extra as Map<String, dynamic>?;
+          final readOnly = extra?['readOnly'] as bool? ?? false;
+          return GymSessionScreen(readOnly: readOnly);
+        },
       ),
       GoRoute(
         path: Routes.postSessionSummary,
@@ -165,6 +171,18 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.planDetail,
         builder: (context, state) => const PlanDetailScreen(),
+      ),
+      GoRoute(
+        path: Routes.exerciseDetail,
+        builder: (context, state) {
+          final extra = state.extra as Map<String, dynamic>?;
+          final name = extra?['name'] as String? ?? '';
+          final muscle = extra?['muscle'] as String? ?? '';
+          return ExerciseDetailScreen(
+            exerciseName: name,
+            muscle: muscle,
+          );
+        },
       ),
       GoRoute(
         path: Routes.activityDetail,

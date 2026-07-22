@@ -7,6 +7,7 @@ class Collections {
   static const String users = 'users';
   static const String plans = 'plans';
   static const String exercises = 'exercises';
+  static const String injuryCategories = 'injuryCategories';
   static const String sessions = 'sessions';
   static const String xpEvents = 'xpEvents';
   static const String challenges = 'challenges';

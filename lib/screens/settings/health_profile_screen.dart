@@ -69,6 +69,14 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
   String _prefExperience = '';
   String _prefDays = '';
 
+  // Injury filtering state
+  bool _injuryFilteringEnabled = false;
+  List<Map<String, dynamic>> _userInjuries = [];
+  List<Map<String, dynamic>> _injuryCategories = [];
+  bool _injuryCatsLoading = true;
+  bool _disclaimerAccepted = false;
+  bool _isSavingInjury = false;
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   @override
@@ -140,12 +148,300 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
 
           _isLoading = false;
         });
+
+        final injuryData = await FirestoreService()
+            .getUserInjuryData(uid);
+        if (mounted) {
+          setState(() {
+            _injuryFilteringEnabled =
+                injuryData['injuryFilteringEnabled'] as bool? ?? false;
+            _userInjuries = List<Map<String, dynamic>>.from(
+                injuryData['injuries'] as List? ?? []);
+            _disclaimerAccepted = _injuryFilteringEnabled;
+          });
+        }
+        _loadInjuryCategories();
       } else {
         setState(() => _isLoading = false);
       }
     } catch (_) {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  Future<void> _loadInjuryCategories() async {
+    try {
+      final cats = await FirestoreService().getInjuryCategories();
+      if (mounted) {
+        setState(() {
+          _injuryCategories = cats;
+          _injuryCatsLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _injuryCatsLoading = false);
+    }
+  }
+
+  Future<void> _saveInjuryData() async {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    setState(() => _isSavingInjury = true);
+    try {
+      await FirestoreService().saveUserInjuries(
+        uid,
+        injuries: _userInjuries,
+        filteringEnabled: _injuryFilteringEnabled,
+      );
+      if (mounted) {
+        setState(() => _isSavingInjury = false);
+        _snack('Injury profile saved.');
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _isSavingInjury = false);
+        _snack('Failed to save. Please try again.');
+      }
+    }
+  }
+
+  Future<bool> _showDisclaimerDialog() async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.medical_information_rounded,
+                color: Color(0xFFEF4444), size: 20),
+            SizedBox(width: 8),
+            Text('Medical Disclaimer',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  color: WW.text,
+                )),
+          ],
+        ),
+        content: const Text(
+          'WiseWorkout\'s injury filtering is an automated tool and is NOT a substitute for professional medical advice.\n\nAlways consult a qualified healthcare professional before exercising with an injury. WiseWorkout is not responsible for any injury or harm resulting from use of this feature.',
+          style: TextStyle(
+              fontSize: 13, color: WW.textSec, height: 1.6),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel',
+                style: TextStyle(color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('I Understand',
+                style: TextStyle(
+                  color: WW.primary,
+                  fontWeight: FontWeight.w700,
+                )),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  Future<void> _showAddInjurySheet() async {
+    if (_injuryCatsLoading || _injuryCategories.isEmpty) {
+      _snack('Loading injury categories...');
+      return;
+    }
+    Map<String, dynamic>? selectedCat;
+    String selectedSeverity = 'Moderate';
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: EdgeInsets.fromLTRB(
+            20, 20, 20,
+            MediaQuery.of(ctx).viewInsets.bottom + 40,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36, height: 4,
+                  decoration: BoxDecoration(
+                    color: WW.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text('Add Injury',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                  color: WW.primaryDark,
+                )),
+              const SizedBox(height: 4),
+              const Text(
+                'Select the affected area and severity.',
+                style: TextStyle(fontSize: 13, color: WW.textSec),
+              ),
+              const SizedBox(height: 20),
+              const Text('Affected Area',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: WW.text,
+                )),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: _injuryCategories.map((cat) {
+                  final isSelected = selectedCat?['id'] == cat['id'];
+                  final alreadyAdded = _userInjuries.any(
+                    (i) => i['categoryId'] == cat['id']);
+                  return GestureDetector(
+                    onTap: alreadyAdded ? null :
+                      () => setSheet(() => selectedCat = cat),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 7),
+                      decoration: BoxDecoration(
+                        color: alreadyAdded
+                            ? WW.elevated
+                            : isSelected
+                                ? WW.primary
+                                : WW.chipBg,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: alreadyAdded
+                              ? WW.border
+                              : isSelected
+                                  ? WW.primary
+                                  : WW.border,
+                          width: 1.5,
+                        ),
+                      ),
+                      child: Text(
+                        cat['name'] as String? ?? '',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: alreadyAdded
+                              ? WW.textSec
+                              : isSelected
+                                  ? Colors.white
+                                  : WW.text,
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 20),
+              const Text('Severity',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: WW.text,
+                )),
+              const SizedBox(height: 10),
+              Row(
+                children: ['Mild', 'Moderate', 'Severe'].map((s) {
+                  final isSelected = selectedSeverity == s;
+                  final color = s == 'Mild'
+                      ? const Color(0xFF16A34A)
+                      : s == 'Moderate'
+                          ? const Color(0xFFD97706)
+                          : const Color(0xFFEF4444);
+                  return Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: GestureDetector(
+                        onTap: () =>
+                            setSheet(() => selectedSeverity = s),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              vertical: 10),
+                          decoration: BoxDecoration(
+                            color: isSelected
+                                ? color.withValues(alpha: 0.1)
+                                : WW.elevated,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: isSelected ? color : WW.border,
+                              width: 1.5,
+                            ),
+                          ),
+                          child: Center(
+                            child: Text(s,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: isSelected
+                                    ? color
+                                    : WW.textSec,
+                              )),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton(
+                  onPressed: selectedCat == null ? null : () {
+                    Navigator.pop(ctx);
+                    setState(() {
+                      _userInjuries.add({
+                        'categoryId': selectedCat!['id'],
+                        'name': selectedCat!['name'],
+                        'bodyPart': selectedCat!['bodyPart'],
+                        'severity': selectedSeverity,
+                        'addedDate': DateTime.now()
+                            .toIso8601String()
+                            .substring(0, 10),
+                      });
+                    });
+                    _saveInjuryData();
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: WW.primary,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: WW.elevated,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(13),
+                    ),
+                  ),
+                  child: const Text('Add Injury',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    )),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -696,73 +992,274 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
 
   Widget _buildSectionB() {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _sectionHeader('Injuries & Conditions'),
+        _sectionHeader(
+          'Injuries & Conditions',
+          icon: Icons.healing_rounded,
+        ),
+        const SizedBox(height: 12),
+
+        // Master toggle
         Container(
           decoration: WW.cardDecoration,
           padding: const EdgeInsets.all(16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // WiseCoach callout with left accent border
-              Container(
-                decoration: BoxDecoration(
-                  color: WW.lavenderBg,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      width: 3,
-                      height: 70,
-                      decoration: BoxDecoration(
-                        color: WW.lavender,
-                        borderRadius: const BorderRadius.only(
-                          topLeft: Radius.circular(10),
-                          bottomLeft: Radius.circular(10),
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Injury Filtering',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: WW.text,
+                          )),
+                        const SizedBox(height: 3),
+                        const Text(
+                          'Flags exercises that may aggravate your injuries.',
+                          style: TextStyle(
+                              fontSize: 12, color: WW.textSec),
                         ),
-                      ),
+                      ],
                     ),
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Icon(Icons.auto_awesome_rounded,
-                                color: WW.lavender, size: 14),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                'WiseCoach reads your injuries and conditions before every plan recommendation.',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: WW.lavenderText,
-                                  height: 1.5,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+                  ),
+                  CupertinoSwitch(
+                    value: _injuryFilteringEnabled,
+                    activeTrackColor: WW.primary,
+                    onChanged: (val) async {
+                      if (val && !_disclaimerAccepted) {
+                        final accepted =
+                            await _showDisclaimerDialog();
+                        if (!accepted) return;
+                        setState(() => _disclaimerAccepted = true);
+                      }
+                      setState(
+                          () => _injuryFilteringEnabled = val);
+                      _saveInjuryData();
+                    },
+                  ),
+                ],
               ),
-              const SizedBox(height: 16),
-              const Center(
-                child: Text(
-                  'Injury tracking coming soon',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: WW.textSec,
-                    fontStyle: FontStyle.italic,
+              if (_injuryFilteringEnabled) ...[
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEF3C7),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.info_outline_rounded,
+                          size: 14,
+                          color: Color(0xFFD97706)),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Not a substitute for medical advice. Consult a professional before exercising with an injury.',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF92400E),
+                            height: 1.4,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ),
+              ],
             ],
+          ),
+        ),
+        const SizedBox(height: 12),
+
+        // Active injuries list
+        if (_userInjuries.isNotEmpty) ...[
+          ..._userInjuries.asMap().entries.map((entry) {
+            final i = entry.key;
+            final injury = entry.value;
+            final severity =
+                injury['severity'] as String? ?? 'Moderate';
+            final severityColor = severity == 'Mild'
+                ? const Color(0xFF16A34A)
+                : severity == 'Moderate'
+                    ? const Color(0xFFD97706)
+                    : const Color(0xFFEF4444);
+            final addedDate =
+                injury['addedDate'] as String? ?? '';
+            DateTime? addedDt =
+                addedDate.isNotEmpty
+                    ? DateTime.tryParse(addedDate)
+                    : null;
+            final weeksAgo = addedDt != null
+                ? DateTime.now()
+                    .difference(addedDt)
+                    .inDays ~/
+                    7
+                : 0;
+            return Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              decoration: WW.cardDecoration,
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  Container(
+                    width: 40, height: 40,
+                    decoration: BoxDecoration(
+                      color: severityColor.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(Icons.healing_rounded,
+                        color: severityColor, size: 20),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          injury['name'] as String? ?? '',
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: WW.text,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 7, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: severityColor
+                                    .withValues(alpha: 0.1),
+                                borderRadius:
+                                    BorderRadius.circular(4),
+                              ),
+                              child: Text(severity,
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: severityColor,
+                                )),
+                            ),
+                            if (weeksAgo > 0) ...[
+                              const SizedBox(width: 6),
+                              Text(
+                                '$weeksAgo week${weeksAgo == 1 ? '' : 's'} ago',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: WW.textSec,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                        if (weeksAgo >= 4) ...[
+                          const SizedBox(height: 6),
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: WW.chipBg,
+                              borderRadius:
+                                  BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.help_outline_rounded,
+                                  size: 13,
+                                  color: WW.primary,
+                                ),
+                                const SizedBox(width: 6),
+                                const Expanded(
+                                  child: Text(
+                                    'Have you recovered? Consider removing this injury.',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: WW.primary,
+                                      height: 1.3,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: () {
+                      setState(() =>
+                          _userInjuries.removeAt(i));
+                      _saveInjuryData();
+                    },
+                    child: Container(
+                      width: 32, height: 32,
+                      decoration: BoxDecoration(
+                        color: WW.elevated,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(
+                        Icons.close_rounded,
+                        size: 16,
+                        color: WW.textSec,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+          const SizedBox(height: 4),
+        ],
+
+        // Add injury button
+        GestureDetector(
+          onTap: _isSavingInjury ? null : _showAddInjurySheet,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            decoration: BoxDecoration(
+              color: WW.card,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: _isSavingInjury ? WW.border : WW.primary,
+                width: 1.5,
+              ),
+            ),
+            child: _isSavingInjury
+                ? const Center(
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        color: WW.primary,
+                        strokeWidth: 2,
+                      ),
+                    ),
+                  )
+                : const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.add_rounded,
+                          color: WW.primary, size: 18),
+                      SizedBox(width: 8),
+                      Text('Add Injury',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: WW.primary,
+                        )),
+                    ],
+                  ),
           ),
         ),
       ],
@@ -1209,11 +1706,15 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
 
   // ── Shared row widgets ─────────────────────────────────────────────────────
 
-  Widget _sectionHeader(String label, {Widget? trailing}) {
+  Widget _sectionHeader(String label, {Widget? trailing, IconData? icon}) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         children: [
+          if (icon != null) ...[
+            Icon(icon, size: 14, color: WW.textSec),
+            const SizedBox(width: 6),
+          ],
           Expanded(
             child: Text(
               label.toUpperCase(),

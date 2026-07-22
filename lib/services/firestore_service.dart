@@ -165,6 +165,7 @@ class FirestoreService {
           .add({
         'type': 'gym',
         'sessionName': sessionData['sessionName'],
+        'planId': sessionData['planId'] ?? '',
         'date': FieldValue.serverTimestamp(),
         'createdAt': FieldValue.serverTimestamp(),
         'durationSeconds': sessionData['elapsedSeconds'],
@@ -219,6 +220,185 @@ class FirestoreService {
     return snapshot.docs
         .map((doc) => {'id': doc.id, ...doc.data()})
         .toList();
+  }
+
+  /// Returns the most recent set data for a given
+  /// exercise name across all of this user's gym
+  /// sessions. Returns a list of maps with 'kg' and
+  /// 'reps' keys, or empty list if not found.
+  Future<List<Map<String, dynamic>>> getLastSessionForExercise(
+    String uid,
+    String exerciseName,
+  ) async {
+    try {
+      final snapshot = await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .collection(Collections.sessions)
+          .orderBy('date', descending: true)
+          .limit(20)
+          .get();
+
+      for (final doc in snapshot.docs) {
+        final type = doc.data()['type'] as String? ?? '';
+        if (type != 'gym') continue;
+        final exercises =
+            doc.data()['exercises'] as List<dynamic>? ?? [];
+        for (final ex in exercises) {
+          if (ex is! Map) continue;
+          final name = ex['name'] as String? ?? '';
+          if (name.toLowerCase() == exerciseName.toLowerCase()) {
+            final sets = ex['sets'] as List<dynamic>? ?? [];
+            return sets
+                .whereType<Map>()
+                .map((s) => {
+                      'kg': s['kg'],
+                      'reps': s['reps'],
+                    })
+                .toList();
+          }
+        }
+      }
+      return [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Fetches a single exercise document by name
+  /// (case-insensitive match). Returns null if not found.
+  Future<Map<String, dynamic>?> getExerciseDetail(
+    String exerciseName,
+  ) async {
+    try {
+      final snapshot = await _db
+          .collection(Collections.exercises)
+          .get();
+      for (final doc in snapshot.docs) {
+        final name = doc.data()['name'] as String? ?? '';
+        if (name.toLowerCase() == exerciseName.toLowerCase()) {
+          return {'id': doc.id, ...doc.data()};
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Fetches injuryRisk arrays for a list of exercise
+  /// names from the exercises collection. Returns a
+  /// map of exerciseName -> injuryRisk list.
+  Future<Map<String, List<String>>> getInjuryRisksForExercises(
+    List<String> exerciseNames,
+  ) async {
+    if (exerciseNames.isEmpty) return {};
+    try {
+      final snapshot = await _db
+          .collection(Collections.exercises)
+          .get();
+      final result = <String, List<String>>{};
+      for (final doc in snapshot.docs) {
+        final name = doc.data()['name'] as String? ?? '';
+        final injuryRisk =
+            (doc.data()['injuryRisk'] as List<dynamic>?)
+                ?.map((e) => e.toString())
+                .toList() ??
+            [];
+        final match = exerciseNames.firstWhere(
+          (n) => n.toLowerCase() == name.toLowerCase(),
+          orElse: () => '',
+        );
+        if (match.isNotEmpty) {
+          result[match] = injuryRisk;
+        }
+      }
+      return result;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Fetches all injury categories from Firestore.
+  /// Returns list of maps with id, name, bodyPart,
+  /// description fields.
+  Future<List<Map<String, dynamic>>> getInjuryCategories() async {
+    try {
+      final snapshot = await _db
+          .collection(Collections.injuryCategories)
+          .orderBy('bodyPart')
+          .get();
+      return snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Saves the user's current injuries and filtering
+  /// preference to their user document.
+  Future<void> saveUserInjuries(
+    String uid, {
+    required List<Map<String, dynamic>> injuries,
+    required bool filteringEnabled,
+  }) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .update({
+      'injuries': injuries,
+      'injuryFilteringEnabled': filteringEnabled,
+    });
+  }
+
+  /// Reads the user's current injuries and filtering
+  /// preference from their user document.
+  Future<Map<String, dynamic>> getUserInjuryData(
+    String uid,
+  ) async {
+    try {
+      final doc = await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .get();
+      final data = doc.data();
+      return {
+        'injuries': data?['injuries'] ?? [],
+        'injuryFilteringEnabled':
+            data?['injuryFilteringEnabled'] ?? false,
+      };
+    } catch (_) {
+      return {
+        'injuries': [],
+        'injuryFilteringEnabled': false,
+      };
+    }
+  }
+
+  /// Checks if an exercise should be flagged based on
+  /// user injuries. Returns the matching injury name
+  /// if flagged, null if safe.
+  String? checkExerciseInjuryRisk(
+    Map<String, dynamic> exercise,
+    List<Map<String, dynamic>> userInjuries,
+  ) {
+    if (userInjuries.isEmpty) return null;
+    final injuryRisk =
+        (exercise['injuryRisk'] as List<dynamic>?)
+            ?.map((e) => e.toString().toLowerCase())
+            .toList() ??
+        [];
+    if (injuryRisk.isEmpty) return null;
+    for (final injury in userInjuries) {
+      final bodyPart =
+          (injury['bodyPart'] as String? ?? '')
+              .toLowerCase();
+      if (injuryRisk.contains(bodyPart)) {
+        return injury['name'] as String?;
+      }
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------------------
