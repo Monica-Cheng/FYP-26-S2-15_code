@@ -222,6 +222,34 @@ class FirestoreService {
         .toList();
   }
 
+  // ---------------------------------------------------------------------------
+  // Returns lifetime totals across all sessions for users/{uid}: session
+  // count and summed gym volume (kg). Used by the Profile stats row.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>> getLifetimeStats(String uid) async {
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .get();
+
+    int sessionCount = snapshot.docs.length;
+    double totalVolume = 0;
+
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      final vol = data['totalVolume'];
+      if (vol is num) {
+        totalVolume += vol.toDouble();
+      }
+    }
+
+    return {
+      'sessionCount': sessionCount,
+      'totalVolume': totalVolume,
+    };
+  }
+
   /// Returns the most recent set data for a given
   /// exercise name across all of this user's gym
   /// sessions. Returns a list of maps with 'kg' and

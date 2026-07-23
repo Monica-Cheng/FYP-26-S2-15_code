@@ -82,6 +82,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
   int _totalXp = 0;
   int _level = 1;
 
+  int _sessionCount = 0;
+  double _totalVolume = 0;
+  int _streak = 0;
+  bool _statsLoading = true;
+
   static const _kXpThresholds = [0, 500, 1200, 2500, 4500, 7000, 10000, 14000, 19000, 25000, 32000];
 
   static String _levelName(int level) {
@@ -105,6 +110,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   void initState() {
     super.initState();
     _loadProfile();
+    _loadStats();
   }
 
   Future<void> _loadProfile() async {
@@ -127,6 +133,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
       }
     } catch (_) {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _loadStats() async {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) {
+      if (mounted) setState(() => _statsLoading = false);
+      return;
+    }
+    try {
+      final stats = await _firestore.getLifetimeStats(uid);
+      final streak = await _firestore.calculateStreak(uid);
+      if (mounted) {
+        setState(() {
+          _sessionCount = stats['sessionCount'] as int? ?? 0;
+          _totalVolume = (stats['totalVolume'] as num?)?.toDouble() ?? 0;
+          _streak = streak;
+          _statsLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _statsLoading = false);
     }
   }
 
@@ -377,10 +405,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   // ── Stats row ─────────────────────────────────────────────────────────────
 
   Widget _buildStatsRow() {
-    const stats = [
-      (Icons.fitness_center_rounded, '47', 'Sessions', WW.primary),
-      (Icons.show_chart_rounded, '38.2', 'km', WW.teal),
-      (Icons.local_fire_department_rounded, '7', 'Day streak', WW.teal),
+    final stats = [
+      (Icons.fitness_center_rounded, '$_sessionCount', 'Sessions', WW.primary),
+      (Icons.show_chart_rounded, _totalVolume.toStringAsFixed(0), 'kg', WW.teal),
+      (Icons.local_fire_department_rounded, '$_streak', 'Day streak', WW.teal),
     ];
 
     return Padding(
@@ -401,14 +429,23 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   children: [
                     Icon(s.$1, size: 16, color: s.$4),
                     const SizedBox(height: 4),
-                    Text(
-                      s.$2,
-                      style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                        color: WW.text,
-                      ),
-                    ),
+                    _statsLoading
+                        ? const SizedBox(
+                            height: 20,
+                            width: 20,
+                            child: CircularProgressIndicator(
+                              color: WW.primary,
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : Text(
+                            s.$2,
+                            style: const TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w700,
+                              color: WW.text,
+                            ),
+                          ),
                     const SizedBox(height: 2),
                     Text(
                       s.$3,
