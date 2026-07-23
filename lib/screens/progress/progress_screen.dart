@@ -11,8 +11,6 @@ import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
-const List<String> _kDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
 class ProgressScreen extends StatefulWidget {
@@ -26,6 +24,23 @@ class _ProgressScreenState extends State<ProgressScreen> {
   int _subtab = 0;
   int _timeFilter = 0;
   int _activityFilter = 0;
+
+  List<String> get _chartLabels {
+    if (_timeFilter == 0) {
+      return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    } else if (_timeFilter == 1) {
+      return ['Wk 1', 'Wk 2', 'Wk 3', 'Wk 4'];
+    } else {
+      return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    }
+  }
+
+  int get _bucketCount {
+    if (_timeFilter == 0) return 7;
+    if (_timeFilter == 1) return 4;
+    return 12;
+  }
 
   List<Map<String, dynamic>> _sessions = [];
   bool _sessionsLoading = true;
@@ -101,11 +116,49 @@ class _ProgressScreenState extends State<ProgressScreen> {
       return;
     }
     try {
-      final stats = await FirestoreService().getWeeklySessionStats(uid);
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+
+      DateTime startDate;
+      DateTime endDate;
+      int bucketCount;
+      String bucketUnit;
+
+      if (_timeFilter == 0) {
+        // This Week — Mon to Sun, 7 day buckets
+        startDate =
+            today.subtract(Duration(days: today.weekday - 1));
+        endDate = startDate.add(const Duration(days: 7));
+        bucketCount = 7;
+        bucketUnit = 'day';
+      } else if (_timeFilter == 1) {
+        // This Month — 1st to end, 4 week buckets
+        startDate = DateTime(now.year, now.month, 1);
+        endDate = DateTime(now.year, now.month + 1, 1);
+        bucketCount = 4;
+        bucketUnit = 'week';
+      } else {
+        // This Year — Jan to Dec, 12 month buckets
+        startDate = DateTime(now.year, 1, 1);
+        endDate = DateTime(now.year + 1, 1, 1);
+        bucketCount = 12;
+        bucketUnit = 'month';
+      }
+
+      final stats = await FirestoreService().getSessionStats(
+        uid,
+        startDate: startDate,
+        endDate: endDate,
+        bucketCount: bucketCount,
+        bucketUnit: bucketUnit,
+      );
+
       if (!mounted) return;
       setState(() {
-        _caloriesByDay = List<double>.from(stats['caloriesByDay'] as List);
-        _volumeByDay = List<double>.from(stats['volumeByDay'] as List);
+        _caloriesByDay =
+            List<double>.from(stats['caloriesByDay'] as List);
+        _volumeByDay =
+            List<double>.from(stats['volumeByDay'] as List);
         _weekTotalCalories = stats['totalCalories'] as int;
         _weekTotalVolume = stats['totalVolume'] as int;
         _weekTotalSessions = stats['totalSessions'] as int;
@@ -565,11 +618,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
             ),
           ),
           const SizedBox(width: 10),
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                const Text(
                   'WiseCoach Insight',
                   style: TextStyle(
                     fontSize: 12,
@@ -577,10 +630,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
                     color: WW.lavenderDark,
                   ),
                 ),
-                SizedBox(height: 4),
+                const SizedBox(height: 4),
                 Text(
-                  'Good week! You burned 1,840 kcal across 4 sessions. Your gym volume is up 12% from last week.',
-                  style: TextStyle(
+                  _buildInsightText(),
+                  style: const TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
                     color: WW.lavenderText,
@@ -595,6 +648,35 @@ class _ProgressScreenState extends State<ProgressScreen> {
     );
   }
 
+  String _buildInsightText() {
+    final period = _timeFilter == 0
+        ? 'this week'
+        : _timeFilter == 1
+            ? 'this month'
+            : 'this year';
+    if (_weekTotalSessions == 0) {
+      return 'No sessions logged $period yet. Start a workout to see your insights here.';
+    }
+    final calStr = _weekTotalCalories > 0
+        ? ' and burned $_weekTotalCalories kcal'
+        : '';
+    final volStr = _weekTotalVolume > 0
+        ? ' with $_weekTotalVolume kg total volume'
+        : '';
+    final gymStr = _weekGymSessions > 0
+        ? '$_weekGymSessions gym session${_weekGymSessions == 1 ? '' : 's'}'
+        : '';
+    final cardioCount =
+        _weekTotalSessions - _weekGymSessions;
+    final cardioStr = cardioCount > 0
+        ? '$cardioCount cardio session${cardioCount == 1 ? '' : 's'}'
+        : '';
+    final sessionStr = [gymStr, cardioStr]
+        .where((s) => s.isNotEmpty)
+        .join(' and ');
+    return 'You completed $sessionStr $period$calStr$volStr. Keep it up!';
+  }
+
   Widget _buildTimeFilter() {
     return Row(
       children: List.generate(_timeLabels.length, (i) {
@@ -603,7 +685,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
           child: Padding(
             padding: EdgeInsets.only(right: i < _timeLabels.length - 1 ? 8 : 0),
             child: GestureDetector(
-              onTap: () => setState(() => _timeFilter = i),
+              onTap: () {
+                setState(() {
+                  _timeFilter = i;
+                  _chartsLoading = true;
+                });
+                _loadChartData();
+              },
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
                 height: 36,
@@ -656,8 +744,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
             height: 160,
             child: BarChart(
               BarChartData(
-                barGroups: List.generate(7, (i) {
-                  final val = _caloriesByDay[i];
+                barGroups: List.generate(_bucketCount, (i) {
+                  final val = i < _caloriesByDay.length
+                      ? _caloriesByDay[i]
+                      : 0.0;
                   return BarChartGroupData(
                     x: i,
                     barRods: [
@@ -678,13 +768,14 @@ class _ProgressScreenState extends State<ProgressScreen> {
                       reservedSize: 28,
                       getTitlesWidget: (value, meta) {
                         final i = value.toInt();
-                        if (i < 0 || i >= _kDays.length) {
+                        final labels = _chartLabels;
+                        if (i < 0 || i >= labels.length) {
                           return const SizedBox.shrink();
                         }
                         return Padding(
                           padding: const EdgeInsets.only(top: 6),
                           child: Text(
-                            _kDays[i],
+                            labels[i],
                             style: const TextStyle(
                               fontSize: 10,
                               fontWeight: FontWeight.w600,
@@ -708,7 +799,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   touchTooltipData: BarTouchTooltipData(
                     getTooltipColor: (_) => WW.primaryDark,
                     getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                      final val = _caloriesByDay[group.x].round();
+                      final val = (group.x < _caloriesByDay.length
+                              ? _caloriesByDay[group.x]
+                              : 0.0)
+                          .round();
                       if (val == 0) return null;
                       return BarTooltipItem(
                         '$val kcal',
@@ -765,8 +859,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
             height: 160,
             child: BarChart(
               BarChartData(
-                barGroups: List.generate(7, (i) {
-                  final val = _volumeByDay[i];
+                barGroups: List.generate(_bucketCount, (i) {
+                  final val = i < _volumeByDay.length
+                      ? _volumeByDay[i]
+                      : 0.0;
                   return BarChartGroupData(
                     x: i,
                     barRods: [
@@ -787,13 +883,14 @@ class _ProgressScreenState extends State<ProgressScreen> {
                       reservedSize: 28,
                       getTitlesWidget: (value, meta) {
                         final i = value.toInt();
-                        if (i < 0 || i >= _kDays.length) {
+                        final labels = _chartLabels;
+                        if (i < 0 || i >= labels.length) {
                           return const SizedBox.shrink();
                         }
                         return Padding(
                           padding: const EdgeInsets.only(top: 6),
                           child: Text(
-                            _kDays[i],
+                            labels[i],
                             style: const TextStyle(
                               fontSize: 10,
                               fontWeight: FontWeight.w600,
@@ -817,7 +914,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   touchTooltipData: BarTouchTooltipData(
                     getTooltipColor: (_) => WW.primaryDark,
                     getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                      final val = _volumeByDay[group.x].round();
+                      final val = (group.x < _volumeByDay.length
+                              ? _volumeByDay[group.x]
+                              : 0.0)
+                          .round();
                       if (val == 0) return null;
                       return BarTooltipItem(
                         '$val kg',
@@ -848,8 +948,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
   }
 
   Widget _buildStatCardsRow() {
+    final periodLabel = _timeFilter == 0
+        ? 'This Week'
+        : _timeFilter == 1
+            ? 'This Month'
+            : 'This Year';
     final items = [
-      ('$_weekTotalSessions', 'sessions\nthis week'),
+      ('$_weekTotalSessions', 'sessions\n$periodLabel'),
       ('$_weekGymSessions', 'gym\nsessions'),
     ];
     return Row(

@@ -571,20 +571,24 @@ class FirestoreService {
   // Covers Mon–Sun of the current local week.
   // caloriesByDay / volumeByDay are indexed 0=Mon … 6=Sun.
   // ---------------------------------------------------------------------------
-  Future<Map<String, dynamic>> getWeeklySessionStats(String uid) async {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final weekStart = today.subtract(Duration(days: today.weekday - 1));
-
+  Future<Map<String, dynamic>> getSessionStats(
+    String uid, {
+    required DateTime startDate,
+    required DateTime endDate,
+    required int bucketCount,
+    required String bucketUnit,
+  }) async {
     final snapshot = await _db
         .collection(Collections.users)
         .doc(uid)
         .collection(Collections.sessions)
-        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(weekStart))
+        .where('date',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(startDate))
+        .where('date', isLessThan: Timestamp.fromDate(endDate))
         .get();
 
-    final caloriesByDay = List<double>.filled(7, 0);
-    final volumeByDay = List<double>.filled(7, 0);
+    final caloriesByBucket = List<double>.filled(bucketCount, 0);
+    final volumeByBucket = List<double>.filled(bucketCount, 0);
     int totalCalories = 0;
     double totalVolume = 0;
     int totalSessions = 0;
@@ -595,17 +599,29 @@ class FirestoreService {
       final data = doc.data();
       final ts = data['date'];
       if (ts is! Timestamp) continue;
-
       final date = ts.toDate().toLocal();
-      final dayIndex = date.weekday - 1; // 0=Mon … 6=Sun
-      if (dayIndex < 0 || dayIndex > 6) continue;
-
-      final cals = (data['caloriesBurned'] as num?)?.toDouble() ?? 0;
-      final vol = (data['totalVolume'] as num?)?.toDouble() ?? 0;
+      final cals =
+          (data['caloriesBurned'] as num?)?.toDouble() ?? 0;
+      final vol =
+          (data['totalVolume'] as num?)?.toDouble() ?? 0;
       final type = data['type'] as String? ?? '';
 
-      caloriesByDay[dayIndex] += cals;
-      if (type == 'gym') volumeByDay[dayIndex] += vol;
+      int bucketIndex;
+      if (bucketUnit == 'day') {
+        bucketIndex = date
+            .difference(startDate)
+            .inDays
+            .clamp(0, bucketCount - 1);
+      } else if (bucketUnit == 'week') {
+        bucketIndex = (date.difference(startDate).inDays ~/ 7)
+            .clamp(0, bucketCount - 1);
+      } else {
+        bucketIndex =
+            (date.month - startDate.month).clamp(0, bucketCount - 1);
+      }
+
+      caloriesByBucket[bucketIndex] += cals;
+      if (type == 'gym') volumeByBucket[bucketIndex] += vol;
       totalCalories += cals.round();
       totalVolume += vol;
       totalSessions++;
@@ -614,14 +630,31 @@ class FirestoreService {
     }
 
     return {
-      'caloriesByDay': caloriesByDay,
-      'volumeByDay': volumeByDay,
+      'caloriesByDay': caloriesByBucket,
+      'volumeByDay': volumeByBucket,
       'totalCalories': totalCalories,
       'totalVolume': totalVolume.round(),
       'totalSessions': totalSessions,
       'gymSessions': gymSessions,
       'cardioSessions': cardioSessions,
     };
+  }
+
+  /// Convenience wrapper for backward compatibility
+  Future<Map<String, dynamic>> getWeeklySessionStats(
+      String uid) async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final weekStart =
+        today.subtract(Duration(days: today.weekday - 1));
+    final weekEnd = weekStart.add(const Duration(days: 7));
+    return getSessionStats(
+      uid,
+      startDate: weekStart,
+      endDate: weekEnd,
+      bucketCount: 7,
+      bucketUnit: 'day',
+    );
   }
 
   // ---------------------------------------------------------------------------
