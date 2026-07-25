@@ -31,6 +31,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   TimeOfDay _reminderTime = const TimeOfDay(hour: 7, minute: 0);
   bool _streakAlerts = true;
   bool _wiseCoachMessages = true;
+  bool _leaderboardVisible = true;
   bool _prefsLoading = true;
 
   String? _userEmail;
@@ -57,6 +58,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _workoutReminders = profile?['workoutReminders'] as bool? ?? true;
         _streakAlerts = profile?['streakAlerts'] as bool? ?? true;
         _wiseCoachMessages = profile?['wiseCoachMessages'] as bool? ?? true;
+        _leaderboardVisible = profile?['leaderboardVisible'] as bool? ?? true;
         final savedHour = profile?['reminderHour'] as int?;
         final savedMinute = profile?['reminderMinute'] as int?;
         if (savedHour != null && savedMinute != null) {
@@ -87,6 +89,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } else {
       await NotificationService().cancelWorkoutReminder();
     }
+  }
+
+  // Saved standalone (not bundled into _savePrefs()) so toggling this
+  // doesn't rewrite the four notification fields — matches the pattern
+  // used by health_profile_screen.dart's _onCalorieToggle().
+  Future<void> _onLeaderboardVisibilityToggle(bool val) async {
+    setState(() => _leaderboardVisible = val);
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      await _firestore.updateUserProfile(uid, {'leaderboardVisible': val});
+    } catch (_) {}
   }
 
   Future<void> _showReminderTimePicker() async {
@@ -372,10 +386,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       _row(
                         icon: Icons.visibility_rounded,
                         iconBg: WW.lavender,
-                        title: 'Profile Visibility',
+                        title: "Show me on Friends' Leaderboards",
                         first: true,
-                        right: _valueText('Friends'),
-                        onTap: () => _snack('Visibility coming soon'),
+                        chevron: false,
+                        right: _buildToggle(
+                            _leaderboardVisible, _onLeaderboardVisibilityToggle),
                       ),
                       _row(
                         icon: Icons.block_rounded,

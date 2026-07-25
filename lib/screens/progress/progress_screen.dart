@@ -31,8 +31,20 @@ class _ProgressScreenState extends State<ProgressScreen> {
     } else if (_timeFilter == 1) {
       return ['Wk 1', 'Wk 2', 'Wk 3', 'Wk 4'];
     } else {
-      return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return [
+        'Jan',
+        'Feb',
+        'Mar',
+        'Apr',
+        'May',
+        'Jun',
+        'Jul',
+        'Aug',
+        'Sep',
+        'Oct',
+        'Nov',
+        'Dec',
+      ];
     }
   }
 
@@ -66,17 +78,43 @@ class _ProgressScreenState extends State<ProgressScreen> {
   StreamSubscription<List<Map<String, dynamic>>>? _weightSub;
   StreamSubscription<DocumentSnapshot>? _userDocSub;
 
-  static const List<String> _subtabLabels = ['Charts', 'Activities', 'XP History', 'Check-ins'];
-  static const List<String> _timeLabels = ['This Week', 'This Month', 'This Year'];
+  static const List<String> _subtabLabels = [
+    'Charts',
+    'Activities',
+    'XP History',
+    'Check-ins',
+  ];
+  static const List<String> _timeLabels = ['W', 'M', 'Y'];
   static const List<String> _actLabels = ['All', 'Gym', 'Cardio', 'Manual'];
 
-  static const _kXpThresholds = [0, 500, 1200, 2500, 4500, 7000, 10000, 14000, 19000, 25000, 32000];
+  static const _kXpThresholds = [
+    0,
+    500,
+    1200,
+    2500,
+    4500,
+    7000,
+    10000,
+    14000,
+    19000,
+    25000,
+    32000,
+  ];
 
   static String _levelName(int level) {
     const names = [
-      '', 'Rookie', 'Beginner', 'Apprentice', 'Contender',
-      'Challenger', 'Warrior', 'Iron Athlete', 'Steel Athlete',
-      'Elite Athlete', 'Champion', 'Legend',
+      '',
+      'Rookie',
+      'Beginner',
+      'Apprentice',
+      'Contender',
+      'Challenger',
+      'Warrior',
+      'Iron Athlete',
+      'Steel Athlete',
+      'Elite Athlete',
+      'Champion',
+      'Legend',
     ];
     if (level < 1 || level >= names.length) return 'Level $level';
     return names[level];
@@ -126,8 +164,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
       if (_timeFilter == 0) {
         // This Week — Mon to Sun, 7 day buckets
-        startDate =
-            today.subtract(Duration(days: today.weekday - 1));
+        startDate = today.subtract(Duration(days: today.weekday - 1));
         endDate = startDate.add(const Duration(days: 7));
         bucketCount = 7;
         bucketUnit = 'day';
@@ -155,10 +192,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
       if (!mounted) return;
       setState(() {
-        _caloriesByDay =
-            List<double>.from(stats['caloriesByDay'] as List);
-        _volumeByDay =
-            List<double>.from(stats['volumeByDay'] as List);
+        _caloriesByDay = List<double>.from(stats['caloriesByDay'] as List);
+        _volumeByDay = List<double>.from(stats['volumeByDay'] as List);
         _weekTotalCalories = stats['totalCalories'] as int;
         _weekTotalVolume = stats['totalVolume'] as int;
         _weekTotalSessions = stats['totalSessions'] as int;
@@ -260,17 +295,17 @@ class _ProgressScreenState extends State<ProgressScreen> {
         .doc(uid)
         .snapshots()
         .listen((snap) {
-      if (!mounted) return;
-      final data = snap.data();
-      if (data == null) return;
-      final raw = data['goalWeight'];
-      final newGoal = raw is num
-          ? raw.toDouble()
-          : double.tryParse(raw?.toString() ?? '');
-      if (newGoal != _goalWeight) {
-        setState(() => _goalWeight = newGoal);
-      }
-    });
+          if (!mounted) return;
+          final data = snap.data();
+          if (data == null) return;
+          final raw = data['goalWeight'];
+          final newGoal = raw is num
+              ? raw.toDouble()
+              : double.tryParse(raw?.toString() ?? '');
+          if (newGoal != _goalWeight) {
+            setState(() => _goalWeight = newGoal);
+          }
+        });
   }
 
   void _startWeightStream() {
@@ -281,16 +316,19 @@ class _ProgressScreenState extends State<ProgressScreen> {
     }
     _weightSub = FirestoreService()
         .getWeightLogsStream(uid)
-        .listen((logs) {
-      if (mounted) {
-        setState(() {
-          _weightLogs = logs;
-          _weightLoading = false;
-        });
-      }
-    }, onError: (_) {
-      if (mounted) setState(() => _weightLoading = false);
-    });
+        .listen(
+          (logs) {
+            if (mounted) {
+              setState(() {
+                _weightLogs = logs;
+                _weightLoading = false;
+              });
+            }
+          },
+          onError: (_) {
+            if (mounted) setState(() => _weightLoading = false);
+          },
+        );
   }
 
   Future<void> _logWeight(double weightKg) async {
@@ -316,7 +354,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
       ),
       builder: (ctx) => Padding(
         padding: EdgeInsets.fromLTRB(
-            20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 24),
+          20,
+          20,
+          20,
+          MediaQuery.of(ctx).viewInsets.bottom + 24,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -341,7 +383,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   child: TextField(
                     controller: controller,
                     keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true),
+                      decimal: true,
+                    ),
                     autofocus: true,
                     style: const TextStyle(
                       fontSize: 32,
@@ -351,9 +394,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
                     decoration: const InputDecoration(
                       hintText: '70.0',
                       hintStyle: TextStyle(
-                          color: WW.border,
-                          fontSize: 32,
-                          fontWeight: FontWeight.w800),
+                        color: WW.border,
+                        fontSize: 32,
+                        fontWeight: FontWeight.w800,
+                      ),
                       border: InputBorder.none,
                       isDense: true,
                     ),
@@ -374,10 +418,12 @@ class _ProgressScreenState extends State<ProgressScreen> {
               onTap: () async {
                 final val = double.tryParse(controller.text);
                 if (val == null || val <= 0 || val > 300) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content: Text('Please enter a valid weight'),
-                    behavior: SnackBarBehavior.floating,
-                  ));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Please enter a valid weight'),
+                      behavior: SnackBarBehavior.floating,
+                    ),
+                  );
                   return;
                 }
                 Navigator.of(ctx).pop();
@@ -484,81 +530,48 @@ class _ProgressScreenState extends State<ProgressScreen> {
   // ── Top bar ───────────────────────────────────────────────────────────────
 
   Widget _buildTopBar() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
-      child: Row(
-        children: [
-          const Expanded(
-            child: Text(
-              'Progress',
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
-                color: WW.primaryDark,
-              ),
-            ),
-          ),
-          Container(
-            width: 36,
-            height: 36,
-            decoration: const BoxDecoration(
-              color: WW.primary,
-              shape: BoxShape.circle,
-            ),
-            child: const Center(
-              child: Text(
-                'M',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                ),
-              ),
-            ),
-          ),
-        ],
+    return const Padding(
+      padding: EdgeInsets.fromLTRB(20, 14, 20, 8),
+      child: Text(
+        'Progress',
+        style: TextStyle(
+          fontSize: 22,
+          fontWeight: FontWeight.w800,
+          color: WW.primaryDark,
+        ),
       ),
     );
   }
 
   // ── Subtabs ───────────────────────────────────────────────────────────────
 
+  // Evenly distributed across the full row width via spaceEvenly rather
+  // than Expanded — with 4 labels here (two of them two-word, ~10 chars:
+  // "Activities", "XP History"), equal-quarter Expanded segments risk
+  // wrapping those onto two lines on narrow phones. spaceEvenly keeps
+  // each label at its natural width and just spaces them evenly instead.
   Widget _buildSubtabs() {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Row(
-          children: List.generate(_subtabLabels.length, (i) {
-            final active = i == _subtab;
-            return Padding(
-              padding: EdgeInsets.only(right: i < _subtabLabels.length - 1 ? 8 : 0),
-              child: GestureDetector(
-                onTap: () => setState(() => _subtab = i),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  height: 32,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: BoxDecoration(
-                    color: active ? WW.primary : const Color(0xFFF2F2F7),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Center(
-                    child: Text(
-                      _subtabLabels[i],
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: active ? Colors.white : WW.textSec,
-                      ),
-                    ),
-                  ),
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: List.generate(_subtabLabels.length, (i) {
+          final active = i == _subtab;
+          return GestureDetector(
+            onTap: () => setState(() => _subtab = i),
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                _subtabLabels[i],
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                  color: active ? WW.primary : WW.textSec,
                 ),
               ),
-            );
-          }),
-        ),
+            ),
+          );
+        }),
       ),
     );
   }
@@ -572,19 +585,29 @@ class _ProgressScreenState extends State<ProgressScreen> {
       return const Center(child: CircularProgressIndicator(color: WW.primary));
     }
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
+      padding: const EdgeInsets.fromLTRB(0, 0, 0, 100),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildWiseCoachCard(),
           const SizedBox(height: 12),
+          _sectionDivider(),
+          const SizedBox(height: 12),
           _buildTimeFilter(),
+          const SizedBox(height: 12),
+          _sectionDivider(),
           const SizedBox(height: 12),
           _buildCaloriesChart(),
           const SizedBox(height: 12),
+          _sectionDivider(),
+          const SizedBox(height: 12),
           _buildGymChart(),
           const SizedBox(height: 12),
+          _sectionDivider(),
+          const SizedBox(height: 12),
           _buildStatCardsRow(),
+          const SizedBox(height: 12),
+          _sectionDivider(),
           const SizedBox(height: 12),
           _buildWeightSection(),
         ],
@@ -592,15 +615,29 @@ class _ProgressScreenState extends State<ProgressScreen> {
     );
   }
 
+  // Thin horizontal rule between Charts-tab sections, now that they no
+  // longer sit in individual card boxes. One shared divider per gap
+  // (rather than a bottom line on one section plus a top line on the
+  // next) avoids doubled hairlines while still marking every boundary in
+  // the list. Color/height matches the divider already used inside Track
+  // Weight's own header/body split (WW.elevated, 1px) for consistency
+  // within this file. Spans full width within the ScrollView's existing
+  // 20px side padding — no left/right border, purely horizontal.
+  Widget _sectionDivider() {
+    return Container(height: 1, color: WW.elevated);
+  }
+
+  // No boxed card background — content sits directly on WW.bg, matching
+  // Club's unboxed row style. The left accent stripe (WW.primary) and
+  // icon circle stay; they're an intentional design element, not part of
+  // the "card" look being removed. Label/body text uses WW.text/WW.textSec
+  // rather than a lavender tint, since there's no tinted background left
+  // to pair it with.
   Widget _buildWiseCoachCard() {
     return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: WW.lavenderBg,
-        borderRadius: BorderRadius.circular(14),
-        border: const Border(
-          left: BorderSide(color: WW.lavender, width: 3),
-        ),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+      decoration: const BoxDecoration(
+        border: Border(left: BorderSide(color: WW.primary, width: 3)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -609,12 +646,15 @@ class _ProgressScreenState extends State<ProgressScreen> {
             width: 28,
             height: 28,
             decoration: const BoxDecoration(
-              color: WW.lavender,
+              color: WW.primary,
               shape: BoxShape.circle,
             ),
             child: const Center(
-              child: Icon(Icons.auto_awesome_rounded,
-                  color: Colors.white, size: 14),
+              child: Icon(
+                Icons.auto_awesome_rounded,
+                color: Colors.white,
+                size: 14,
+              ),
             ),
           ),
           const SizedBox(width: 10),
@@ -627,7 +667,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
-                    color: WW.lavenderDark,
+                    color: WW.text,
                   ),
                 ),
                 const SizedBox(height: 4),
@@ -636,7 +676,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   style: const TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
-                    color: WW.lavenderText,
+                    color: WW.textSec,
                     height: 1.45,
                   ),
                 ),
@@ -652,8 +692,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
     final period = _timeFilter == 0
         ? 'this week'
         : _timeFilter == 1
-            ? 'this month'
-            : 'this year';
+        ? 'this month'
+        : 'this year';
     if (_weekTotalSessions == 0) {
       return 'No sessions logged $period yet. Start a workout to see your insights here.';
     }
@@ -666,68 +706,99 @@ class _ProgressScreenState extends State<ProgressScreen> {
     final gymStr = _weekGymSessions > 0
         ? '$_weekGymSessions gym session${_weekGymSessions == 1 ? '' : 's'}'
         : '';
-    final cardioCount =
-        _weekTotalSessions - _weekGymSessions;
+    final cardioCount = _weekTotalSessions - _weekGymSessions;
     final cardioStr = cardioCount > 0
         ? '$cardioCount cardio session${cardioCount == 1 ? '' : 's'}'
         : '';
-    final sessionStr = [gymStr, cardioStr]
-        .where((s) => s.isNotEmpty)
-        .join(' and ');
+    final sessionStr = [
+      gymStr,
+      cardioStr,
+    ].where((s) => s.isNotEmpty).join(' and ');
     return 'You completed $sessionStr $period$calStr$volStr. Keep it up!';
   }
 
+  // Segmented control: one continuous WW.elevated shell with a white
+  // (WW.card) pill that slides to the active segment via AnimatedAlign —
+  // matches Club's flattened, single-accent-color visual language instead
+  // of the old 3-separate-filled-pills style.
   Widget _buildTimeFilter() {
-    return Row(
-      children: List.generate(_timeLabels.length, (i) {
-        final active = i == _timeFilter;
-        return Expanded(
-          child: Padding(
-            padding: EdgeInsets.only(right: i < _timeLabels.length - 1 ? 8 : 0),
-            child: GestureDetector(
-              onTap: () {
-                setState(() {
-                  _timeFilter = i;
-                  _chartsLoading = true;
-                });
-                _loadChartData();
-              },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                height: 36,
-                decoration: BoxDecoration(
-                  color: active ? WW.primary : const Color(0xFFF2F2F7),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Center(
-                  child: Text(
-                    _timeLabels[i],
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: active ? Colors.white : WW.textSec,
-                    ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Container(
+        height: 40,
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: WW.elevated,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Stack(
+          children: [
+            AnimatedAlign(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOut,
+              alignment: Alignment(
+                -1 + (2 * _timeFilter) / (_timeLabels.length - 1),
+                0,
+              ),
+              child: FractionallySizedBox(
+                widthFactor: 1 / _timeLabels.length,
+                heightFactor: 1,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: WW.card,
+                    borderRadius: BorderRadius.circular(9),
                   ),
                 ),
               ),
             ),
-          ),
-        );
-      }),
+            Row(
+              children: List.generate(_timeLabels.length, (i) {
+                final active = i == _timeFilter;
+                return Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      setState(() {
+                        _timeFilter = i;
+                        _chartsLoading = true;
+                      });
+                      _loadChartData();
+                    },
+                    child: Center(
+                      child: Text(
+                        _timeLabels[i],
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: active
+                              ? FontWeight.w700
+                              : FontWeight.w500,
+                          color: active ? WW.text : WW.textSec,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
   Widget _buildCaloriesChart() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: WW.cardDecoration,
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.local_fire_department_outlined,
-                  color: WW.teal, size: 18),
+              Icon(
+                Icons.local_fire_department_outlined,
+                color: WW.teal,
+                size: 18,
+              ),
               const SizedBox(width: 8),
               const Text(
                 'Calories Burned',
@@ -787,11 +858,14 @@ class _ProgressScreenState extends State<ProgressScreen> {
                     ),
                   ),
                   leftTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false)),
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
                   topTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false)),
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
                   rightTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false)),
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
                 ),
                 borderData: FlBorderData(show: false),
                 gridData: const FlGridData(show: false),
@@ -799,10 +873,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   touchTooltipData: BarTouchTooltipData(
                     getTooltipColor: (_) => WW.primaryDark,
                     getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                      final val = (group.x < _caloriesByDay.length
-                              ? _caloriesByDay[group.x]
-                              : 0.0)
-                          .round();
+                      final val =
+                          (group.x < _caloriesByDay.length
+                                  ? _caloriesByDay[group.x]
+                                  : 0.0)
+                              .round();
                       if (val == 0) return null;
                       return BarTooltipItem(
                         '$val kcal',
@@ -833,16 +908,18 @@ class _ProgressScreenState extends State<ProgressScreen> {
   }
 
   Widget _buildGymChart() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: WW.cardDecoration,
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.fitness_center_rounded,
-                  color: WW.primary, size: 18),
+              const Icon(
+                Icons.fitness_center_rounded,
+                color: WW.primary,
+                size: 18,
+              ),
               const SizedBox(width: 8),
               const Text(
                 'Gym Training',
@@ -860,15 +937,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
             child: BarChart(
               BarChartData(
                 barGroups: List.generate(_bucketCount, (i) {
-                  final val = i < _volumeByDay.length
-                      ? _volumeByDay[i]
-                      : 0.0;
+                  final val = i < _volumeByDay.length ? _volumeByDay[i] : 0.0;
                   return BarChartGroupData(
                     x: i,
                     barRods: [
                       BarChartRodData(
                         toY: val > 0 ? val : 80,
-                        color: val > 0 ? WW.lavender : WW.border,
+                        color: val > 0 ? WW.primary : WW.border,
                         width: 26,
                         borderRadius: BorderRadius.circular(5),
                       ),
@@ -902,11 +977,14 @@ class _ProgressScreenState extends State<ProgressScreen> {
                     ),
                   ),
                   leftTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false)),
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
                   topTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false)),
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
                   rightTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false)),
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
                 ),
                 borderData: FlBorderData(show: false),
                 gridData: const FlGridData(show: false),
@@ -914,10 +992,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   touchTooltipData: BarTouchTooltipData(
                     getTooltipColor: (_) => WW.primaryDark,
                     getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                      final val = (group.x < _volumeByDay.length
-                              ? _volumeByDay[group.x]
-                              : 0.0)
-                          .round();
+                      final val =
+                          (group.x < _volumeByDay.length
+                                  ? _volumeByDay[group.x]
+                                  : 0.0)
+                              .round();
                       if (val == 0) return null;
                       return BarTooltipItem(
                         '$val kg',
@@ -951,50 +1030,53 @@ class _ProgressScreenState extends State<ProgressScreen> {
     final periodLabel = _timeFilter == 0
         ? 'This Week'
         : _timeFilter == 1
-            ? 'This Month'
-            : 'This Year';
+        ? 'This Month'
+        : 'This Year';
     final items = [
       ('$_weekTotalSessions', 'sessions\n$periodLabel'),
       ('$_weekGymSessions', 'gym\nsessions'),
     ];
-    return Row(
-      children: List.generate(items.length, (i) {
-        return Expanded(
-          child: Padding(
-            padding: EdgeInsets.only(right: i < items.length - 1 ? 10 : 0),
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              decoration: BoxDecoration(
-                color: WW.elevated,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Column(
-                children: [
-                  Text(
-                    items[i].$1,
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800,
-                      color: WW.primaryDark,
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Row(
+        children: List.generate(items.length, (i) {
+          return Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(right: i < items.length - 1 ? 10 : 0),
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                decoration: BoxDecoration(
+                  color: WW.elevated,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  children: [
+                    Text(
+                      items[i].$1,
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                        color: WW.primaryDark,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    items[i].$2,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
-                      color: WW.textSec,
-                      height: 1.4,
+                    const SizedBox(height: 4),
+                    Text(
+                      items[i].$2,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                        color: WW.textSec,
+                        height: 1.4,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
-        );
-      }),
+          );
+        }),
+      ),
     );
   }
 
@@ -1033,356 +1115,355 @@ class _ProgressScreenState extends State<ProgressScreen> {
       }
     }
 
-    return Container(
-      decoration: WW.cardDecoration,
-      clipBehavior: Clip.hardEdge,
-      child: Column(
-        children: [
-          GestureDetector(
-            onTap: () =>
-                setState(() => _weightExpanded = !_weightExpanded),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-              child: Row(
-                children: [
-                  Container(
-                    width: 32,
-                    height: 32,
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: () => setState(() => _weightExpanded = !_weightExpanded),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: WW.tealBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.monitor_weight_outlined,
+                    color: WW.teal,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Track Weight',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: WW.text,
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: _showLogWeightSheet,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
                     decoration: BoxDecoration(
-                      color: WW.tealBg,
+                      color: WW.primary,
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: const Icon(
-                      Icons.monitor_weight_outlined,
-                      color: WW.teal,
-                      size: 18,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  const Expanded(
-                    child: Text(
-                      'Track Weight',
+                    child: const Text(
+                      '+ Log',
                       style: TextStyle(
-                        fontSize: 15,
+                        fontSize: 12,
                         fontWeight: FontWeight.w700,
-                        color: WW.text,
+                        color: Colors.white,
                       ),
                     ),
                   ),
-                  GestureDetector(
-                    onTap: _showLogWeightSheet,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: WW.primary,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: const Text(
-                        '+ Log',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Icon(
-                    _weightExpanded
-                        ? Icons.keyboard_arrow_up_rounded
-                        : Icons.keyboard_arrow_down_rounded,
-                    color: WW.textSec,
-                    size: 20,
-                  ),
-                ],
-              ),
+                ),
+                const SizedBox(width: 8),
+                Icon(
+                  _weightExpanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  color: WW.textSec,
+                  size: 20,
+                ),
+              ],
             ),
           ),
-          if (_weightExpanded) ...[
-            const Divider(height: 1, color: WW.elevated),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: _weightLoading
-                  ? const Center(
-                      child: CircularProgressIndicator(color: WW.primary))
-                  : _weightLogs.isEmpty
-                      ? Column(
-                          children: [
-                            const Icon(Icons.monitor_weight_outlined,
-                                size: 36, color: WW.border),
-                            const SizedBox(height: 8),
-                            const Text(
-                              'No weight logged yet',
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color: WW.textSec,
+        ),
+        if (_weightExpanded) ...[
+          const Divider(height: 1, color: WW.elevated),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: _weightLoading
+                ? const Center(
+                    child: CircularProgressIndicator(color: WW.primary),
+                  )
+                : _weightLogs.isEmpty
+                ? Column(
+                    children: [
+                      const Icon(
+                        Icons.monitor_weight_outlined,
+                        size: 36,
+                        color: WW.border,
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'No weight logged yet',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: WW.textSec,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'Tap "+ Log" to record your first weight',
+                        style: TextStyle(fontSize: 12, color: WW.textSec),
+                      ),
+                      if (_goalWeight != null) ...[
+                        const SizedBox(height: 12),
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: WW.tealBg,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.flag_rounded,
+                                color: WW.teal,
+                                size: 14,
                               ),
-                            ),
-                            const SizedBox(height: 4),
-                            const Text(
-                              'Tap "+ Log" to record your first weight',
-                              style: TextStyle(
-                                  fontSize: 12, color: WW.textSec),
-                            ),
-                            if (_goalWeight != null) ...[
-                              const SizedBox(height: 12),
-                              Container(
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: WW.tealBg,
-                                  borderRadius:
-                                      BorderRadius.circular(10),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(Icons.flag_rounded,
-                                        color: WW.teal, size: 14),
-                                    const SizedBox(width: 6),
-                                    Text(
-                                      'Goal: ${_goalWeight!.toStringAsFixed(1)} kg',
-                                      style: const TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                        color: WW.teal,
-                                      ),
-                                    ),
-                                  ],
+                              const SizedBox(width: 6),
+                              Text(
+                                'Goal: ${_goalWeight!.toStringAsFixed(1)} kg',
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: WW.teal,
                                 ),
                               ),
                             ],
-                            const SizedBox(height: 8),
-                          ],
-                        )
-                      : Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            SizedBox(
-                              height: 160,
-                              child: LineChart(
-                                LineChartData(
-                                  minY: minY,
-                                  maxY: maxY,
-                                  gridData:
-                                      const FlGridData(show: false),
-                                  borderData:
-                                      FlBorderData(show: false),
-                                  titlesData: const FlTitlesData(
-                                    leftTitles: AxisTitles(
-                                        sideTitles: SideTitles(
-                                            showTitles: false)),
-                                    rightTitles: AxisTitles(
-                                        sideTitles: SideTitles(
-                                            showTitles: false)),
-                                    topTitles: AxisTitles(
-                                        sideTitles: SideTitles(
-                                            showTitles: false)),
-                                    bottomTitles: AxisTitles(
-                                        sideTitles: SideTitles(
-                                            showTitles: false)),
-                                  ),
-                                  lineBarsData: [
-                                    LineChartBarData(
-                                      spots: spots.length == 1
-                                          ? [spots[0], FlSpot(spots[0].x + 0.001, spots[0].y)]
-                                          : spots,
-                                      isCurved: true,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 8),
+                    ],
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        height: 160,
+                        child: LineChart(
+                          LineChartData(
+                            minY: minY,
+                            maxY: maxY,
+                            gridData: const FlGridData(show: false),
+                            borderData: FlBorderData(show: false),
+                            titlesData: const FlTitlesData(
+                              leftTitles: AxisTitles(
+                                sideTitles: SideTitles(showTitles: false),
+                              ),
+                              rightTitles: AxisTitles(
+                                sideTitles: SideTitles(showTitles: false),
+                              ),
+                              topTitles: AxisTitles(
+                                sideTitles: SideTitles(showTitles: false),
+                              ),
+                              bottomTitles: AxisTitles(
+                                sideTitles: SideTitles(showTitles: false),
+                              ),
+                            ),
+                            lineBarsData: [
+                              LineChartBarData(
+                                spots: spots.length == 1
+                                    ? [
+                                        spots[0],
+                                        FlSpot(spots[0].x + 0.001, spots[0].y),
+                                      ]
+                                    : spots,
+                                isCurved: true,
+                                color: WW.primary,
+                                barWidth: 2.5,
+                                dotData: FlDotData(
+                                  show: true,
+                                  getDotPainter: (spot, percent, bar, index) {
+                                    return FlDotCirclePainter(
+                                      radius: 4,
                                       color: WW.primary,
-                                      barWidth: 2.5,
-                                      dotData: FlDotData(
-                                        show: true,
-                                        getDotPainter: (spot, percent,
-                                            bar, index) {
-                                          return FlDotCirclePainter(
-                                            radius: 4,
-                                            color: WW.primary,
-                                            strokeWidth: 2,
-                                            strokeColor: Colors.white,
-                                          );
-                                        },
+                                      strokeWidth: 2,
+                                      strokeColor: Colors.white,
+                                    );
+                                  },
+                                ),
+                                belowBarData: BarAreaData(
+                                  show: true,
+                                  color: WW.primary.withOpacity(0.08),
+                                ),
+                              ),
+                              if (_goalWeight != null)
+                                LineChartBarData(
+                                  spots: spots.isEmpty
+                                      ? [
+                                          FlSpot(0, _goalWeight!),
+                                          FlSpot(1, _goalWeight!),
+                                        ]
+                                      : spots.length == 1
+                                      ? [
+                                          FlSpot(0, _goalWeight!),
+                                          FlSpot(1, _goalWeight!),
+                                        ]
+                                      : [
+                                          FlSpot(0, _goalWeight!),
+                                          FlSpot(
+                                            (spots.length - 1).toDouble(),
+                                            _goalWeight!,
+                                          ),
+                                        ],
+                                  isCurved: false,
+                                  color: WW.teal,
+                                  barWidth: 1.5,
+                                  dashArray: [6, 4],
+                                  dotData: const FlDotData(show: false),
+                                  belowBarData: BarAreaData(show: false),
+                                ),
+                            ],
+                            lineTouchData: LineTouchData(
+                              touchTooltipData: LineTouchTooltipData(
+                                getTooltipColor: (_) => WW.primaryDark,
+                                getTooltipItems: (touchedSpots) {
+                                  return touchedSpots.map((spot) {
+                                    if (spot.barIndex == 1) {
+                                      return LineTooltipItem(
+                                        'Goal: ${_goalWeight!.toStringAsFixed(1)} kg',
+                                        const TextStyle(
+                                          color: WW.teal,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      );
+                                    }
+                                    final idx = spot.x.toInt();
+                                    final date = idx < _weightLogs.length
+                                        ? _weightLogs[idx]['date'] as String? ??
+                                              ''
+                                        : '';
+                                    return LineTooltipItem(
+                                      '${spot.y.toStringAsFixed(1)} kg\n$date',
+                                      const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
                                       ),
-                                      belowBarData: BarAreaData(
-                                        show: true,
-                                        color: WW.primary
-                                            .withOpacity(0.08),
-                                      ),
-                                    ),
-                                    if (_goalWeight != null)
-                                      LineChartBarData(
-                                        spots: spots.isEmpty
-                                            ? [
-                                                FlSpot(0, _goalWeight!),
-                                                FlSpot(1, _goalWeight!),
-                                              ]
-                                            : spots.length == 1
-                                                ? [
-                                                    FlSpot(0, _goalWeight!),
-                                                    FlSpot(1, _goalWeight!),
-                                                  ]
-                                                : [
-                                                    FlSpot(0, _goalWeight!),
-                                                    FlSpot(
-                                                        (spots.length - 1)
-                                                            .toDouble(),
-                                                        _goalWeight!),
-                                                  ],
-                                        isCurved: false,
-                                        color: WW.teal,
-                                        barWidth: 1.5,
-                                        dashArray: [6, 4],
-                                        dotData: const FlDotData(
-                                            show: false),
-                                        belowBarData:
-                                            BarAreaData(show: false),
-                                      ),
-                                  ],
-                                  lineTouchData: LineTouchData(
-                                    touchTooltipData:
-                                        LineTouchTooltipData(
-                                      getTooltipColor: (_) =>
-                                          WW.primaryDark,
-                                      getTooltipItems: (touchedSpots) {
-                                        return touchedSpots.map((spot) {
-                                          if (spot.barIndex == 1) {
-                                            return LineTooltipItem(
-                                              'Goal: ${_goalWeight!.toStringAsFixed(1)} kg',
-                                              const TextStyle(
-                                                color: WW.teal,
-                                                fontSize: 11,
-                                                fontWeight:
-                                                    FontWeight.w600,
-                                              ),
-                                            );
-                                          }
-                                          final idx = spot.x.toInt();
-                                          final date =
-                                              idx < _weightLogs.length
-                                                  ? _weightLogs[idx]
-                                                          ['date']
-                                                      as String? ??
-                                                      ''
-                                                  : '';
-                                          return LineTooltipItem(
-                                            '${spot.y.toStringAsFixed(1)} kg\n$date',
-                                            const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          );
-                                        }).toList();
-                                      },
-                                    ),
-                                  ),
+                                    );
+                                  }).toList();
+                                },
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          if (currentWeight != null)
+                            Text(
+                              '${currentWeight.toStringAsFixed(1)} kg',
+                              style: const TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w800,
+                                color: WW.text,
+                              ),
+                            ),
+                          const SizedBox(width: 8),
+                          if (change != null)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                // WW.gold has no light-tint token in
+                                // app_theme.dart yet, so we blend it
+                                // down ourselves — same alpha-blend
+                                // approach already used for the
+                                // check-in reason icon chips below.
+                                color: change <= 0
+                                    ? WW.tealBg
+                                    : WW.gold.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                '${change >= 0 ? '+' : ''}${change.toStringAsFixed(1)} kg',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: change <= 0 ? WW.teal : WW.gold,
                                 ),
                               ),
                             ),
-                            const SizedBox(height: 12),
+                          const Spacer(),
+                          if (_goalWeight != null)
                             Row(
                               children: [
-                                if (currentWeight != null)
-                                  Text(
-                                    '${currentWeight.toStringAsFixed(1)} kg',
-                                    style: const TextStyle(
-                                      fontSize: 22,
-                                      fontWeight: FontWeight.w800,
-                                      color: WW.text,
-                                    ),
+                                const Icon(
+                                  Icons.flag_rounded,
+                                  color: WW.teal,
+                                  size: 13,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Goal: ${_goalWeight!.toStringAsFixed(1)} kg',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: WW.teal,
                                   ),
-                                const SizedBox(width: 8),
-                                if (change != null)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 8, vertical: 3),
-                                    decoration: BoxDecoration(
-                                      color: change <= 0
-                                          ? WW.tealBg
-                                          : const Color(0xFFFEF3C7),
-                                      borderRadius:
-                                          BorderRadius.circular(6),
-                                    ),
-                                    child: Text(
-                                      '${change >= 0 ? '+' : ''}${change.toStringAsFixed(1)} kg',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w700,
-                                        color: change <= 0
-                                            ? WW.teal
-                                            : const Color(0xFFF59E0B),
-                                      ),
-                                    ),
-                                  ),
-                                const Spacer(),
-                                if (_goalWeight != null)
-                                  Row(
-                                    children: [
-                                      const Icon(Icons.flag_rounded,
-                                          color: WW.teal, size: 13),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        'Goal: ${_goalWeight!.toStringAsFixed(1)} kg',
-                                        style: const TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w600,
-                                          color: WW.teal,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
+                                ),
                               ],
                             ),
-                            const SizedBox(height: 12),
-                            const Text(
-                              'Recent entries',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                                color: WW.textSec,
-                                letterSpacing: 0.4,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            ..._weightLogs.reversed.take(5).map((log) {
-                              final w = log['weightKg'];
-                              final d = log['date'] as String? ?? '';
-                              final wStr = w is num
-                                  ? '${w.toStringAsFixed(1)} kg'
-                                  : '--';
-                              return Padding(
-                                padding:
-                                    const EdgeInsets.only(bottom: 6),
-                                child: Row(
-                                  children: [
-                                    Text(
-                                      d,
-                                      style: const TextStyle(
-                                        fontSize: 12,
-                                        color: WW.textSec,
-                                      ),
-                                    ),
-                                    const Spacer(),
-                                    Text(
-                                      wStr,
-                                      style: const TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w700,
-                                        color: WW.text,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            }),
-                            const SizedBox(height: 4),
-                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Recent entries',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: WW.textSec,
+                          letterSpacing: 0.4,
                         ),
-            ),
-          ],
+                      ),
+                      const SizedBox(height: 6),
+                      ..._weightLogs.reversed.take(5).map((log) {
+                        final w = log['weightKg'];
+                        final d = log['date'] as String? ?? '';
+                        final wStr = w is num
+                            ? '${w.toStringAsFixed(1)} kg'
+                            : '--';
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: Row(
+                            children: [
+                              Text(
+                                d,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: WW.textSec,
+                                ),
+                              ),
+                              const Spacer(),
+                              Text(
+                                wStr,
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: WW.text,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }),
+                      const SizedBox(height: 4),
+                    ],
+                  ),
+          ),
         ],
-      ),
+      ],
     );
   }
 
@@ -1402,9 +1483,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
   Widget _buildActivitiesList() {
     if (_sessionsLoading) {
-      return const Center(
-        child: CircularProgressIndicator(color: WW.primary),
-      );
+      return const Center(child: CircularProgressIndicator(color: WW.primary));
     }
 
     final sessions = _filteredSessions;
@@ -1703,9 +1782,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
         if (_checkInsLoading ||
             snapshot.connectionState == ConnectionState.waiting) {
           return const Center(
-              child: CircularProgressIndicator(color: WW.primary));
+            child: CircularProgressIndicator(color: WW.primary),
+          );
         }
-        final checkIns = snapshot.data?.docs.map((doc) {
+        final checkIns =
+            snapshot.data?.docs.map((doc) {
               final data = doc.data() as Map<String, dynamic>;
               return {'id': doc.id, ...data};
             }).toList() ??
@@ -1775,11 +1856,24 @@ class _ProgressScreenState extends State<ProgressScreen> {
       final parts = date.split('-');
       if (parts.length == 3) {
         final dt = DateTime(
-            int.parse(parts[0]), int.parse(parts[1]), int.parse(parts[2]));
+          int.parse(parts[0]),
+          int.parse(parts[1]),
+          int.parse(parts[2]),
+        );
         const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
         const months = [
-          'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+          'Jan',
+          'Feb',
+          'Mar',
+          'Apr',
+          'May',
+          'Jun',
+          'Jul',
+          'Aug',
+          'Sep',
+          'Oct',
+          'Nov',
+          'Dec',
         ];
         displayDate =
             '${days[dt.weekday - 1]}, ${dt.day} ${months[dt.month - 1]}';
@@ -1824,25 +1918,21 @@ class _ProgressScreenState extends State<ProgressScreen> {
                     const Spacer(),
                     Text(
                       displayDate,
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: WW.textSec,
-                      ),
+                      style: const TextStyle(fontSize: 11, color: WW.textSec),
                     ),
                   ],
                 ),
                 const SizedBox(height: 3),
                 Text(
                   sub,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: WW.textSec,
-                  ),
+                  style: const TextStyle(fontSize: 12, color: WW.textSec),
                 ),
                 const SizedBox(height: 4),
                 Container(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 2),
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
                   decoration: BoxDecoration(
                     color: WW.elevated,
                     borderRadius: BorderRadius.circular(6),
@@ -1932,73 +2022,79 @@ class _ActivityCard extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-      decoration: WW.cardDecoration,
-      clipBehavior: Clip.hardEdge,
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Left color bar
-            Container(width: 4, color: barColor),
+        decoration: WW.cardDecoration,
+        clipBehavior: Clip.hardEdge,
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Left color bar
+              Container(width: 4, color: barColor),
 
-            // Icon
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 14, 4, 14),
-              child: Icon(iconData, color: iconColor, size: 22),
-            ),
-
-            // Content
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(6, 12, 10, 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
-                        color: WW.text,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      subtitle,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        color: WW.textSec,
-                      ),
-                    ),
-                  ],
-                ),
+              // Icon
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 14, 4, 14),
+                child: Icon(iconData, color: iconColor, size: 22),
               ),
-            ),
 
-            // Badge: XP for gym/cardio, "Manual" label for manual logs
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isManual ? WW.lavenderBg : WW.tealBg,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  xpLabel,
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: isManual ? WW.lavenderText : WW.teal,
+              // Content
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 12, 10, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: WW.text,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        subtitle,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: WW.textSec,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
-            ),
-          ],
+
+              // Badge: XP for gym/cardio, "Manual" label for manual logs
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 14,
+                ),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: isManual ? WW.lavenderBg : WW.tealBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    xpLabel,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: isManual ? WW.lavenderText : WW.teal,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
-    ),
     );
   }
 }

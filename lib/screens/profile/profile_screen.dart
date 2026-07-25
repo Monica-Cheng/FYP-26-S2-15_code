@@ -76,6 +76,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   final _firestore = FirestoreService();
 
   String? _displayName;
+  String? _storedUsername;
   String? _hometown;
   String? _bio;
   bool _isLoading = true;
@@ -124,6 +125,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if (mounted) {
         setState(() {
           _displayName = profile?['displayName'] as String?;
+          _storedUsername = profile?['username'] as String?;
           _hometown = profile?['hometown'] as String?;
           _bio = profile?['bio'] as String?;
           _totalXp = (profile?['totalXp'] as num?)?.toInt() ?? 0;
@@ -172,7 +174,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   String get _nameDisplay => _isLoading ? '' : (_displayName ?? 'Athlete');
   String get _initial => _nameDisplay.isNotEmpty ? _nameDisplay.trim()[0].toUpperCase() : '?';
-  String get _username => '@${_nameDisplay.toLowerCase().replaceAll(' ', '')}';
+  String get _username {
+    final stored = _storedUsername;
+    if (stored != null && stored.isNotEmpty) {
+      return stored.startsWith('@') ? stored : '@$stored';
+    }
+    return '@${_nameDisplay.toLowerCase().replaceAll(' ', '')}';
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -2,6 +2,8 @@
 // Handles ALL Firestore reads and writes for WiseWorkout.
 // NEVER import cloud_firestore directly in a screen or widget — always go through this service.
 
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../core/constants.dart';
@@ -46,6 +48,18 @@ class FirestoreService {
         await _db.collection(Collections.users).doc(uid).get();
     if (!doc.exists) return null;
     return doc.data();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Checks whether a username is already taken by another user document.
+  // ---------------------------------------------------------------------------
+  Future<bool> isUsernameTaken(String username) async {
+    final snapshot = await _db
+        .collection(Collections.users)
+        .where('username', isEqualTo: username)
+        .limit(1)
+        .get();
+    return snapshot.docs.isNotEmpty;
   }
 
   // ---------------------------------------------------------------------------
@@ -474,12 +488,31 @@ class FirestoreService {
     final doc = await _db.collection(Collections.users).doc(uid).get();
     final data = doc.data() ?? {};
     final newTotal = ((data['totalXp'] as num?)?.toInt() ?? 0) + xpEarned;
-    final newWeekly = ((data['weeklyXp'] as num?)?.toInt() ?? 0) + xpEarned;
+
+    // Lazy weekly reset: if the stored weekStartDate is missing or before
+    // this week's Monday, this event starts the new week's weeklyXp fresh
+    // (not added to the old value) rather than continuing to accumulate.
+    final currentWeekStart = _currentWeekStart();
+    final storedWeekStart = data['weekStartDate'];
+    final isNewWeek = storedWeekStart is! Timestamp ||
+        storedWeekStart.toDate().isBefore(currentWeekStart);
+    final existingWeekly = (data['weeklyXp'] as num?)?.toInt() ?? 0;
+    final newWeekly = isNewWeek ? xpEarned : existingWeekly + xpEarned;
+
     await _db.collection(Collections.users).doc(uid).set({
       'totalXp': newTotal,
       'weeklyXp': newWeekly,
+      'weekStartDate': Timestamp.fromDate(currentWeekStart),
+      'lastWeeklyXpUpdate': FieldValue.serverTimestamp(),
       'level': _calculateLevel(newTotal),
     }, SetOptions(merge: true));
+  }
+
+  // Most recent Monday at local midnight (device-local time).
+  static DateTime _currentWeekStart() {
+    final now = DateTime.now();
+    final monday = now.subtract(Duration(days: now.weekday - 1));
+    return DateTime(monday.year, monday.month, monday.day);
   }
 
   static int _calculateLevel(int totalXp) {
@@ -1377,5 +1410,325 @@ class FirestoreService {
         .snapshots()
         .map((snapshot) =>
             snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // FRIENDS / FRIEND REQUESTS / NOTIFICATIONS
+  // Mutual-acceptance friend system: a pending request lives at
+  // users/{toUid}/friendRequests/{fromUid} until accepted or declined.
+  // On accept, both users get a mirrored doc in their own friends
+  // subcollection (users/{uid}/friends/{otherUid}).
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Prefix-searches users by username. Returns uid, displayName,
+  /// username for each match. Does not exclude the current user or
+  /// existing friends — the UI layer filters those out.
+  Future<List<Map<String, dynamic>>> searchUsersByUsername(
+    String query,
+  ) async {
+    final snapshot = await _db
+        .collection(Collections.users)
+        .where('username', isGreaterThanOrEqualTo: query)
+        .where('username', isLessThanOrEqualTo: '$query')
+        .limit(20)
+        .get();
+    return snapshot.docs.map((doc) {
+      final data = doc.data();
+      return {
+        'uid': doc.id,
+        'displayName': data['displayName'],
+        'username': data['username'],
+      };
+    }).toList();
+  }
+
+  /// Sends a friend request from [fromUid] to [toUid]. Writes the
+  /// pending request doc and a notification doc in a single batch —
+  /// the first WriteBatch in this file — so they always succeed or
+  /// fail together.
+  Future<void> sendFriendRequest(
+    String fromUid,
+    String fromDisplayName,
+    String fromUsername,
+    String toUid,
+  ) async {
+    final batch = _db.batch();
+
+    final requestRef = _db
+        .collection(Collections.users)
+        .doc(toUid)
+        .collection(Collections.friendRequests)
+        .doc(fromUid);
+    batch.set(requestRef, {
+      'fromUid': fromUid,
+      'fromDisplayName': fromDisplayName,
+      'fromUsername': fromUsername,
+      'status': 'pending',
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+
+    final notificationRef = _db
+        .collection(Collections.users)
+        .doc(toUid)
+        .collection(Collections.notifications)
+        .doc();
+    batch.set(notificationRef, {
+      'type': 'friend_request',
+      'fromUid': fromUid,
+      'fromDisplayName': fromDisplayName,
+      'read': false,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+
+    await batch.commit();
+  }
+
+  /// Whether [fromUid] already has a pending friend request sent to
+  /// [toUid] (i.e. users/{toUid}/friendRequests/{fromUid} exists).
+  Future<bool> hasSentFriendRequest(String toUid, String fromUid) async {
+    final doc = await _db
+        .collection(Collections.users)
+        .doc(toUid)
+        .collection(Collections.friendRequests)
+        .doc(fromUid)
+        .get();
+    return doc.exists;
+  }
+
+  /// Accepts a pending friend request: removes the request, writes a
+  /// mirrored friends doc on both users, and notifies the requester.
+  Future<void> acceptFriendRequest(
+    String currentUid,
+    String currentDisplayName,
+    String currentUsername,
+    String requesterUid,
+    String requesterDisplayName,
+    String requesterUsername,
+  ) async {
+    final batch = _db.batch();
+
+    final requestRef = _db
+        .collection(Collections.users)
+        .doc(currentUid)
+        .collection(Collections.friendRequests)
+        .doc(requesterUid);
+    batch.delete(requestRef);
+
+    final myFriendRef = _db
+        .collection(Collections.users)
+        .doc(currentUid)
+        .collection(Collections.friends)
+        .doc(requesterUid);
+    batch.set(myFriendRef, {
+      'uid': requesterUid,
+      'displayName': requesterDisplayName,
+      'username': requesterUsername,
+      'addedAt': FieldValue.serverTimestamp(),
+    });
+
+    final theirFriendRef = _db
+        .collection(Collections.users)
+        .doc(requesterUid)
+        .collection(Collections.friends)
+        .doc(currentUid);
+    batch.set(theirFriendRef, {
+      'uid': currentUid,
+      'displayName': currentDisplayName,
+      'username': currentUsername,
+      'addedAt': FieldValue.serverTimestamp(),
+    });
+
+    final notificationRef = _db
+        .collection(Collections.users)
+        .doc(requesterUid)
+        .collection(Collections.notifications)
+        .doc();
+    batch.set(notificationRef, {
+      'type': 'friend_accepted',
+      'fromUid': currentUid,
+      'fromDisplayName': currentDisplayName,
+      'read': false,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+
+    await batch.commit();
+  }
+
+  /// Declines a pending friend request — deletes it silently, no
+  /// notification or other side effect.
+  Future<void> declineFriendRequest(
+    String currentUid,
+    String requesterUid,
+  ) async {
+    await _db
+        .collection(Collections.users)
+        .doc(currentUid)
+        .collection(Collections.friendRequests)
+        .doc(requesterUid)
+        .delete();
+  }
+
+  /// Live stream of pending friend requests for [uid], newest first.
+  Stream<List<Map<String, dynamic>>> getFriendRequestsStream(String uid) {
+    return _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.friendRequests)
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => {'requesterUid': doc.id, ...doc.data()})
+            .toList());
+  }
+
+  /// Live stream of accepted friends for [uid], alphabetical by name.
+  Stream<List<Map<String, dynamic>>> getFriendsStream(String uid) {
+    return _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.friends)
+        .orderBy('displayName', descending: false)
+        .snapshots()
+        .map((snapshot) =>
+            snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+  }
+
+  /// Live stream of the most recent notifications for [uid], newest first.
+  Stream<List<Map<String, dynamic>>> getNotificationsStream(String uid) {
+    return _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.notifications)
+        .orderBy('createdAt', descending: true)
+        .limit(50)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => {'notificationId': doc.id, ...doc.data()})
+            .toList());
+  }
+
+  /// Live, friends-scoped weekly leaderboard combining [uid] and
+  /// [friendUids] (the caller already knows its friends list — e.g. from
+  /// getFriendsStream — so this method takes it directly rather than
+  /// re-fetching it internally, keeping the leaderboard reactive to
+  /// friend-list changes if the caller re-invokes it with a new list).
+  ///
+  /// Firestore's whereIn operator caps at 30 values per query, so the
+  /// combined uid list is chunked into groups of <=30 and every chunk's
+  /// live .snapshots() stream is combined into one continuously-updating
+  /// result. Neither `async` (StreamGroup) nor `rxdart` (combineLatest)
+  /// is a declared pubspec.yaml dependency, so this is a small hand-rolled
+  /// combine-latest: each chunk keeps its most recent snapshot in
+  /// `latest`, and whenever any chunk emits, the merged/filtered/sorted
+  /// list is recomputed and pushed out. In practice this will almost
+  /// always be a single chunk/query under the hood, since most users
+  /// will have far fewer than 30 friends — the chunking exists for
+  /// correctness at scale, not because it's expected to trigger often.
+  ///
+  /// Users who have turned off leaderboardVisible are filtered out,
+  /// except [uid]'s own row, which is always included.
+  Stream<List<Map<String, dynamic>>> getFriendsLeaderboardStream(
+    String uid,
+    List<String> friendUids,
+  ) {
+    final allUids = <String>{uid, ...friendUids}.toList();
+
+    final chunks = <List<String>>[];
+    for (var i = 0; i < allUids.length; i += 30) {
+      final end = i + 30 > allUids.length ? allUids.length : i + 30;
+      chunks.add(allUids.sublist(i, end));
+    }
+
+    final chunkStreams = chunks
+        .map((chunk) => _db
+            .collection(Collections.users)
+            .where(FieldPath.documentId, whereIn: chunk)
+            .snapshots())
+        .toList();
+
+    final controller = StreamController<List<Map<String, dynamic>>>.broadcast();
+    final latest =
+        List<List<QueryDocumentSnapshot<Map<String, dynamic>>>>.filled(
+            chunkStreams.length, const []);
+    final subs = <StreamSubscription>[];
+
+    void emit() {
+      if (controller.isClosed) return;
+      final allDocs = latest.expand((docs) => docs).toList();
+      final entries = allDocs.map((doc) {
+        final data = doc.data();
+        return <String, dynamic>{
+          'uid': doc.id,
+          'displayName': data['displayName'],
+          'username': data['username'],
+          'weeklyXp': (data['weeklyXp'] as num?)?.toInt() ?? 0,
+          'level': data['level'],
+          'leaderboardVisible': data['leaderboardVisible'] as bool? ?? true,
+          'lastWeeklyXpUpdate': data['lastWeeklyXpUpdate'],
+        };
+      }).where((e) {
+        final visible = e['leaderboardVisible'] as bool;
+        return visible || e['uid'] == uid;
+      }).toList();
+
+      entries.sort((a, b) {
+        final xpA = a['weeklyXp'] as int;
+        final xpB = b['weeklyXp'] as int;
+        if (xpA != xpB) return xpB.compareTo(xpA);
+        final tsA = a['lastWeeklyXpUpdate'];
+        final tsB = b['lastWeeklyXpUpdate'];
+        final millisA = tsA is Timestamp ? tsA.millisecondsSinceEpoch : null;
+        final millisB = tsB is Timestamp ? tsB.millisecondsSinceEpoch : null;
+        // Missing lastWeeklyXpUpdate = lowest priority in the tiebreak
+        // (sorts after any real timestamp) — earlier timestamp wins ties.
+        if (millisA == null && millisB == null) return 0;
+        if (millisA == null) return 1;
+        if (millisB == null) return -1;
+        return millisA.compareTo(millisB);
+      });
+
+      controller.add(entries);
+    }
+
+    for (var i = 0; i < chunkStreams.length; i++) {
+      final index = i;
+      subs.add(chunkStreams[index].listen((snap) {
+        latest[index] = snap.docs;
+        emit();
+      }, onError: (Object e, StackTrace st) {
+        if (!controller.isClosed) controller.addError(e, st);
+      }));
+    }
+
+    controller.onCancel = () async {
+      for (final s in subs) {
+        await s.cancel();
+      }
+    };
+
+    return controller.stream;
+  }
+
+  /// Marks a single notification as read.
+  Future<void> markNotificationRead(String uid, String notificationId) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.notifications)
+        .doc(notificationId)
+        .update({'read': true});
+  }
+
+  /// One-time unread notification count for a simple badge check. Swap
+  /// for a stream (mapping snapshot.docs.length) if a live-updating
+  /// badge is needed later.
+  Future<int> getUnreadNotificationCount(String uid) async {
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.notifications)
+        .where('read', isEqualTo: false)
+        .get();
+    return snapshot.docs.length;
   }
 }
