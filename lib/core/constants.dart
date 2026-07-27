@@ -12,6 +12,7 @@ class Collections {
   static const String challenges = 'challenges';
   static const String nutritionLogs = 'nutritionLogs';
   static const String posts = 'posts';
+  static const String follows = 'follows';
 }
 
 class AppConstants {

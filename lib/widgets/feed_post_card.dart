@@ -7,8 +7,10 @@ import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
 import '../core/app_theme.dart';
+import '../core/router.dart';
 import '../services/firestore_service.dart';
 
 class FeedPostCard extends StatelessWidget {
@@ -33,6 +35,36 @@ class FeedPostCard extends StatelessWidget {
     return '${diff.inDays}d ago';
   }
 
+  String _fmtDuration(int? secs) {
+    if (secs == null) return '--';
+    final h = secs ~/ 3600;
+    final m = (secs % 3600) ~/ 60;
+    if (h > 0) return '${h}h ${m}m';
+    if (m == 0) return '<1m';
+    return '${m}m';
+  }
+
+  String _fmtVolume(double? v) {
+    if (v == null) return '0';
+    final n = v.round();
+    if (n >= 1000) {
+      return '${n ~/ 1000},${(n % 1000).toString().padLeft(3, '0')}';
+    }
+    return '$n';
+  }
+
+  void _openProfile(BuildContext context) {
+    final uid = post['uid'] as String?;
+    if (uid == null || uid.isEmpty) return;
+    context.push(
+      Routes.userProfile,
+      extra: {
+        'uid': uid,
+        'authorName': post['authorName'] as String?,
+      },
+    );
+  }
+
   void _openComments(BuildContext context) {
     showModalBottomSheet(
       context: context,
@@ -47,22 +79,110 @@ class FeedPostCard extends StatelessWidget {
     );
   }
 
+  void _showPostOptions(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            decoration: BoxDecoration(
+              color: WW.card,
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: WW.shadow,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.delete_outline_rounded, color: Color(0xFFEF4444)),
+                  title: const Text(
+                    'Delete Post',
+                    style: TextStyle(fontWeight: FontWeight.w600, color: Color(0xFFEF4444)),
+                  ),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    _confirmDeletePost(context);
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmDeletePost(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'Delete this post?',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: WW.text),
+        ),
+        content: const Text(
+          "This can't be undone.",
+          style: TextStyle(fontSize: 14, color: WW.textSec),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel',
+                style: TextStyle(fontWeight: FontWeight.w700, color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete',
+                style: TextStyle(fontWeight: FontWeight.w700, color: Color(0xFFEF4444))),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await firestoreService.deletePost(post['id'] as String);
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not delete post: $e')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final postId = post['id'] as String;
     final authorName = (post['authorName'] as String?) ?? 'Someone';
     final authorInitial = (post['authorInitial'] as String?) ?? '?';
+    final isWorkout = (post['type'] as String?) == 'workout';
     final foodName = (post['foodName'] as String?) ?? 'A meal';
     final calories = (post['calories'] as num?)?.toInt() ?? 0;
     final proteinG = (post['proteinG'] as num?)?.toInt();
     final carbsG = (post['carbsG'] as num?)?.toInt();
     final fatG = (post['fatG'] as num?)?.toInt();
+    final sessionName = post['sessionName'] as String?;
+    final isCardio = post['isCardio'] as bool?;
+    final cardioActivity = post['cardioActivity'] as String?;
+    final elapsedSeconds = (post['elapsedSeconds'] as num?)?.toInt();
+    final totalSets = (post['totalSets'] as num?)?.toInt();
+    final volume = (post['volume'] as num?)?.toDouble();
     final imageBase64 = post['imageBase64'] as String?;
     final caption = post['caption'] as String?;
     final reactionCount = (post['reactionCount'] as num?)?.toInt() ?? 0;
     final commentCount = (post['commentCount'] as num?)?.toInt() ?? 0;
     final createdAt = post['createdAt'];
     final createdDt = createdAt is Timestamp ? createdAt.toDate() : null;
+
+    final titleText = caption?.isNotEmpty == true
+        ? caption!
+        : isWorkout
+            ? ((sessionName?.isNotEmpty ?? false) ? sessionName! : 'Workout session')
+            : foodName;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
@@ -72,43 +192,61 @@ class FeedPostCard extends StatelessWidget {
         children: [
           // Header
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+            padding: const EdgeInsets.fromLTRB(14, 14, 6, 10),
             child: Row(
               children: [
-                CircleAvatar(
-                  radius: 18,
-                  backgroundColor: WW.primary,
-                  child: Text(
-                    authorInitial,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14,
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => _openProfile(context),
+                    child: Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 18,
+                          backgroundColor: WW.primary,
+                          child: Text(
+                            authorInitial,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(authorName, style: WW.titleMed.copyWith(fontSize: 14)),
+                              Text(
+                                createdDt != null ? _timeAgo(createdDt) : '',
+                                style: WW.caption,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(authorName, style: WW.titleMed.copyWith(fontSize: 14)),
-                      Text(
-                        createdDt != null ? _timeAgo(createdDt) : '',
-                        style: WW.caption,
-                      ),
-                    ],
+                if (post['uid'] == currentUid)
+                  IconButton(
+                    onPressed: () => _showPostOptions(context),
+                    icon: const Icon(Icons.more_horiz_rounded, color: WW.textSec, size: 20),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                    visualDensity: VisualDensity.compact,
                   ),
-                ),
               ],
             ),
           ),
 
-          // Caption / food name
+          // Caption / food name / session name
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14),
             child: Text(
-              caption?.isNotEmpty == true ? caption! : foodName,
+              titleText,
               style: WW.bodyMed.copyWith(fontWeight: FontWeight.w600),
             ),
           ),
@@ -132,19 +270,38 @@ class FeedPostCard extends StatelessWidget {
             ),
           const SizedBox(height: 12),
 
-          // Stat row
+          // Stat row — workout posts show duration/calories/sets-or-activity/
+          // volume instead of the meal calorie/macro pills.
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14),
             child: Row(
-              children: [
-                _StatPill(icon: Icons.local_fire_department_rounded, color: WW.gold, value: '$calories', label: 'Calories'),
-                const SizedBox(width: 8),
-                _StatPill(icon: Icons.egg_alt_rounded, color: WW.lavender, value: '${proteinG ?? 0}g', label: 'Protein'),
-                const SizedBox(width: 8),
-                _StatPill(icon: Icons.grain_rounded, color: WW.teal, value: '${carbsG ?? 0}g', label: 'Carbs'),
-                const SizedBox(width: 8),
-                _StatPill(icon: Icons.water_drop_rounded, color: WW.primary, value: '${fatG ?? 0}g', label: 'Fats'),
-              ],
+              children: isWorkout
+                  ? (isCardio == true
+                      ? [
+                          _StatPill(icon: Icons.timer_outlined, color: WW.primary, value: _fmtDuration(elapsedSeconds), label: 'Duration'),
+                          const SizedBox(width: 8),
+                          _StatPill(icon: Icons.local_fire_department_rounded, color: WW.gold, value: '$calories', label: 'Calories'),
+                          const SizedBox(width: 8),
+                          _StatPill(icon: Icons.directions_run_rounded, color: WW.teal, value: (cardioActivity?.isNotEmpty ?? false) ? cardioActivity! : 'Cardio', label: 'Activity'),
+                        ]
+                      : [
+                          _StatPill(icon: Icons.timer_outlined, color: WW.primary, value: _fmtDuration(elapsedSeconds), label: 'Duration'),
+                          const SizedBox(width: 8),
+                          _StatPill(icon: Icons.local_fire_department_rounded, color: WW.gold, value: '$calories', label: 'Calories'),
+                          const SizedBox(width: 8),
+                          _StatPill(icon: Icons.fitness_center_rounded, color: WW.lavender, value: '${totalSets ?? 0}', label: 'Sets'),
+                          const SizedBox(width: 8),
+                          _StatPill(icon: Icons.bar_chart_rounded, color: WW.teal, value: '${_fmtVolume(volume)} kg', label: 'Volume'),
+                        ])
+                  : [
+                      _StatPill(icon: Icons.local_fire_department_rounded, color: WW.gold, value: '$calories', label: 'Calories'),
+                      const SizedBox(width: 8),
+                      _StatPill(icon: Icons.egg_alt_rounded, color: WW.lavender, value: '${proteinG ?? 0}g', label: 'Protein'),
+                      const SizedBox(width: 8),
+                      _StatPill(icon: Icons.grain_rounded, color: WW.teal, value: '${carbsG ?? 0}g', label: 'Carbs'),
+                      const SizedBox(width: 8),
+                      _StatPill(icon: Icons.water_drop_rounded, color: WW.primary, value: '${fatG ?? 0}g', label: 'Fats'),
+                    ],
             ),
           ),
           const SizedBox(height: 10),
@@ -277,6 +434,45 @@ class _CommentsSheetState extends State<_CommentsSheet> {
     }
   }
 
+  Future<void> _confirmDeleteComment(String commentId) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'Delete this comment?',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: WW.text),
+        ),
+        content: const Text(
+          "This can't be undone.",
+          style: TextStyle(fontSize: 14, color: WW.textSec),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel',
+                style: TextStyle(fontWeight: FontWeight.w700, color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete',
+                style: TextStyle(fontWeight: FontWeight.w700, color: Color(0xFFEF4444))),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await widget.firestoreService.deleteComment(widget.postId, commentId);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not delete comment: $e')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return SafeArea(
@@ -361,6 +557,18 @@ class _CommentsSheetState extends State<_CommentsSheet> {
                                   ],
                                 ),
                               ),
+                              if (c['uid'] == widget.currentUid)
+                                GestureDetector(
+                                  onTap: () => _confirmDeleteComment(c['id'] as String),
+                                  child: const Padding(
+                                    padding: EdgeInsets.only(left: 6, top: 2),
+                                    child: Icon(
+                                      Icons.delete_outline_rounded,
+                                      size: 17,
+                                      color: WW.textSec,
+                                    ),
+                                  ),
+                                ),
                             ],
                           ),
                         );

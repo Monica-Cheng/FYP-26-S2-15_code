@@ -279,35 +279,38 @@ class _ClubScreenState extends State<ClubScreen> {
   Widget _buildSubtabs() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-      child: Row(
-        children: List.generate(_subtabLabels.length, (i) {
-          final active = i == _subtab;
-          return Padding(
-            padding: EdgeInsets.only(right: i < _subtabLabels.length - 1 ? 8 : 0),
-            child: GestureDetector(
-              onTap: () => setState(() => _subtab = i),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                height: 32,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                decoration: BoxDecoration(
-                  color: active ? WW.primary : const Color(0xFFF2F2F7),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Center(
-                  child: Text(
-                    _subtabLabels[i],
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: active ? Colors.white : WW.textSec,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: List.generate(_subtabLabels.length, (i) {
+            final active = i == _subtab;
+            return Padding(
+              padding: EdgeInsets.only(right: i < _subtabLabels.length - 1 ? 8 : 0),
+              child: GestureDetector(
+                onTap: () => setState(() => _subtab = i),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  height: 32,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  decoration: BoxDecoration(
+                    color: active ? WW.primary : const Color(0xFFF2F2F7),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Center(
+                    child: Text(
+                      _subtabLabels[i],
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: active ? Colors.white : WW.textSec,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          );
-        }),
+            );
+          }),
+        ),
       ),
     );
   }
