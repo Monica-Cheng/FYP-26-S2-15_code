@@ -1423,75 +1423,99 @@ class _DayCardState extends State<_DayCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: widget.onPreview,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: WW.chipBg,
-                      borderRadius: BorderRadius.circular(9),
-                    ),
-                    child: Center(
-                      child: Text(
-                        badge,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                          color: WW.primary,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+          // The preview tap target (badge/name/exercise-count) and the
+          // chevron's expand/collapse tap target are siblings within this
+          // Row, not nested — a GestureDetector.onTap wrapping another
+          // interactive descendant (the old structure: this whole Row,
+          // chevron included, inside one outer GestureDetector) doesn't
+          // reliably suppress the descendant's own tap recognizer, since
+          // two independent TapGestureRecognizers sharing a pointer aren't
+          // mutually exclusive by default — only genuinely competing
+          // gesture families (tap vs. drag, etc.) are. That let a chevron
+          // tap silently ALSO fire onPreview (a full navigation into
+          // gym_session_screen.dart) on every expand/collapse. Restructuring
+          // so the chevron (and the "Start" button, same conflict class)
+          // sit outside the onPreview GestureDetector's subtree entirely
+          // fixes this structurally, with no stop-propagation/absorb-pointer
+          // trick needed.
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: widget.onPreview,
+                    child: Row(
                       children: [
-                        Text(
-                          sessionName,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            color: WW.text,
+                        Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: WW.chipBg,
+                            borderRadius: BorderRadius.circular(9),
+                          ),
+                          child: Center(
+                            child: Text(
+                              badge,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                color: WW.primary,
+                              ),
+                            ),
                           ),
                         ),
-                        Text(
-                          '${rawExercises.length} exercises'
-                          '${estimatedMinutes > 0 ? ' · ${estimatedMinutes}min' : ''}',
-                          style: const TextStyle(
-                              fontSize: 11, color: WW.textSec),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                sessionName,
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: WW.text,
+                                ),
+                              ),
+                              Text(
+                                '${rawExercises.length} exercises'
+                                '${estimatedMinutes > 0 ? ' · ${estimatedMinutes}min' : ''}',
+                                style: const TextStyle(
+                                    fontSize: 11, color: WW.textSec),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ),
                   ),
-                  if (widget.showStartButton) ...[
-                    FilledButton(
-                      onPressed: widget.onStart,
-                      style: FilledButton.styleFrom(
-                        backgroundColor: WW.primary,
-                        minimumSize: const Size(56, 30),
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 10),
-                        textStyle: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
+                ),
+                if (widget.showStartButton) ...[
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: widget.onStart,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: WW.primary,
+                      minimumSize: const Size(56, 30),
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 10),
+                      textStyle: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
                       ),
-                      child: const Text('Start'),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                     ),
-                    const SizedBox(width: 8),
-                  ],
-                  GestureDetector(
-                    onTap: () => setState(() => _expanded = !_expanded),
+                    child: const Text('Start'),
+                  ),
+                ],
+                GestureDetector(
+                  onTap: () => setState(() => _expanded = !_expanded),
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 8),
                     child: AnimatedRotation(
                       turns: _expanded ? 0.5 : 0,
                       duration: const Duration(milliseconds: 200),
@@ -1499,8 +1523,8 @@ class _DayCardState extends State<_DayCard> {
                           color: WW.textSec, size: 18),
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
           if (_expanded && rawExercises.isNotEmpty) ...[

@@ -5,17 +5,29 @@
 // Five exercises displayed one at a time via progress dots.
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image/image.dart' as img;
+import 'package:image_picker/image_picker.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/constants.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+
+// Same size-capped downscale-to-480px-JPEG-then-base64 pipeline already used
+// by outdoor_cardio_screen.dart's _encodeImageForSession/mid_plan_cardio_
+// complete_screen.dart's _encodePhoto — reused here (not imported, since
+// those are private instance methods on different State classes) for the
+// standalone gym-session finish form's own photo picker.
+const int _kFinishPhotoMaxBase64Bytes = 500 * 1024;
 
 // ── Exercise library (Add Exercise sheet) ──────────────────────────────────────
 
@@ -94,6 +106,38 @@ class _ExerciseData {
   final String cardioActivity;
   final int cardioMinutes;
   List<String> injuryRisk;
+  // True for a cardio block whose in-progress session doc already has
+  // done:true (see _parseExercises) — i.e. its cardio activity was already
+  // completed and synced via updateInProgressSessionBlock before this
+  // screen was (re)loaded. Always false for a freshly-parsed plan template
+  // (which never defines this field) and for exercises added via the "Add
+  // Exercise" sheet. Not meaningful for gym exercises today — completion
+  // there is tracked per-set (see _SetData.done), not on the exercise as a
+  // whole.
+  final bool done;
+  // The exact raw map this exercise was parsed from — used by
+  // _buildCardioPlaceholderCard to show real synced stats (duration,
+  // distance, calories — whatever updateInProgressSessionBlock actually
+  // wrote) for an already-completed cardio block, instead of the plan
+  // template's static placeholder text. Empty for exercises added via the
+  // "Add Exercise" sheet, which don't originate from a parsed block.
+  final Map<String, dynamic> rawBlock;
+  // This exercise's true, permanent position in the Firestore blocks[]
+  // array (the same indexing createInProgressSession() used when it first
+  // wrote blocks[] from the raw exercises array) — set exactly once, at
+  // parse time (see _parseExercises), and never recalculated afterward.
+  // Any write back to that array (see _syncBlockDone,
+  // _buildCardioPlaceholderCard's onTap) must use this, not this
+  // exercise's current position in whatever in-memory list it happens to
+  // sit in right now — _applyInjuryFilter can remove earlier exercises
+  // from _exercises, which shifts every later exercise's array position
+  // without touching Firestore's blocks[] array at all, so array position
+  // and true blocks[] position can silently diverge after that. Defaults
+  // to -1 (never a parsed block — e.g. one added via the "Add Exercise"
+  // sheet, which has no corresponding blocks[] slot to write to);
+  // updateInProgressSessionBlock's own `blockIndex < 0` guard already
+  // fails soft on that sentinel, so no extra handling is needed here.
+  final int originalIndex;
 
   _ExerciseData({
     required this.name,
@@ -104,8 +148,12 @@ class _ExerciseData {
     this.isCardio = false,
     this.cardioActivity = '',
     this.cardioMinutes = 30,
+    this.done = false,
     List<String>? injuryRisk,
-  }) : injuryRisk = injuryRisk ?? [];
+    Map<String, dynamic>? rawBlock,
+    this.originalIndex = -1,
+  })  : injuryRisk = injuryRisk ?? [],
+        rawBlock = rawBlock ?? const {};
 }
 
 // ── Column header style (module-level const) ──────────────────────────────────
@@ -158,16 +206,44 @@ class _GymSessionState extends State<GymSessionScreen> {
   late bool _readOnly;
   String _creatorName = '';
   bool _isCustomPlan = false;
+  // The plan's own sport/category field (plan['sport'] falling back to
+  // plan['type'] — e.g. 'Running'/'Gym', same field explore_screen.dart's
+  // plan cards already use) — populated identically to _isCustomPlan on
+  // all three load paths below. Used only to decide which "+ Add" sheet(s)
+  // to offer mid-session (see _handleAddTap()) — not for any per-exercise
+  // cardio inference (that approach was tried and reverted; this is a
+  // different, plan-level-only use).
+  String? _planSport;
   int _elapsed = 0;
   bool _paused = false;
   bool _showRest = false;
   int _restSecs = 90;
   bool _isSaving = false;
   bool _isLoadingSession = true;
+  // Standalone-finish-form fields (sessionRunId == null only — see
+  // _showStandaloneFinishForm()/_saveAndNavigate()). Never read/shown for a
+  // plan-linked session, which finishes via _saveAndNavigate()'s early
+  // return with no form at all, per earlier design decisions for the
+  // mid-plan flow.
+  final _finishNameController = TextEditingController();
+  final _finishNotesController = TextEditingController();
+  File? _finishPickedPhoto;
   bool _isCompressed = false;
   bool _isRestDay = false;
   String _sessionName = 'Workout';
   String _planId = '';
+  // Set once createInProgressSession() succeeds (see _createInProgressSession,
+  // called from _loadPlanSession) — threaded into the cardio screens via
+  // _buildCardioPlaceholderCard so a cardio block launched mid-session can
+  // report its completion back to the same in-progress session doc. Null
+  // until that write resolves, or forever if it fails (fails soft).
+  String? _sessionRunId;
+  // The Future returned by _createInProgressSession() — awaited by
+  // _buildCardioPlaceholderCard's tap handler before reading _sessionRunId
+  // into the extra map, so a fast tap (before the fire-and-forget write in
+  // _loadPlanSession has resolved) doesn't race and push a cardio screen
+  // with sessionRunId still null.
+  Future<void>? _sessionInitFuture;
 
   bool _injuryFilteringEnabled = false;
   List<Map<String, dynamic>> _userInjuries = [];
@@ -187,23 +263,69 @@ class _GymSessionState extends State<GymSessionScreen> {
   void initState() {
     super.initState();
     _readOnly = widget.readOnly;
-    _loadPlanSession().then((_) async {
-      await _loadPreviousSessionData();
-      await _enrichExercisesWithInjuryRisk();
-      await _loadInjuryData();
-      if (_injuryReviewPending && mounted) {
-        await _showInjuryReviewSheet();
-      }
+    // _loadPlanSession() reads GoRouterState.of(context).extra as one of
+    // its first steps (added when the Firestore-hydrated resume path was
+    // introduced) — an InheritedWidget lookup, which throws a Flutter
+    // framework assertion if made synchronously from initState(), before
+    // this widget's element is fully activated in the dependency graph.
+    // Every other screen in this codebase that reads GoRouterState.of
+    // (context).extra (cardio_setup_screen.dart's _readExtra,
+    // cardio_session_screen.dart's own initState,
+    // outdoor_cardio_screen.dart's _readActivityExtra,
+    // mid_plan_cardio_complete_screen.dart's initState) defers that read
+    // via addPostFrameCallback for exactly this reason — wrapping the
+    // existing call here the same way, unchanged otherwise, matches that
+    // same pattern instead of being the one exception to it.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadPlanSession().then((_) async {
+        await _loadPreviousSessionData();
+        await _enrichExercisesWithInjuryRisk();
+        await _loadInjuryData();
+        if (_injuryReviewPending && mounted) {
+          await _showInjuryReviewSheet();
+        }
+      });
     });
     if (!_readOnly) _startElapsedTimer();
   }
 
   Future<void> _loadPlanSession() async {
+    // TEMPORARY DEBUG — remove once the post-always-fresh-key regression is
+    // confirmed fixed.
+    print('DEBUG_REGRESSION: _loadPlanSession() called at '
+        '${DateTime.now().toIso8601String()}');
     try {
       final uid = AuthService().getCurrentUser()?.uid;
       if (uid == null) {
         if (mounted) setState(() => _isLoadingSession = false);
         return;
+      }
+
+      // Resume path: if this screen was reached with a sessionRunId (see
+      // mid_plan_cardio_complete_screen.dart's "Next" button, which routes
+      // back here via context.go(Routes.gymSession, extra: {...}) instead
+      // of an assumed-depth pop), hydrate directly from the in-progress
+      // session doc instead of re-parsing the static plan template below —
+      // that doc already reflects true current tick state (done
+      // blocks/sets), which a fresh parse would otherwise silently reset.
+      // Falls through to the unchanged fresh-start logic below if
+      // sessionRunId is absent, or the read comes back null/failed — see
+      // _hydrateFromInProgressSession's own doc comment.
+      final routeExtra =
+          GoRouterState.of(context).extra as Map<String, dynamic>?;
+      final extraSessionRunId = routeExtra?['sessionRunId'] as String?;
+      // TEMPORARY DEBUG — remove once the post-always-fresh-key regression
+      // is confirmed fixed.
+      print('DEBUG_REGRESSION: _loadPlanSession branch check '
+          'extraSessionRunId=${extraSessionRunId ?? 'null'}');
+      if (extraSessionRunId != null) {
+        final hydrated = await _hydrateFromInProgressSession(
+            uid, extraSessionRunId, routeExtra);
+        // TEMPORARY DEBUG — remove once the post-always-fresh-key
+        // regression is confirmed fixed.
+        print('DEBUG_REGRESSION: _loadPlanSession HYDRATE branch '
+            'sessionRunId=$extraSessionRunId hydrated=$hydrated');
+        if (hydrated) return;
       }
 
       // Check user doc for a one-time plan+day override
@@ -300,12 +422,23 @@ class _GymSessionState extends State<GymSessionScreen> {
           }
         }
 
-        final exercises = _parseExercises(rawExercises, isListSets: null);
+        final exercises = _parseExercises(rawExercises,
+            isListSets: null, debugSource: 'FRESH_START_TRACKED');
         final designedBy = plan['designedBy'] as Map<String, dynamic>?;
         final isCustom = plan['isCustom'] as bool? ?? false;
         final creatorName = isCustom
             ? 'Custom Routine'
             : (designedBy?['name'] as String? ?? 'WiseWorkout Coach');
+        // Not awaited here — see _createInProgressSession's doc comment —
+        // but the Future is cached so _buildCardioPlaceholderCard's tap
+        // handler can await it (fixes the sessionRunId race condition).
+        // TEMPORARY DEBUG — remove once the post-always-fresh-key
+        // regression is confirmed fixed.
+        print('DEBUG_REGRESSION: _loadPlanSession FRESH_START_TRACKED '
+            'branch — creating new in-progress session planId=$planId '
+            'dayIndex=$effectiveDayIndex');
+        _sessionInitFuture =
+            _createInProgressSession(uid, planId, effectiveDayIndex, rawExercises);
         if (mounted) {
           setState(() {
             _exercises = exercises;
@@ -314,6 +447,7 @@ class _GymSessionState extends State<GymSessionScreen> {
             _isLoadingSession = false;
             _creatorName = creatorName;
             _isCustomPlan = isCustom;
+            _planSport = plan?['sport'] as String? ?? plan?['type'] as String?;
           });
         }
         return;
@@ -344,12 +478,23 @@ class _GymSessionState extends State<GymSessionScreen> {
 
       final rawExercises =
           (session['exercises'] as List<dynamic>?) ?? [];
-      final exercises = _parseExercises(rawExercises, isListSets: null);
+      final exercises = _parseExercises(rawExercises,
+          isListSets: null, debugSource: 'FRESH_START_FREE_SESSION');
       final designedBy = plan['designedBy'] as Map<String, dynamic>?;
       final isCustom = plan['isCustom'] as bool? ?? false;
       final creatorName = isCustom
           ? 'Custom Routine'
           : (designedBy?['name'] as String? ?? 'WiseWorkout Coach');
+      // Not awaited here — see _createInProgressSession's doc comment —
+      // but the Future is cached so _buildCardioPlaceholderCard's tap
+      // handler can await it (fixes the sessionRunId race condition).
+      // TEMPORARY DEBUG — remove once the post-always-fresh-key regression
+      // is confirmed fixed.
+      print('DEBUG_REGRESSION: _loadPlanSession FRESH_START_FREE_SESSION '
+          'branch — creating new in-progress session planId=$planId '
+          'dayIndex=$effectiveDayIndex');
+      _sessionInitFuture =
+          _createInProgressSession(uid, planId, effectiveDayIndex, rawExercises);
 
       if (mounted) {
         setState(() {
@@ -359,10 +504,150 @@ class _GymSessionState extends State<GymSessionScreen> {
           _isLoadingSession = false;
           _creatorName = creatorName;
           _isCustomPlan = isCustom;
+          _planSport = plan?['sport'] as String? ?? plan?['type'] as String?;
         });
       }
-    } catch (_) {
+    } catch (e) {
+      // Logged (matching this file's print()-based convention elsewhere —
+      // see _createInProgressSession/_saveAndNavigate) so a genuine error
+      // here is visible instead of silently presenting as "no active plan
+      // found" — this is exactly the failure mode the initState timing bug
+      // above produced. Behavior is unchanged: still fails soft to the
+      // same empty-_exercises/not-loading state either way.
+      print('_loadPlanSession error: $e');
       if (mounted) setState(() => _isLoadingSession = false);
+    }
+  }
+
+  // Attempts to hydrate _exercises/_sessionRunId/tick-state directly from
+  // an existing inProgressSessions doc, for the resume path (see
+  // _loadPlanSession's own doc comment). Returns true if hydration
+  // succeeded (caller should stop, not fall through to the fresh-start
+  // path) or false if it should fall back to exactly today's fresh-start
+  // behavior — which happens whenever the read comes back null (missing
+  // doc, or any Firestore error: getInProgressSession fails soft
+  // internally and returns null either way) or the doc's `blocks` field
+  // isn't a List.
+  //
+  // planId/dayIndex are read from `extra` if the caller supplied them
+  // (mid_plan_cardio_complete_screen.dart does), else fall back to the
+  // same fields stored directly on the in-progress session doc itself
+  // (createInProgressSession always writes both there) — either source is
+  // fine since they should always agree.
+  //
+  // Does NOT call createInProgressSession() — the doc already exists;
+  // creating a second one for the same resumed session would orphan the
+  // original and its already-recorded progress.
+  Future<bool> _hydrateFromInProgressSession(
+    String uid,
+    String sessionRunId,
+    Map<String, dynamic>? extra,
+  ) async {
+    final data = await FirestoreService().getInProgressSession(uid, sessionRunId);
+    if (data == null) return false;
+
+    // TEMPORARY DEBUG — remove once the second-cardio-block bug is
+    // confirmed fixed.
+    final debugRawBlocks = data['blocks'];
+    print('DEBUG_BLOCKINDEX: _hydrateFromInProgressSession read back '
+        'sessionRunId=$sessionRunId blocks.length='
+        '${debugRawBlocks is List ? debugRawBlocks.length : 'N/A'}');
+    if (debugRawBlocks is List) {
+      for (var i = 0; i < debugRawBlocks.length; i++) {
+        final b = debugRawBlocks[i];
+        if (b is Map) {
+          print('DEBUG_BLOCKINDEX:   [$i] name=${b['name']} '
+              'isCardio=${b['isCardio']} done=${b['done']}');
+        }
+      }
+    }
+
+    final rawBlocks = data['blocks'];
+    if (rawBlocks is! List) return false;
+
+    final planId = extra?['planId'] as String? ??
+        data['planId'] as String? ??
+        '';
+    final dayIndex = extra?['dayIndex'] as int? ??
+        (data['dayIndex'] as num?)?.toInt() ??
+        1;
+
+    final blocks =
+        rawBlocks.map((b) => Map<String, dynamic>.from(b as Map)).toList();
+    final exercises =
+        _parseExercises(blocks, isListSets: null, debugSource: 'HYDRATE');
+
+    // Best-effort plan-metadata lookup for display (session name, creator)
+    // — in its own try/catch so a failure here doesn't throw away the
+    // (more important) exercise/tick-state hydration above; sensible
+    // defaults stand in if it fails.
+    String sessionName = 'Workout';
+    String creatorName = '';
+    bool isCustom = false;
+    String? sport;
+    if (planId.isNotEmpty) {
+      try {
+        final plan = await FirestoreService().getPlan(planId);
+        if (plan != null) {
+          final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
+          if (sessions.isNotEmpty) {
+            final sessionIdx = (dayIndex - 1) % sessions.length;
+            final session = sessions[sessionIdx] as Map<String, dynamic>;
+            sessionName = session['name'] as String? ?? 'Workout';
+          }
+          final designedBy = plan['designedBy'] as Map<String, dynamic>?;
+          isCustom = plan['isCustom'] as bool? ?? false;
+          creatorName = isCustom
+              ? 'Custom Routine'
+              : (designedBy?['name'] as String? ?? 'WiseWorkout Coach');
+          sport = plan['sport'] as String? ?? plan['type'] as String?;
+        }
+      } catch (_) {}
+    }
+
+    if (!mounted) return true;
+    setState(() {
+      _planId = planId;
+      _sessionRunId = sessionRunId;
+      _exercises = exercises;
+      _sessionName = sessionName;
+      _creatorName = creatorName;
+      _isCustomPlan = isCustom;
+      _planSport = sport;
+      _isLoadingSession = false;
+    });
+    return true;
+  }
+
+  // Creates the inProgressSessions doc for this plan day so a cardio block
+  // launched mid-session (see _buildCardioPlaceholderCard) can report its
+  // completion back to it later. Wrapped in its own try/catch — matching
+  // _saveAndNavigate()'s try/catch+print convention, the only other place
+  // in this file that logs and continues past a failed Firestore call —
+  // rather than letting a failure here fall into _loadPlanSession()'s own
+  // outer catch, which would abort loading the whole session and block the
+  // user from working out at all over what should be a non-critical side
+  // write. Not awaited by either call site above (fire-and-forget): the
+  // user's exercise list is already fully ready via that call's own
+  // setState, and _sessionRunId just populates a moment later once this
+  // write resolves — there's nothing on the critical path that needs it
+  // synchronously yet (see this task's own scope: threading only, no
+  // consumption until the next phase).
+  Future<void> _createInProgressSession(
+    String uid,
+    String planId,
+    int dayIndex,
+    List<dynamic> rawExercises,
+  ) async {
+    try {
+      final blocks = rawExercises
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      final sessionRunId = await FirestoreService()
+          .createInProgressSession(uid, planId, dayIndex, blocks);
+      if (mounted) setState(() => _sessionRunId = sessionRunId);
+    } catch (e) {
+      print('createInProgressSession error: $e');
     }
   }
 
@@ -376,6 +661,12 @@ class _GymSessionState extends State<GymSessionScreen> {
             .getLastSessionForExercise(uid, ex.name);
         if (prevSets.isEmpty) continue;
         for (int i = 0; i < ex.sets.length; i++) {
+          // Never overwrite a set that's already done — matters for the
+          // hydrate-from-Firestore resume path (see
+          // _hydrateFromInProgressSession), where a set's real kg/reps was
+          // already restored from the in-progress session doc; a no-op for
+          // the fresh-start path, where nothing is done yet at this point.
+          if (ex.sets[i].done) continue;
           final prevSet = i < prevSets.length
               ? prevSets[i]
               : prevSets.last;
@@ -664,9 +955,25 @@ class _GymSessionState extends State<GymSessionScreen> {
     );
   }
 
+  // Shared by both the fresh-start path (plan template exercises — never
+  // carry a `done` field, so the `?? false` fallback below is a no-op for
+  // that case) and the hydrate-from-Firestore resume path (blocks[] from
+  // an in-progress session, which DO carry real done/kg/reps from prior
+  // ticks). The `activity`/`cardioActivity` fallback chain and the `name`
+  // fallback chain are similarly additive: template blocks always define
+  // `cardioActivity`/`name` directly, so those cases are unaffected; a
+  // cardio block that's already been synced via updateInProgressSessionBlock
+  // (see cardio_session_screen.dart/outdoor_cardio_screen.dart's finish
+  // handlers) only has `activity` (its blockData never sets
+  // `cardioActivity` or `name`), so without this fallback a resumed,
+  // already-done cardio block would show the generic 'Exercise'/'Run'
+  // placeholders instead of its real activity.
   List<_ExerciseData> _parseExercises(
-      List<dynamic> rawExercises, {required bool? isListSets}) {
-    return rawExercises.map((e) {
+      List<dynamic> rawExercises,
+      {required bool? isListSets, String debugSource = ''}) {
+    return rawExercises.asMap().entries.map((exEntry) {
+      final blockPosition = exEntry.key;
+      final e = exEntry.value;
       final exMap = e as Map<String, dynamic>;
       final restTime = (exMap['restTime'] as num?)?.toInt() ?? 90;
       final rawSets = exMap['sets'];
@@ -690,26 +997,40 @@ class _GymSessionState extends State<GymSessionScreen> {
         return _SetData(
           prev: '—',
           type: type,
+          done: wasListSets ? (s['done'] as bool? ?? false) : false,
           kg: wasListSets ? s['kg']?.toString() ?? '' : '',
           reps: wasListSets ? s['reps']?.toString() ?? '' : '',
         );
       }).toList();
       final isCardio = exMap['isCardio'] as bool? ?? false;
-      final cardioActivity = exMap['cardioActivity'] as String? ?? 'Run';
+      final cardioActivity = exMap['cardioActivity'] as String? ??
+          exMap['activity'] as String? ??
+          'Run';
       final cardioMinutes = (exMap['cardioMinutes'] as num?)?.toInt() ?? 30;
-      return _ExerciseData(
-        name: exMap['name'] as String? ?? 'Exercise',
+      final parsedEx = _ExerciseData(
+        name: exMap['name'] as String? ??
+            (isCardio ? cardioActivity : null) ??
+            'Exercise',
         muscle: exMap['muscle'] as String? ?? '',
         restTime: restTime,
         sets: sets,
         isCardio: isCardio,
         cardioActivity: cardioActivity,
         cardioMinutes: cardioMinutes,
+        done: exMap['done'] as bool? ?? false,
+        rawBlock: exMap,
+        originalIndex: blockPosition,
         injuryRisk: (exMap['injuryRisk'] as List<dynamic>?)
                 ?.map((e) => e.toString())
                 .toList() ??
             [],
       );
+      // TEMPORARY DEBUG — remove once the second-cardio-block bug is
+      // confirmed fixed.
+      print('DEBUG_BLOCKINDEX: _parseExercises[$debugSource] '
+          'name=${parsedEx.name} isCardio=${parsedEx.isCardio} '
+          'originalIndex=${parsedEx.originalIndex} done=${parsedEx.done}');
+      return parsedEx;
     }).toList();
   }
 
@@ -720,6 +1041,8 @@ class _GymSessionState extends State<GymSessionScreen> {
     for (final c in _noteControllers.values) {
       c.dispose();
     }
+    _finishNameController.dispose();
+    _finishNotesController.dispose();
     super.dispose();
   }
 
@@ -786,9 +1109,63 @@ class _GymSessionState extends State<GymSessionScreen> {
         }
       });
       if (restTime > 0) _startRestTimer();
+      // Block-level granularity, not per-set: the in-progress session's
+      // blocks[] entries mirror the plan's exercises array 1:1 (one entry
+      // per exercise, each with its own nested sets[]), so "this block is
+      // done" only becomes true once every one of its sets is — writing on
+      // every single set tick would just mean this always fires last with
+      // the same final data, one write short of every set completing.
+      if (_exercises[exIndex].sets.every((s) => s.done)) {
+        _syncBlockDone(exIndex);
+      }
     } else {
       setState(() => set.done = false);
+      // Un-ticking also needs to sync — otherwise the Firestore in-progress
+      // doc keeps reporting this block (and potentially the whole session,
+      // via isInProgressSessionFullyDone) as done even after the user
+      // reverses a completed set. Safe to call unconditionally now:
+      // updateInProgressSessionBlock (firestore_service.dart) derives
+      // `done` from whether every set in blockData['sets'] is actually
+      // done, rather than always forcing true, specifically so this call
+      // correctly writes done:false when appropriate.
+      _syncBlockDone(exIndex);
     }
+  }
+
+  // Fires whenever a set is toggled done or un-done — writes that block's
+  // current name/muscle/restTime/sets back to the in-progress session doc
+  // so isInProgressSessionFullyDone()/finalizeInProgressSession() (see
+  // cardio_session_screen.dart/outdoor_cardio_screen.dart's finish
+  // handlers) always reflect true current local state, whichever direction
+  // the toggle went — see updateInProgressSessionBlock's own doc comment
+  // for how `done` is derived from the sets rather than forced. Guarded on
+  // _sessionRunId being set (null if createInProgressSession hasn't
+  // resolved yet, or failed outright — in either case there's nothing to
+  // write to). Not awaited: fire it off and move on —
+  // updateInProgressSessionBlock() already logs its own failures internally
+  // (added in the prior phase), so there's nothing more to add here without
+  // duplicating that logging.
+  void _syncBlockDone(int exIndex) {
+    final sessionRunId = _sessionRunId;
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (sessionRunId == null || uid == null) return;
+    // exIndex is only used to look up the exercise in the current
+    // in-memory _exercises list — a real array position, as it must be
+    // for local list access. The Firestore-bound write below uses
+    // ex.originalIndex instead, since exIndex itself is not a reliable
+    // Firestore blocks[] position once injury filtering has removed any
+    // earlier exercise (see ex.originalIndex's own field doc).
+    final ex = _exercises[exIndex];
+    final blockData = {
+      'name': ex.name,
+      'muscle': ex.muscle,
+      'restTime': ex.restTime,
+      'sets': ex.sets
+          .map((s) => {'kg': s.kg, 'reps': s.reps, 'done': s.done})
+          .toList(),
+    };
+    FirestoreService().updateInProgressSessionBlock(
+        uid, sessionRunId, ex.originalIndex, blockData);
   }
 
   void _addSet(int exIndex) {
@@ -830,12 +1207,92 @@ class _GymSessionState extends State<GymSessionScreen> {
           .toList(),
     };
 
+    final sessionRunId = _sessionRunId;
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+
+    // Plan-linked session ending on a gym exercise rather than a cardio
+    // block — previously this fell straight through to the legacy
+    // standalone saveGymSession() path below regardless of sessionRunId,
+    // silently orphaning the in-progress session and losing any already-
+    // completed cardio blocks' data instead of finalizing into the real
+    // combined/gym+cardio doc the way outdoor_cardio_screen.dart's and
+    // cardio_session_screen.dart's own finish handlers already do when
+    // THEY happen to be the last block done. sessionRunId == null (a
+    // genuinely standalone gym session, never part of a plan's in-progress
+    // mechanism) skips this block entirely and falls straight to the
+    // unchanged standalone path below.
+    if (sessionRunId != null && uid != null) {
+      try {
+        // Sync every gym exercise's current sets/done state before
+        // finalizing — _syncBlockDone() (fired on every set toggle)
+        // already writes this, but fire-and-forget, so a toggle made
+        // immediately before tapping Finish Session could still be in
+        // flight; awaiting a fresh write here for every exercise
+        // guarantees finalizeInProgressSession below reads true current
+        // state rather than racing a pending write.
+        for (final ex in _exercises) {
+          if (ex.isCardio) continue;
+          final blockData = {
+            'name': ex.name,
+            'muscle': ex.muscle,
+            'restTime': ex.restTime,
+            'sets': ex.sets
+                .map((s) => {'kg': s.kg, 'reps': s.reps, 'done': s.done})
+                .toList(),
+          };
+          await FirestoreService().updateInProgressSessionBlock(
+              uid, sessionRunId, ex.originalIndex, blockData);
+        }
+
+        // finalizeInProgressSession() now finalizes whatever's actually
+        // done regardless of whether every planned block was completed —
+        // tapping Finish Session before finishing every block is the
+        // common case, not a rare edge case, so there's no
+        // isInProgressSessionFullyDone() gate here anymore. That check
+        // remains unchanged and still correct for the cardio finish
+        // handlers' own, different use: deciding whether to return to the
+        // plan for more blocks vs. show the real summary.
+        final finalSessionId = await FirestoreService()
+            .finalizeInProgressSession(uid, sessionRunId);
+        sessionData['sessionId'] = finalSessionId;
+        if (!mounted) return;
+        setState(() => _isSaving = false);
+        context.go(Routes.postSessionSummary, extra: sessionData);
+        return;
+      } catch (e) {
+        print('_saveAndNavigate: plan-linked finalize path failed — $e. '
+            'Falling back to standalone saveGymSession().');
+      }
+    }
+
+    // Standalone path — the plan-linked branch above always returns before
+    // reaching here, so sessionData is untouched by any of this for a
+    // plan-linked session. Optional name/notes/photo collected via the
+    // finish form shown just before _saveAndNavigate() was called (see
+    // _showStandaloneFinishForm()) — all optional, so a value only
+    // overrides sessionData's existing field when actually provided.
+    final trimmedFinishName = _finishNameController.text.trim();
+    final trimmedFinishNotes = _finishNotesController.text.trim();
+    if (trimmedFinishName.isNotEmpty) {
+      sessionData['sessionName'] = trimmedFinishName;
+    }
+    if (trimmedFinishNotes.isNotEmpty) {
+      sessionData['notes'] = trimmedFinishNotes;
+    }
+    final finishPhoto = _finishPickedPhoto;
+    if (finishPhoto != null) {
+      final photoBase64 = await _encodeFinishPhotoForSession(finishPhoto);
+      if (photoBase64 != null) {
+        sessionData['photoBase64'] = photoBase64;
+      }
+    }
+
+    String? sessionId;
     try {
-      final uid = FirebaseAuth.instance.currentUser?.uid;
       print('Saving session for uid: $uid');
       print('Session data: $sessionData');
       if (uid != null) {
-        await FirestoreService().saveGymSession(uid, sessionData);
+        sessionId = await FirestoreService().saveGymSession(uid, sessionData);
         final totalCompletedSets = _exercises
             .expand((e) => e.sets)
             .where((s) => s.done)
@@ -852,6 +1309,8 @@ class _GymSessionState extends State<GymSessionScreen> {
     } catch (e) {
       print('saveGymSession error: $e');
     }
+
+    if (sessionId != null) sessionData['sessionId'] = sessionId;
 
     if (!mounted) return;
     setState(() => _isSaving = false);
@@ -934,7 +1393,17 @@ class _GymSessionState extends State<GymSessionScreen> {
                     child: ElevatedButton(
                       onPressed: () {
                         Navigator.pop(dialogCtx);
-                        _saveAndNavigate();
+                        // Only a genuinely standalone session (never part of
+                        // a plan's in-progress mechanism) gets the name/
+                        // notes/photo finish form — a plan-linked session
+                        // goes straight to _saveAndNavigate(), unchanged,
+                        // per earlier design decisions for the mid-plan
+                        // flow (see _saveAndNavigate()'s own doc comment).
+                        if (_sessionRunId == null) {
+                          _showStandaloneFinishForm();
+                        } else {
+                          _saveAndNavigate();
+                        }
                       },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFFEF4444),
@@ -963,6 +1432,347 @@ class _GymSessionState extends State<GymSessionScreen> {
     );
   }
 
+  // ── Standalone finish form (name/notes/photo) ─────────────────────────────
+  // Only ever shown for a genuinely standalone (non-plan-linked) gym
+  // session — see _showFinishDialog()'s "End Session" button, the only call
+  // site. Same flat WW Title/Notes/photo-picker pattern as
+  // outdoor_cardio_screen.dart's own _buildFinishedSummary() form, reused
+  // here as a bottom sheet since this screen (unlike outdoor cardio) has no
+  // dedicated "finished" body state to swap into — matches this file's own
+  // existing bottom-sheet convention (_showRestTimerPicker,
+  // _showAddExerciseSheet).
+
+  void _showStandaloneFinishForm() {
+    _finishNameController.text = _sessionName;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: _buildFinishFormSheet,
+    );
+  }
+
+  Widget _buildFinishFormSheet(BuildContext sheetContext) {
+    // StatefulBuilder so picking/clearing a photo updates this sheet's own
+    // displayed preview immediately — a showModalBottomSheet's builder is
+    // only invoked once when the sheet is pushed, so a setState on the
+    // parent GymSessionScreen State (which _finishPickedPhoto also lives
+    // on) wouldn't by itself cause this already-mounted sheet content to
+    // rebuild.
+    return StatefulBuilder(
+      builder: (sheetContext, sheetSetState) {
+        return Padding(
+          padding: EdgeInsets.fromLTRB(
+            20,
+            20,
+            20,
+            MediaQuery.of(sheetContext).viewInsets.bottom + 24,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                      color: WW.border,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const Text(
+                  'Session complete',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                    color: WW.text,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'Title',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  decoration: WW.cardDecoration,
+                  padding: const EdgeInsets.all(4),
+                  child: TextField(
+                    controller: _finishNameController,
+                    style: const TextStyle(fontSize: 14, color: WW.text),
+                    decoration: const InputDecoration(
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.all(14),
+                      hintText: 'Session name',
+                      hintStyle: TextStyle(fontSize: 14, color: WW.textSec),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Notes',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  decoration: WW.cardDecoration,
+                  padding: const EdgeInsets.all(4),
+                  child: TextField(
+                    controller: _finishNotesController,
+                    maxLines: 4,
+                    style: const TextStyle(fontSize: 14, color: WW.text),
+                    decoration: const InputDecoration(
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.all(14),
+                      hintText: "How'd it go?",
+                      hintStyle: TextStyle(fontSize: 14, color: WW.textSec),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                GestureDetector(
+                  onTap: () => _pickFinishPhoto(sheetSetState),
+                  child: _finishPickedPhoto == null
+                      ? Container(
+                          height: 90,
+                          decoration: WW.cardDecoration,
+                          child: const Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.add_a_photo_rounded,
+                                  size: 22,
+                                  color: WW.textSec,
+                                ),
+                                SizedBox(height: 6),
+                                Text(
+                                  'Add a photo',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: WW.textSec,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        )
+                      : ClipRRect(
+                          borderRadius: BorderRadius.circular(16),
+                          child: Stack(
+                            children: [
+                              Image.file(
+                                _finishPickedPhoto!,
+                                height: 160,
+                                width: double.infinity,
+                                fit: BoxFit.cover,
+                              ),
+                              Positioned(
+                                top: 8,
+                                right: 8,
+                                child: GestureDetector(
+                                  onTap: () => sheetSetState(
+                                      () => _finishPickedPhoto = null),
+                                  child: Container(
+                                    width: 28,
+                                    height: 28,
+                                    decoration: BoxDecoration(
+                                      color:
+                                          Colors.black.withValues(alpha: 0.5),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(
+                                      Icons.close_rounded,
+                                      size: 16,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                ),
+                const SizedBox(height: 24),
+                GestureDetector(
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    _saveAndNavigate();
+                  },
+                  child: Container(
+                    height: 54,
+                    decoration: BoxDecoration(
+                      color: WW.primary,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: const Center(
+                      child: Text(
+                        'Save & Finish',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _pickFinishPhoto(StateSetter sheetSetState) async {
+    final source = await _chooseFinishPhotoSource();
+    if (source == null) return;
+    final picked = await ImagePicker().pickImage(
+      source: source,
+      maxWidth: 1024,
+      imageQuality: 80,
+    );
+    if (picked == null) return;
+    sheetSetState(() => _finishPickedPhoto = File(picked.path));
+  }
+
+  // Camera-vs-gallery choice sheet — same visual pattern as
+  // outdoor_cardio_screen.dart's own _buildPhotoSourceSheet (icon circle,
+  // title, primary filled button, plain-text secondary button).
+  Future<ImageSource?> _chooseFinishPhotoSource() async {
+    if (!mounted) return null;
+    return showModalBottomSheet<ImageSource>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: _buildFinishPhotoSourceSheet,
+    );
+  }
+
+  Widget _buildFinishPhotoSourceSheet(BuildContext sheetContext) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        20,
+        20,
+        MediaQuery.of(sheetContext).viewInsets.bottom + 24,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: const BoxDecoration(
+              color: WW.primary,
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.add_a_photo_rounded,
+              color: Colors.white,
+              size: 17,
+            ),
+          ),
+          const SizedBox(height: 14),
+          const Text(
+            'Add a photo',
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w800,
+              color: WW.text,
+            ),
+          ),
+          const SizedBox(height: 20),
+          GestureDetector(
+            onTap: () => Navigator.of(sheetContext).pop(ImageSource.camera),
+            child: Container(
+              width: double.infinity,
+              height: 50,
+              decoration: BoxDecoration(
+                color: WW.primary,
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: const Center(
+                child: Text(
+                  'Take Photo',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          GestureDetector(
+            onTap: () => Navigator.of(sheetContext).pop(ImageSource.gallery),
+            child: Container(
+              width: double.infinity,
+              height: 50,
+              alignment: Alignment.center,
+              child: const Text(
+                'Choose from Library',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: WW.textSec,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Same downscale-to-480px-wide-JPEG-then-base64 pipeline as
+  // outdoor_cardio_screen.dart's _encodeImageForSession — see that method's
+  // doc comment for why JPEG (via the `image` package) rather than
+  // dart:ui's PNG-only encoder, and why a safety cap is checked afterward
+  // regardless.
+  Future<String?> _encodeFinishPhotoForSession(File file) async {
+    try {
+      final bytes = await file.readAsBytes();
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) return null;
+      final resized = img.copyResize(decoded, width: 480);
+      final jpegBytes = img.encodeJpg(resized, quality: 75);
+      final encoded = base64Encode(jpegBytes);
+      if (encoded.length > _kFinishPhotoMaxBase64Bytes) {
+        debugPrint(
+          'Gym session: finish photo dropped — encoded size '
+          '${encoded.length} bytes exceeds the safety threshold.',
+        );
+        return null;
+      }
+      return encoded;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _showRestTimerPicker(int exIndex) {
     showModalBottomSheet<void>(
       context: context,
@@ -975,6 +1785,303 @@ class _GymSessionState extends State<GymSessionScreen> {
         onSet: (secs) => setState(() => _exercises[exIndex].restTime = secs),
       ),
     );
+  }
+
+  // ── "+ Add" button routing ─────────────────────────────────────────────────
+  // Replaces the old always-_showAddExerciseSheet() onTap. Branches on plan
+  // type (see _isCustomPlan/_planSport's own field docs):
+  //  - Custom-built routine: either block type is plausible, so show a
+  //    small chooser first.
+  //  - A plan categorized 'Running' (not custom): only cardio makes sense,
+  //    so skip the chooser and go straight to Add Cardio.
+  //  - Everything else (coach-authored gym plans, or anything not
+  //    identified as custom or running): unchanged from today — straight
+  //    to the existing gym exercise search sheet.
+  void _handleAddTap() {
+    if (_isCustomPlan) {
+      _showAddChoiceSheet();
+    } else if ((_planSport ?? '').toLowerCase() == 'running') {
+      _showAddCardioSheet();
+    } else {
+      _showAddExerciseSheet();
+    }
+  }
+
+  // Same icon-circle/title/two-stacked-rows pattern already used by this
+  // file's own _buildFinishPhotoSourceSheet() (camera vs. gallery) for
+  // exactly this "pick one of two options" bottom-sheet shape —
+  // build_routine_screen.dart's own Add Exercise/Add Cardio choice is
+  // presented as two permanently-visible side-by-side footer buttons
+  // instead (no chooser sheet at all, since it always has room for both),
+  // which doesn't fit this screen's single "+ Add" button — this reuses
+  // the closest existing in-file precedent for a 2-option chooser rather
+  // than inventing a new shape.
+  void _showAddChoiceSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: _buildAddChoiceSheet,
+    );
+  }
+
+  Widget _buildAddChoiceSheet(BuildContext sheetContext) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        20,
+        20,
+        MediaQuery.of(sheetContext).viewInsets.bottom + 24,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: const BoxDecoration(
+              color: WW.primary,
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.add_rounded, color: Colors.white, size: 18),
+          ),
+          const SizedBox(height: 14),
+          const Text(
+            'Add to session',
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w800,
+              color: WW.text,
+            ),
+          ),
+          const SizedBox(height: 20),
+          GestureDetector(
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _showAddExerciseSheet();
+            },
+            child: Container(
+              width: double.infinity,
+              height: 50,
+              decoration: BoxDecoration(
+                color: WW.primary,
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: const Center(
+                child: Text(
+                  'Add Exercise',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          GestureDetector(
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _showAddCardioSheet();
+            },
+            child: Container(
+              width: double.infinity,
+              height: 50,
+              alignment: Alignment.center,
+              child: const Text(
+                'Add Cardio',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: WW.textSec,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Ported directly from build_routine_screen.dart's _showCardioSheet() —
+  // same Run/Walk/Cycle picker + minutes CupertinoPicker, same local
+  // StatefulBuilder state. On confirm, appends a new cardio _ExerciseData
+  // to _exercises the same way _showAddExerciseSheet()'s onAdd already
+  // appends a plain gym _ExerciseData — see _addCardioExercise().
+  void _showAddCardioSheet() {
+    String selectedActivity = 'Run';
+    int selectedMinutes = 30;
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModal) => Padding(
+          padding: EdgeInsets.fromLTRB(
+              20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Add Cardio Block',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  color: WW.text,
+                ),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'Indoor/outdoor choice is made when starting the block.',
+                style: TextStyle(fontSize: 12, color: WW.textSec),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: ['Run', 'Walk', 'Cycle'].map((activity) {
+                  final isSelected = selectedActivity == activity;
+                  final icon = activity == 'Run'
+                      ? Icons.directions_run_rounded
+                      : activity == 'Walk'
+                          ? Icons.directions_walk_rounded
+                          : Icons.directions_bike_rounded;
+                  return Expanded(
+                    child: GestureDetector(
+                      onTap: () =>
+                          setModal(() => selectedActivity = activity),
+                      child: Container(
+                        margin: const EdgeInsets.only(right: 8),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        decoration: BoxDecoration(
+                          color: isSelected ? WW.primary : WW.elevated,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Column(
+                          children: [
+                            Icon(icon,
+                                color:
+                                    isSelected ? Colors.white : WW.textSec,
+                                size: 22),
+                            const SizedBox(height: 4),
+                            Text(
+                              activity,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color:
+                                    isSelected ? Colors.white : WW.textSec,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Duration (minutes)',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: WW.text,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                height: 120,
+                decoration: BoxDecoration(
+                  color: WW.elevated,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: CupertinoPicker(
+                  itemExtent: 36,
+                  scrollController: FixedExtentScrollController(
+                    initialItem: selectedMinutes - 1,
+                  ),
+                  onSelectedItemChanged: (index) {
+                    setModal(() => selectedMinutes = index + 1);
+                  },
+                  children: List.generate(
+                    120,
+                    (i) => Center(
+                      child: Text(
+                        '${i + 1} min',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: WW.text,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              GestureDetector(
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _addCardioExercise(selectedActivity, selectedMinutes);
+                },
+                child: Container(
+                  width: double.infinity,
+                  height: 50,
+                  decoration: BoxDecoration(
+                    color: WW.teal,
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                  child: const Center(
+                    child: Text(
+                      'Add Cardio Block',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Mirrors _addCardioBlock()'s shape in build_routine_screen.dart (name
+  // baked as "$activity ${minutes}min", muscle:'Cardio', a single fake
+  // set carrying minutes as its reps — matches this app's other
+  // isCardio:true block convention) but builds a typed _ExerciseData for
+  // this screen's own in-memory model instead of a raw Firestore map.
+  // originalIndex is left at its default (-1) — same as every exercise
+  // _showAddExerciseSheet() already adds today, since neither has a
+  // corresponding Firestore blocks[] slot; see that field's own doc
+  // comment and this task's own report on why that's a pre-existing,
+  // unrelated gap rather than something new here.
+  void _addCardioExercise(String activity, int minutes) {
+    setState(() {
+      _exercises.add(_ExerciseData(
+        name: '$activity ${minutes}min',
+        muscle: 'Cardio',
+        restTime: 0,
+        sets: [_SetData(prev: '—', type: _SetType.normal, reps: '$minutes')],
+        isCardio: true,
+        cardioActivity: activity,
+        cardioMinutes: minutes,
+        injuryRisk: [],
+      ));
+    });
   }
 
   void _showAddExerciseSheet() {
@@ -1207,8 +2314,20 @@ class _GymSessionState extends State<GymSessionScreen> {
                           final ex = _exercises[actualIndex];
                           return Padding(
                             padding: const EdgeInsets.only(bottom: 16),
+                            // actualIndex is only a valid Firestore blocks[]
+                            // position when nothing has ever been removed
+                            // from _exercises ahead of it — not guaranteed
+                            // once injury filtering has run (see
+                            // ex.originalIndex's own field doc). Only
+                            // _buildExerciseCard still needs actualIndex —
+                            // that's local _exercises list access (sets,
+                            // notes, rest timer), which must stay a real
+                            // array position; _buildCardioPlaceholderCard's
+                            // blockIndex, by contrast, is Firestore-bound
+                            // and must use the stable ex.originalIndex.
                             child: ex.isCardio
-                                ? _buildCardioPlaceholderCard(ex)
+                                ? _buildCardioPlaceholderCard(
+                                    ex, ex.originalIndex)
                                 : _buildExerciseCard(actualIndex),
                           );
                         },
@@ -1282,7 +2401,7 @@ class _GymSessionState extends State<GymSessionScreen> {
                   color: WW.chipBg,
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: const Icon(Icons.person_rounded,
+                child: const Icon(Icons.assignment_rounded,
                     color: WW.primary, size: 20),
               ),
               const SizedBox(width: 10),
@@ -1789,7 +2908,7 @@ class _GymSessionState extends State<GymSessionScreen> {
 
   // ── Section 4b — Cardio placeholder card ─────────────────────────────────
 
-  Widget _buildCardioPlaceholderCard(_ExerciseData ex) {
+  Widget _buildCardioPlaceholderCard(_ExerciseData ex, int blockIndex) {
     final icon = ex.cardioActivity == 'Run'
         ? Icons.directions_run_rounded
         : ex.cardioActivity == 'Walk'
@@ -1800,6 +2919,10 @@ class _GymSessionState extends State<GymSessionScreen> {
         : ex.cardioActivity == 'Walk'
             ? const Color(0xFF22C55E)
             : WW.lavender;
+
+    if (ex.done) {
+      return _buildCompletedCardioCard(ex, icon, color);
+    }
 
     return Container(
       decoration: WW.cardDecoration,
@@ -1848,39 +2971,70 @@ class _GymSessionState extends State<GymSessionScreen> {
               ],
             ),
           ),
-          // Start button
+          // Start button — gated behind _readOnly exactly like every other
+          // gym control in this file (rest timer pill, _SetRow's type/kg/
+          // reps/checkmark, add-set, notes), which this one was missing
+          // entirely before. The muted/no-shadow look while _readOnly is
+          // true reuses _buildCompletedCardioCard's own existing
+          // WW.elevated-background, no-shadow treatment for this exact
+          // button shape/role (rather than inventing a new disabled style)
+          // — WW.textSec for the label matches this file's established
+          // muted/secondary text color elsewhere (rest timer text, etc.).
           Padding(
             padding: const EdgeInsets.all(16),
             child: GestureDetector(
-              onTap: () => context.push(
-                Routes.cardioSetup,
-                extra: {
-                  'fromPlan': true,
-                  'planActivity': ex.cardioActivity,
-                  'planMinutes': ex.cardioMinutes,
-                },
-              ),
+              onTap: _readOnly
+                  ? null
+                  : () async {
+                      // Guards against the race where the user taps Start
+                      // faster than _loadPlanSession()'s fire-and-forget
+                      // createInProgressSession() write resolves — without
+                      // this, _sessionRunId below could still be null even
+                      // though a write is genuinely in flight (see
+                      // _sessionInitFuture's field doc).
+                      final initFuture = _sessionInitFuture;
+                      if (initFuture != null) await initFuture;
+                      if (!mounted) return;
+                      // TEMPORARY DEBUG — remove once the second-cardio-block
+                      // bug is confirmed fixed.
+                      print(
+                          'DEBUG_BLOCKINDEX: _buildCardioPlaceholderCard onTap '
+                          'name=${ex.name} originalIndex=${ex.originalIndex} '
+                          'blockIndex=$blockIndex sessionRunId=$_sessionRunId');
+                      context.push(
+                        Routes.cardioSetup,
+                        extra: {
+                          'fromPlan': true,
+                          'planActivity': ex.cardioActivity,
+                          'planMinutes': ex.cardioMinutes,
+                          'sessionRunId': _sessionRunId,
+                          'blockIndex': blockIndex,
+                        },
+                      );
+                    },
               child: Container(
                 width: double.infinity,
                 height: 50,
                 decoration: BoxDecoration(
-                  color: color,
+                  color: _readOnly ? WW.elevated : color,
                   borderRadius: BorderRadius.circular(13),
-                  boxShadow: [
-                    BoxShadow(
-                      color: color.withValues(alpha: 0.35),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
+                  boxShadow: _readOnly
+                      ? null
+                      : [
+                          BoxShadow(
+                            color: color.withValues(alpha: 0.35),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
                 ),
                 child: Center(
                   child: Text(
                     'Start ${ex.cardioActivity}',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.w700,
-                      color: Colors.white,
+                      color: _readOnly ? WW.textSec : Colors.white,
                     ),
                   ),
                 ),
@@ -1905,6 +3059,120 @@ class _GymSessionState extends State<GymSessionScreen> {
     );
   }
 
+  // Completed state for a cardio block whose done flag (hydrated from the
+  // in-progress session doc — see ex.done's own field doc) is already
+  // true. There's no existing "whole card is done" pattern elsewhere in
+  // this file to match: gym exercises only ever show per-set completion
+  // (the teal checkmark in _SetRow), never a whole-card treatment — so
+  // this uses a simple flat WW-style treatment consistent with the rest of
+  // this card (same icon chip, same WW.cardDecoration shell), reusing
+  // WW.teal for the checkmark since that's this file's own existing
+  // "done" color (see _SetRow's done-state fill). No GestureDetector
+  // anywhere in this widget — unlike the active-state card above, tapping
+  // it does nothing at all, since the activity is already finished.
+  Widget _buildCompletedCardioCard(
+    _ExerciseData ex,
+    IconData icon,
+    Color color,
+  ) {
+    final durationSeconds = (ex.rawBlock['durationSeconds'] as num?)?.toInt();
+    final distanceMeters = (ex.rawBlock['distanceMeters'] as num?)?.toDouble();
+    final caloriesBurned = (ex.rawBlock['caloriesBurned'] as num?)?.toInt();
+
+    // Real synced data (whatever updateInProgressSessionBlock actually
+    // wrote for this block) instead of the plan's static "cardioMinutes
+    // min · Indoor/Outdoor" placeholder text.
+    final subtitleParts = <String>[ex.cardioActivity];
+    if (durationSeconds != null && durationSeconds > 0) {
+      subtitleParts.add('${(durationSeconds / 60).round()} min');
+    }
+    if (distanceMeters != null && distanceMeters > 0) {
+      subtitleParts.add('${(distanceMeters / 1000).toStringAsFixed(2)} km');
+    }
+    if (caloriesBurned != null && caloriesBurned > 0) {
+      subtitleParts.add('$caloriesBurned kcal');
+    }
+
+    return Container(
+      decoration: WW.cardDecoration,
+      clipBehavior: Clip.hardEdge,
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16),
+            color: WW.elevated,
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(icon, color: color, size: 24),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        ex.name,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: WW.text,
+                        ),
+                      ),
+                      Text(
+                        subtitleParts.join(' · '),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: WW.textSec,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Container(
+              width: double.infinity,
+              height: 50,
+              decoration: BoxDecoration(
+                color: WW.elevated,
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: const Center(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.check_circle_rounded,
+                        color: WW.teal, size: 18),
+                    SizedBox(width: 8),
+                    Text(
+                      'Completed',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: WW.teal,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Section 5 — Sticky bottom bar ────────────────────────────────────────
 
   Widget _buildStickyBottomBar() {
@@ -1918,7 +3186,7 @@ class _GymSessionState extends State<GymSessionScreen> {
         children: [
           Expanded(
             child: GestureDetector(
-              onTap: _showAddExerciseSheet,
+              onTap: _handleAddTap,
               child: Container(
                 height: 48,
                 decoration: BoxDecoration(
@@ -1931,7 +3199,7 @@ class _GymSessionState extends State<GymSessionScreen> {
                     Icon(Icons.add_rounded, color: WW.primary, size: 18),
                     SizedBox(width: 6),
                     Text(
-                      'Add Exercise',
+                      'Add',
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w700,

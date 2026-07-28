@@ -815,6 +815,22 @@ class _ScheduleDayCard extends StatelessWidget {
     }
   }
 
+  // Same Run/Walk/Cycle icon mapping already used by cardio_setup_screen.dart's
+  // _kActivities and activity_detail_screen.dart's _headerIcon — reused here
+  // (duplicated, not imported, since those are private to their own files)
+  // rather than inventing a new mapping. Run/unrecognized falls back to the
+  // running icon, matching both of those files' own default.
+  IconData _cardioIcon(String activity) {
+    switch (activity) {
+      case 'Walk':
+        return Icons.directions_walk_rounded;
+      case 'Cycle':
+        return Icons.directions_bike_rounded;
+      default:
+        return Icons.directions_run_rounded;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isRest = status == 'rest';
@@ -946,11 +962,16 @@ class _ScheduleDayCard extends StatelessWidget {
                       child: Column(
                         children: List.generate(displayExercises.length, (i) {
                           final ex = displayExercises[i];
-                          final name = ex['name'] as String? ?? 'Exercise';
+                          final isCardio = ex['isCardio'] == true;
+                          final name = isCardio
+                              ? (ex['cardioActivity'] as String? ?? 'Cardio')
+                              : (ex['name'] as String? ?? 'Exercise');
                           final sets = (ex['sets'] is List)
                               ? (ex['sets'] as List).length
                               : (ex['sets'] as num?)?.toInt() ?? 3;
                           final reps = (ex['reps'] as num?)?.toInt() ?? 0;
+                          final cardioMinutes =
+                              (ex['cardioMinutes'] as num?)?.toInt();
                           final tag = ex['tag'] as String? ?? '';
                           final isAccessory = tag == 'Accessory';
 
@@ -964,14 +985,16 @@ class _ScheduleDayCard extends StatelessWidget {
                             ),
                             child: Row(
                               children: [
-                                Container(
-                                  width: 5,
-                                  height: 5,
-                                  decoration: BoxDecoration(
-                                    color: WW.primary,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
+                                isCardio
+                                    ? Icon(_cardioIcon(name), size: 12, color: WW.primary)
+                                    : Container(
+                                        width: 5,
+                                        height: 5,
+                                        decoration: BoxDecoration(
+                                          color: WW.primary,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Text(
@@ -984,7 +1007,11 @@ class _ScheduleDayCard extends StatelessWidget {
                                   ),
                                 ),
                                 Text(
-                                  '$sets×$reps',
+                                  isCardio
+                                      ? (cardioMinutes != null && cardioMinutes > 0
+                                          ? '$cardioMinutes min'
+                                          : '')
+                                      : '$sets×$reps',
                                   style: const TextStyle(fontSize: 11, color: WW.textSec),
                                 ),
                                 if (tag.isNotEmpty) ...[

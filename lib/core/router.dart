@@ -3,6 +3,7 @@
 // NEVER use Navigator.push anywhere — always use context.go() or context.push()
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -23,6 +24,7 @@ import '../screens/profile/edit_profile_screen.dart';
 import '../screens/profile/profile_screen.dart';
 import '../screens/settings/health_profile_screen.dart';
 import '../screens/settings/settings_screen.dart';
+import '../screens/club/friends_screen.dart';
 import '../screens/coach/find_professional_screen.dart';
 import '../screens/plans/exercise_detail_screen.dart';
 import '../screens/plans/plan_detail_screen.dart';
@@ -30,9 +32,11 @@ import '../screens/plans/plan_match_screen.dart';
 import '../screens/plans/build_routine_screen.dart';
 import '../screens/plans/explore_screen.dart';
 import '../screens/plans/plan_schedule_screen.dart';
+import '../screens/plans/mid_plan_cardio_complete_screen.dart';
 import '../screens/progress/activity_detail_screen.dart';
 import '../screens/cardio/cardio_setup_screen.dart';
 import '../screens/cardio/cardio_session_screen.dart';
+import '../screens/cardio/outdoor_cardio_screen.dart';
 import '../screens/nutrition/nutrition_scan_screen.dart';
 import '../screens/splash_screen.dart';
 
@@ -52,6 +56,7 @@ class Routes {
   static const String plans = '/plans';
   static const String coach = '/coach';
   static const String club = '/club';
+  static const String friends = '/friends';
   static const String progress = '/progress';
   static const String gymSession = '/gym-session';
   static const String postSessionSummary = '/post-session-summary';
@@ -72,7 +77,13 @@ class Routes {
   static const String editRoutine = '/edit-routine';
   static const String cardioSetup = '/cardio-setup';
   static const String cardioSession = '/cardio-session';
+  // Temporary/scaffolding route for testing the map-renders-and-permission
+  // flow in isolation. Not linked from anywhere in the app yet — a later
+  // task wires proper navigation from cardio setup's Outdoor mode and this
+  // constant/route can be removed then.
+  static const String outdoorCardioTest = '/outdoor-cardio-test';
   static const String nutritionScan = '/nutrition-scan';
+  static const String midPlanCardioComplete = '/mid-plan-cardio-complete';
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -134,10 +145,50 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: Routes.gymSession,
-        builder: (context, state) {
+        // A plain builder: here lets GoRouter fall back to its default
+        // pageKey, which is derived only from the matched path string
+        // (confirmed against the installed go_router 14.8.1 source —
+        // match.dart's ValueKey<String>(newMatchedPath)) — the same key
+        // for every navigation to this route regardless of `extra`, which
+        // lets Flutter's Page reconciliation reuse whatever GymSessionScreen
+        // instance is already buried in the Navigator's route list instead
+        // of creating a fresh one — so initState()/_loadPlanSession() never
+        // re-runs and the screen keeps showing stale state.
+        //
+        // An earlier fix generated a unique key only when extra carried a
+        // sessionRunId (the resume/mid-plan-cardio-return case), keeping a
+        // single static key for every "fresh start" push (no sessionRunId)
+        // on the theory that a first-time plan start needed to match
+        // exactly one prior stable-key behavior. That was scoped too
+        // narrowly: FOUR different entry points all push this route with no
+        // sessionRunId — home_screen.dart's Start Workout,
+        // plan_schedule_screen.dart's Start Session, plan_detail_screen.dart's
+        // Preview (_onStartDay), and plans_screen.dart's tracked-plan-card
+        // tap — so all four shared that one static key. Visiting more than
+        // one of them in the same app session (without the earlier instance
+        // ever being popped) reused the buried instance across genuinely
+        // different plans/days, silently carrying over stale
+        // planId/dayIndex/_sessionRunId state from whichever entry point
+        // was visited first.
+        //
+        // Fix: always generate a unique key, for every navigation to this
+        // route, with no static fallback — "always fresh, never reused" is
+        // now the single invariant for this route, replacing the previous
+        // sessionRunId-conditional logic entirely rather than patching
+        // around it. The timestamp suffix guarantees uniqueness even for
+        // two pushes carrying the identical sessionRunId/planId (e.g. a
+        // third cardio block's resume, or the same plan started twice).
+        pageBuilder: (context, state) {
           final extra = state.extra as Map<String, dynamic>?;
           final readOnly = extra?['readOnly'] as bool? ?? false;
-          return GymSessionScreen(readOnly: readOnly);
+          final sessionRunId = extra?['sessionRunId'] as String?;
+          final planId = extra?['planId'] as String?;
+          final key = ValueKey(
+              'gym-session-${sessionRunId ?? planId ?? 'none'}-${DateTime.now().microsecondsSinceEpoch}');
+          return MaterialPage(
+            key: key,
+            child: GymSessionScreen(readOnly: readOnly),
+          );
         },
       ),
       GoRoute(
@@ -225,6 +276,23 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => NutritionScanScreen(
           startInDescribeMode: state.extra == 'describe',
         ),
+      ),
+      // Temporary/scaffolding — see the Routes.outdoorCardioTest comment.
+      GoRoute(
+        path: Routes.outdoorCardioTest,
+        builder: (context, state) => const OutdoorCardioScreen(),
+      ),
+      GoRoute(
+        path: Routes.midPlanCardioComplete,
+        builder: (context, state) => const MidPlanCardioCompleteScreen(),
+      ),
+      GoRoute(
+        path: Routes.friends,
+        builder: (context, state) {
+          final extra = state.extra as Map<String, dynamic>?;
+          final expandRequests = extra?['expandRequests'] as bool? ?? false;
+          return FriendsScreen(initialRequestsExpanded: expandRequests);
+        },
       ),
       // Add more routes here as you build each screen
     ],

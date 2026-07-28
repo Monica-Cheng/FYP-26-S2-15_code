@@ -34,6 +34,10 @@
 	<string>WiseWorkout uses your camera to scan food photos for calorie estimation.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>WiseWorkout accesses your photo library so you can select food photos for calorie estimation.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>WiseWorkout uses your location to track the route, distance, and pace of your outdoor runs, walks, and rides.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>WiseWorkout can keep recording your route, distance, and pace even while your phone is locked during an outdoor run, walk, or ride.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -78,6 +82,7 @@
 	<array>
 		<string>fetch</string>
 		<string>remote-notification</string>
+		<string>location</string>
 	</array>
 </dict>
 </plist>

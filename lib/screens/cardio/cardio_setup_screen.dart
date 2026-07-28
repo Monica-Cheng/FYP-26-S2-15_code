@@ -59,6 +59,13 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
   bool _fromPlan = false;
   String? _planActivity;
   int? _planMinutes;
+  // Which in-progress plan session (and which cardio block within it) this
+  // launch belongs to, if any — forwarded from gym_session_screen.dart's
+  // _buildCardioPlaceholderCard via this screen's own incoming extra, and
+  // re-forwarded into whichever cardio screen _handleStart() launches next
+  // (see below). Both null when reached standalone (not from a plan).
+  String? _sessionRunId;
+  int? _blockIndex;
   String _goalType = 'time';
   int _goalMinutes = 30;
   late FixedExtentScrollController _durationController;
@@ -84,11 +91,33 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
       _fromPlan = extra['fromPlan'] as bool? ?? false;
       _planActivity = extra['planActivity'] as String?;
       _planMinutes = extra['planMinutes'] as int?;
+      _sessionRunId = extra['sessionRunId'] as String?;
+      _blockIndex = extra['blockIndex'] as int?;
       if (_planActivity != null) _selectedActivity = _planActivity!;
     });
   }
 
   void _handleStart() {
+    if (_selectedMode == 'outdoor') {
+      // Temporary wiring: Routes.outdoorCardioTest only proves the map
+      // renders and location permissions work (see OutdoorCardioScreen).
+      // Once Phase A/B of outdoor GPS tracking are fully built, this
+      // should push the real outdoor cardio route/flow instead, and the
+      // temporary test route can be removed.
+      context.push(
+        Routes.outdoorCardioTest,
+        extra: {
+          'activity': _selectedActivity,
+          'fromPlan': _fromPlan,
+          'planActivity': _planActivity,
+          'planMinutes': _planMinutes,
+          'sessionRunId': _sessionRunId,
+          'blockIndex': _blockIndex,
+        },
+      );
+      return;
+    }
+
     final effectiveGoalMinutes = _fromPlan
         ? (_planMinutes ?? 30)
         : (_goalType == 'time' ? _goalMinutes : 0);
@@ -99,6 +128,8 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
       'plannedMinutes': effectiveGoalMinutes,
       'fromPlan': _fromPlan,
       'goalMinutes': effectiveGoalMinutes,
+      'sessionRunId': _sessionRunId,
+      'blockIndex': _blockIndex,
     });
   }
 

@@ -11,6 +11,7 @@ import '../core/constants.dart';
 class FirestoreService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   static const _planProgress = 'planProgress';
+  static const _inProgressSessions = 'inProgressSessions';
 
   // ---------------------------------------------------------------------------
   // Creates or merges a user document at users/{uid}.
@@ -126,7 +127,7 @@ class FirestoreService {
   // Calculates totalSets, totalVolume, caloriesBurned, and xpEarned from the
   // exercises list. Uses add() so each call creates a unique document.
   // ---------------------------------------------------------------------------
-  Future<void> saveGymSession(
+  Future<String> saveGymSession(
     String uid,
     Map<String, dynamic> sessionData,
   ) async {
@@ -172,7 +173,16 @@ class FirestoreService {
 
     try {
       print('Writing to Firestore...');
-      await _db
+      // notes/photoBase64 are optional — only ever present on sessionData
+      // when the standalone gym-session finish form (gym_session_screen
+      // .dart's _showStandaloneFinishForm()) actually collected one; a
+      // plan-linked session's sessionData never has these keys at all, and
+      // this method is never even reached for that path (it finalizes via
+      // finalizeInProgressSession() instead) — see _saveAndNavigate()'s own
+      // doc comment.
+      final notes = sessionData['notes'] as String?;
+      final photoBase64 = sessionData['photoBase64'] as String?;
+      final ref = await _db
           .collection(Collections.users)
           .doc(uid)
           .collection(Collections.sessions)
@@ -189,8 +199,12 @@ class FirestoreService {
         'caloriesBurned': caloriesBurned,
         'xpEarned': totalSets * 15,
         'isManuallyLogged': false,
+        if (notes != null && notes.isNotEmpty) 'notes': notes,
+        if (photoBase64 != null && photoBase64.isNotEmpty)
+          'photoBase64': photoBase64,
       });
       print('Firestore write successful!');
+      return ref.id;
     } catch (e) {
       print('Firestore write error: $e');
       rethrow;
@@ -234,6 +248,29 @@ class FirestoreService {
     return snapshot.docs
         .map((doc) => {'id': doc.id, ...doc.data()})
         .toList();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live stream of the [limit] most recent sessions for users/{uid}, newest
+  // first — same query as getRecentSessions() (kept as-is; other callers may
+  // still use the one-shot version) but reactive, so a screen listening to
+  // this updates automatically when a new session is saved elsewhere,
+  // without requiring a manual refetch/app restart.
+  // ---------------------------------------------------------------------------
+  Stream<List<Map<String, dynamic>>> getRecentSessionsStream(
+    String uid, {
+    int limit = 20,
+  }) {
+    return _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .orderBy('date', descending: true)
+        .limit(limit)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => {'id': doc.id, ...doc.data()})
+            .toList());
   }
 
   // ---------------------------------------------------------------------------
@@ -1116,7 +1153,7 @@ class FirestoreService {
   // Saves a completed cardio session to users/{uid}/sessions/{auto-id}.
   // XP is awarded at 0.5× calories, clamped to 20–500.
   // ---------------------------------------------------------------------------
-  Future<void> saveCardioSession({
+  Future<String> saveCardioSession({
     required String uid,
     required String activity,
     required int durationSeconds,
@@ -1124,15 +1161,25 @@ class FirestoreService {
     String mode = 'indoor',
     double? avgHeartRate,
     double? maxHeartRate,
+    double? distanceMeters,
+    List<Map<String, double>>? route,
+    double? elevationGainMeters,
+    String? name,
+    String? notes,
+    String? photoBase64,
+    String? mapSnapshotBase64,
   }) async {
     final xpEarned = (caloriesBurned * 0.5).round().clamp(20, 500);
-    await _db
+    final sessionName = (name != null && name.isNotEmpty)
+        ? name
+        : '$activity · ${mode == 'indoor' ? 'Indoor' : 'Outdoor'}';
+    final ref = await _db
         .collection(Collections.users)
         .doc(uid)
         .collection(Collections.sessions)
         .add({
       'type': 'cardio',
-      'sessionName': '$activity · ${mode == 'indoor' ? 'Indoor' : 'Outdoor'}',
+      'sessionName': sessionName,
       'activity': activity,
       'mode': mode,
       'date': FieldValue.serverTimestamp(),
@@ -1146,7 +1193,490 @@ class FirestoreService {
       'totalVolume': 0.0,
       'avgHeartRate': ?avgHeartRate,
       'maxHeartRate': ?maxHeartRate,
+      'distanceMeters': ?distanceMeters,
+      'route': ?route,
+      'elevationGainMeters': ?elevationGainMeters,
+      'notes': ?notes,
+      'photoBase64': ?photoBase64,
+      'mapSnapshotBase64': ?mapSnapshotBase64,
     });
+    return ref.id;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Updates a session document with a WiseCoach summary generated after the
+  // fact (the AI call in post_session_summary_screen.dart is slower than the
+  // initial save, so it can't be included in saveGymSession/saveCardioSession
+  // itself — this is a follow-up write once the summary is actually ready).
+  // ---------------------------------------------------------------------------
+  Future<void> updateSessionSummary(
+    String uid,
+    String sessionId,
+    String summary,
+  ) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .doc(sessionId)
+        .update({'wiseCoachSummary': summary});
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reads a single finalized session doc (users/{uid}/sessions/{sessionId}).
+  // Fails soft (logs, returns null) on a missing doc or any Firestore error —
+  // matching this file's existing getPlan()/getInProgressSession() fail-soft
+  // convention — rather than throwing, since a lookup failure here shouldn't
+  // crash whatever screen is trying to display a past session.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>?> getSession(String uid, String sessionId) async {
+    try {
+      final doc = await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .collection(Collections.sessions)
+          .doc(sessionId)
+          .get();
+      if (!doc.exists) {
+        print('getSession: no such session $sessionId');
+        return null;
+      }
+      return {'id': doc.id, ...doc.data()!};
+    } catch (e) {
+      print('getSession error: $e');
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // inProgressSessions subcollection helpers — tracks a multi-block plan
+  // day (gym exercises + cardio blocks) across navigation away and back
+  // (e.g. to a cardio block's own screen) so per-block completion isn't
+  // lost the way plain in-memory widget state currently is.
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Creates a new in-progress session at
+  // users/{uid}/inProgressSessions/{auto-id}. `blocks` is the day's raw
+  // exercises array (as already stored in customRoutines/plans); each entry
+  // is written with `done: false` seeded on regardless of block type — for
+  // isCardio entries no other change is made yet (per this task's scope).
+  // Returns the new document's id (the sessionRunId used by the other three
+  // methods below).
+  // ---------------------------------------------------------------------------
+  Future<String> createInProgressSession(
+    String uid,
+    String planId,
+    int dayIndex,
+    List<Map<String, dynamic>> blocks,
+  ) async {
+    final seededBlocks =
+        blocks.map((b) => {...b, 'done': false}).toList();
+    // TEMPORARY DEBUG — remove once the second-cardio-block bug is
+    // confirmed fixed.
+    print('DEBUG_BLOCKINDEX: createInProgressSession planId=$planId '
+        'dayIndex=$dayIndex blocks.length=${seededBlocks.length}');
+    for (var i = 0; i < seededBlocks.length; i++) {
+      final b = seededBlocks[i];
+      print('DEBUG_BLOCKINDEX:   [$i] name=${b['name']} '
+          'isCardio=${b['isCardio']}');
+    }
+    final ref = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_inProgressSessions)
+        .add({
+      'planId': planId,
+      'dayIndex': dayIndex,
+      'blocks': seededBlocks,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+    // TEMPORARY DEBUG — remove once the post-always-fresh-key regression is
+    // confirmed fixed.
+    print('DEBUG_REGRESSION: createInProgressSession created '
+        'sessionRunId=${ref.id} planId=$planId dayIndex=$dayIndex');
+    return ref.id;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Marks a single block within an in-progress session done or not-done.
+  // Firestore has no in-place array-element update, so the whole `blocks`
+  // array is read, blocks[blockIndex] is replaced with blockData, and the
+  // full array is written back. Fails soft (logs, doesn't throw) if the doc
+  // is missing or blockIndex is out of range — a stray/late update after
+  // the session was already finalized or abandoned (see
+  // finalizeInProgressSession/deleteInProgressSession) shouldn't crash the
+  // caller.
+  //
+  // `done` is derived, not always forced true: if blockData['sets'] is a
+  // List (a gym block), done = every one of those sets having done:true —
+  // so un-ticking a set correctly writes done:false back, not just the
+  // same sets with done forced true regardless of their actual state. A
+  // block with no 'sets' list (a cardio block — this app's cardio finish
+  // handlers never include one) has no partial-completion concept in this
+  // app's UI, so it's always written as done:true, matching every existing
+  // cardio call site's actual use (called exactly once, at genuine finish).
+  // ---------------------------------------------------------------------------
+  Future<void> updateInProgressSessionBlock(
+    String uid,
+    String sessionRunId,
+    int blockIndex,
+    Map<String, dynamic> blockData,
+  ) async {
+    final docRef = _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_inProgressSessions)
+        .doc(sessionRunId);
+    // TEMPORARY DEBUG — remove once the second-cardio-block bug is
+    // confirmed fixed.
+    print('DEBUG_BLOCKINDEX: updateInProgressSessionBlock called '
+        'sessionRunId=$sessionRunId blockIndex=$blockIndex');
+    try {
+      final doc = await docRef.get();
+      if (!doc.exists) {
+        print('updateInProgressSessionBlock: no such session $sessionRunId');
+        return;
+      }
+      final rawBlocks = doc.data()?['blocks'];
+      if (rawBlocks is! List ||
+          blockIndex < 0 ||
+          blockIndex >= rawBlocks.length) {
+        print('updateInProgressSessionBlock: blockIndex $blockIndex out of '
+            'range for session $sessionRunId');
+        return;
+      }
+      final blocks = rawBlocks
+          .map((b) => Map<String, dynamic>.from(b as Map))
+          .toList();
+      final rawSets = blockData['sets'];
+      final done = rawSets is List
+          ? rawSets.every((s) => s is Map && s['done'] == true)
+          : true;
+      blocks[blockIndex] = {...blockData, 'done': done};
+      // TEMPORARY DEBUG — remove once the second-cardio-block bug is
+      // confirmed fixed.
+      print('DEBUG_BLOCKINDEX: updateInProgressSessionBlock about to write '
+          'sessionRunId=$sessionRunId blocks.length=${blocks.length}');
+      for (var i = 0; i < blocks.length; i++) {
+        final b = blocks[i];
+        print('DEBUG_BLOCKINDEX:   [$i] name=${b['name']} '
+            'isCardio=${b['isCardio']} done=${b['done']}');
+      }
+      await docRef.update({'blocks': blocks});
+    } catch (e) {
+      print('updateInProgressSessionBlock error: $e');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reads inProgressSessions/{sessionRunId} and returns its data, or null if
+  // missing or on any read error (fail-soft, logs per this file's
+  // convention). Used to resume a plan session's exercise/tick state (see
+  // gym_session_screen.dart's _hydrateFromInProgressSession) and to recover
+  // planId/dayIndex for a screen further down the flow that wasn't itself
+  // threaded them directly (see mid_plan_cardio_complete_screen.dart) —
+  // createInProgressSession() already stores both on this same doc.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>?> getInProgressSession(
+    String uid,
+    String sessionRunId,
+  ) async {
+    try {
+      final doc = await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .collection(_inProgressSessions)
+          .doc(sessionRunId)
+          .get();
+      if (!doc.exists) {
+        print('getInProgressSession: no such session $sessionRunId');
+        return null;
+      }
+      return doc.data();
+    } catch (e) {
+      print('getInProgressSession error: $e');
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Finalizes an in-progress session into a single combined
+  // sessions/{auto-id} document (mirroring saveGymSession/saveCardioSession's
+  // existing schema), then deletes the inProgressSessions/{sessionRunId}
+  // doc. Throws a StateError only if the session doc itself is missing —
+  // a genuine precondition violation. Does NOT require every block to be
+  // done: finalizes whatever's actually done (see doneBlocks below) and
+  // silently drops nothing-yet-done blocks from the output, since tapping
+  // "Finish Session"/"Finish" before completing every planned block is the
+  // common case, not a rare edge case — the previous "must be fully done or
+  // throw" gate meant every completed block's data (and any already-done
+  // cardio blocks) got silently dropped by callers falling back to the
+  // legacy standalone save path instead, whenever the user didn't finish
+  // everything.
+  //
+  // type is derived from composition: 'gym' (only non-cardio blocks),
+  // 'cardio' (only cardio blocks), or 'combined' (both) — sessions/
+  // {sessionId} previously had no shape for a session containing both
+  // block types, which meant a session with more than one cardio block
+  // silently lost every cardio block after the first (only one block's
+  // fields could be promoted to the top level). For type:'combined', every
+  // cardio block is preserved as its own entry in a new `cardioBlocks`
+  // array field instead of being promoted to the top level — none dropped,
+  // regardless of how many there are. Pure 'gym' and pure 'cardio' output
+  // is unchanged from before this: 'cardio' still promotes the FIRST (only)
+  // cardio block's fields to the top level, matching saveCardioSession's
+  // own shape.
+  //
+  // durationSeconds/caloriesBurned are summed across ALL blocks (gym and
+  // cardio alike) from whatever each block's blockData happened to contain
+  // when marked done via updateInProgressSessionBlock — since no screen yet
+  // writes real per-block result data (durationSeconds, caloriesBurned,
+  // distanceMeters, etc.) into blockData (wiring is explicitly out of this
+  // task's scope), these currently total 0 for any block that was only
+  // marked done without that data attached.
+  // ---------------------------------------------------------------------------
+  Future<String> finalizeInProgressSession(
+    String uid,
+    String sessionRunId,
+  ) async {
+    final docRef = _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_inProgressSessions)
+        .doc(sessionRunId);
+    final doc = await docRef.get();
+    if (!doc.exists) {
+      throw StateError(
+          'finalizeInProgressSession: no such session $sessionRunId');
+    }
+    final data = doc.data() ?? {};
+    final rawBlocks = data['blocks'];
+    final blocks = rawBlocks is List
+        ? rawBlocks.map((b) => Map<String, dynamic>.from(b as Map)).toList()
+        : <Map<String, dynamic>>[];
+
+    // TEMPORARY DEBUG — remove once the post-always-fresh-key regression is
+    // confirmed fixed. Same name/isCardio/done format as the earlier
+    // DEBUG_BLOCKINDEX logs. Logs every block (done or not) — see
+    // doneBlocks below for what's actually finalized.
+    print('DEBUG_REGRESSION: finalizeInProgressSession sessionRunId='
+        '$sessionRunId blocks.length=${blocks.length}');
+    for (var i = 0; i < blocks.length; i++) {
+      final b = blocks[i];
+      print('DEBUG_REGRESSION:   [$i] name=${b['name']} '
+          'isCardio=${b['isCardio']} done=${b['done']}');
+    }
+
+    // Only blocks actually marked done are ever finalized — an incomplete
+    // block simply doesn't appear in the output, rather than blocking the
+    // whole finalize.
+    final doneBlocks = blocks.where((b) => b['done'] == true).toList();
+
+    final gymBlocks = doneBlocks.where((b) => b['isCardio'] != true).toList();
+    final cardioBlocks =
+        doneBlocks.where((b) => b['isCardio'] == true).toList();
+    final hasGym = gymBlocks.isNotEmpty;
+    final hasCardio = cardioBlocks.isNotEmpty;
+    // Defaults to 'gym' whenever there's no cardio — including the
+    // zero-done-blocks edge case (hasGym and hasCardio both false) —
+    // matching saveGymSession()'s own existing precedent, which
+    // unconditionally writes type:'gym' even with zero completed sets,
+    // rather than rejecting or inventing new handling for that case.
+    final type = hasGym && hasCardio
+        ? 'combined'
+        : (hasCardio ? 'cardio' : 'gym');
+
+    final List<Map<String, dynamic>> cleanedExercises = [];
+    int totalSets = 0;
+    double totalVolume = 0.0;
+    for (final e in gymBlocks) {
+      final sets = e['sets'];
+      if (sets is! List) continue;
+      final List<Map<String, dynamic>> doneSets = [];
+      for (final s in sets) {
+        if (s is! Map || s['done'] != true) continue;
+        final kg = double.tryParse(s['kg']?.toString() ?? '');
+        final reps = int.tryParse(s['reps']?.toString() ?? '');
+        totalSets++;
+        totalVolume += (kg ?? 0) * (reps ?? 0);
+        doneSets.add({'kg': kg, 'reps': reps, 'done': true});
+      }
+      if (doneSets.isNotEmpty) {
+        cleanedExercises.add({
+          'name': e['name'],
+          'muscle': e['muscle'],
+          'sets': doneSets,
+        });
+      }
+    }
+
+    int durationSeconds = 0;
+    int caloriesBurned = 0;
+    for (final b in doneBlocks) {
+      durationSeconds += (b['durationSeconds'] as num?)?.toInt() ?? 0;
+      caloriesBurned += (b['caloriesBurned'] as num?)?.toInt() ?? 0;
+    }
+    final xpEarned = totalSets * 15 +
+        cardioBlocks.fold<int>(0, (acc, b) {
+          final cals = (b['caloriesBurned'] as num?)?.toInt() ?? 0;
+          return acc + (cals * 0.5).round().clamp(20, 500);
+        });
+
+    final planId = data['planId'] as String? ?? '';
+    final dayIndex = data['dayIndex'];
+
+    // Real routine name (e.g. "Jason babo") instead of the generic
+    // placeholder — same getPlan() lookup gym_session_screen.dart's own
+    // _hydrateFromInProgressSession() already uses for display. Fails soft:
+    // any error, a missing doc, or a missing/empty name field all fall back
+    // to today's exact 'Plan Day $dayIndex' string rather than throwing —
+    // a cosmetic session-name lookup shouldn't be able to block finalizing
+    // an otherwise-complete session.
+    var sessionName = 'Plan Day $dayIndex';
+    if (planId.isNotEmpty) {
+      try {
+        final plan = await getPlan(planId);
+        final planName = plan?['name'] as String?;
+        if (planName != null && planName.isNotEmpty) {
+          sessionName = '$planName Day $dayIndex';
+        }
+      } catch (_) {}
+    }
+
+    final sessionDoc = <String, dynamic>{
+      'type': type,
+      'sessionName': sessionName,
+      'planId': planId,
+      'date': FieldValue.serverTimestamp(),
+      'createdAt': FieldValue.serverTimestamp(),
+      'durationSeconds': durationSeconds,
+      'caloriesBurned': caloriesBurned,
+      'xpEarned': xpEarned,
+      'isManuallyLogged': false,
+      'exercises': cleanedExercises,
+      'totalSets': totalSets,
+      'totalVolume': totalVolume,
+    };
+
+    if (type == 'combined') {
+      // One entry per cardio block, in order — every cardio block is
+      // preserved (unlike the pure-'cardio' branch below, which only has
+      // room for one cardio block's fields at the top level). Only fields
+      // actually present on that block's blockData are copied over —
+      // nothing is invented for a field that isn't there.
+      const cardioFieldKeys = [
+        'activity',
+        'mode',
+        'distanceMeters',
+        'durationSeconds',
+        'caloriesBurned',
+        'avgHeartRate',
+        'maxHeartRate',
+        'route',
+        'elevationGainMeters',
+        'photoBase64',
+        'mapSnapshotBase64',
+        'notes',
+        'name',
+      ];
+      sessionDoc['cardioBlocks'] = cardioBlocks.map((b) {
+        final entry = <String, dynamic>{'done': true};
+        for (final key in cardioFieldKeys) {
+          if (b.containsKey(key) && b[key] != null) {
+            entry[key] = b[key];
+          }
+        }
+        return entry;
+      }).toList();
+    } else {
+      // Pure 'gym' or pure 'cardio' — unchanged from before: promote the
+      // FIRST cardio block's fields (if any) to the top level. Only ever
+      // relevant for type:'cardio' here, since type:'gym' implies
+      // cardioBlocks is empty.
+      final firstCardio = cardioBlocks.isNotEmpty ? cardioBlocks.first : null;
+      final cardioActivity = firstCardio?['cardioActivity'] as String? ??
+          firstCardio?['activity'] as String?;
+      final cardioMode = firstCardio?['mode'] as String?;
+      final distanceMeters =
+          (firstCardio?['distanceMeters'] as num?)?.toDouble();
+      final avgHeartRate = (firstCardio?['avgHeartRate'] as num?)?.toDouble();
+      final maxHeartRate = (firstCardio?['maxHeartRate'] as num?)?.toDouble();
+      final elevationGainMeters =
+          (firstCardio?['elevationGainMeters'] as num?)?.toDouble();
+      final route = firstCardio?['route'];
+
+      if (cardioActivity != null) sessionDoc['activity'] = cardioActivity;
+      if (cardioMode != null) sessionDoc['mode'] = cardioMode;
+      if (distanceMeters != null) {
+        sessionDoc['distanceMeters'] = distanceMeters;
+      }
+      if (avgHeartRate != null) sessionDoc['avgHeartRate'] = avgHeartRate;
+      if (maxHeartRate != null) sessionDoc['maxHeartRate'] = maxHeartRate;
+      if (elevationGainMeters != null) {
+        sessionDoc['elevationGainMeters'] = elevationGainMeters;
+      }
+      if (route != null) sessionDoc['route'] = route;
+    }
+
+    final ref = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .add(sessionDoc);
+
+    await docRef.delete();
+    return ref.id;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Deletes an abandoned/cancelled in-progress session. Simple delete, no
+  // completion checks — unlike finalizeInProgressSession.
+  // ---------------------------------------------------------------------------
+  Future<void> deleteInProgressSession(
+    String uid,
+    String sessionRunId,
+  ) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_inProgressSessions)
+        .doc(sessionRunId)
+        .delete();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reads inProgressSessions/{sessionRunId} and returns whether every block
+  // in blocks[] has done == true. Fails soft (logs, returns false) on any
+  // read error or missing doc — matching updateInProgressSessionBlock's own
+  // fail-soft convention. A caller routing on this (e.g. a cardio finish
+  // handler deciding whether to show the mid-plan-cardio-complete screen or
+  // finalize) is safe either way on a transient failure: false just routes
+  // to "more blocks remain", nothing here writes, so no progress is lost
+  // and the user can still finish normally once connectivity recovers.
+  // ---------------------------------------------------------------------------
+  Future<bool> isInProgressSessionFullyDone(
+    String uid,
+    String sessionRunId,
+  ) async {
+    try {
+      final doc = await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .collection(_inProgressSessions)
+          .doc(sessionRunId)
+          .get();
+      if (!doc.exists) {
+        print('isInProgressSessionFullyDone: no such session $sessionRunId');
+        return false;
+      }
+      final rawBlocks = doc.data()?['blocks'];
+      if (rawBlocks is! List) return false;
+      return rawBlocks.every((b) => b is Map && b['done'] == true);
+    } catch (e) {
+      print('isInProgressSessionFullyDone error: $e');
+      return false;
+    }
   }
 
   // ---------------------------------------------------------------------------

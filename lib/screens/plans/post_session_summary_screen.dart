@@ -1,51 +1,27 @@
 // lib/screens/plans/post_session_summary_screen.dart
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
+import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
-import '../../services/health_service.dart';
 import '../../widgets/share_card_widget.dart';
 
-// ── Module-level helpers ───────────────────────────────────────────────────────
-
-String _fmtDuration(int secs) {
-  final h = secs ~/ 3600;
-  final m = (secs % 3600) ~/ 60;
-  if (h > 0) return '${h}h ${m}m';
-  if (m == 0) return '< 1m';
-  return '${m}m';
-}
-
-String _fmtVolume(double vol) {
-  final rounded = vol.round();
-  if (rounded >= 1000) {
-    final thousands = rounded ~/ 1000;
-    final remainder = rounded % 1000;
-    return '$thousands,${remainder.toString().padLeft(3, '0')}';
-  }
-  return '$rounded';
-}
-
-String _fmtDate(DateTime d) {
-  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
-  ];
-  return '${days[d.weekday - 1]} ${d.day} ${months[d.month - 1]} ${d.year}';
-}
+// Same OpenFreeMap style URL used in activity_detail_screen.dart/
+// outdoor_cardio_screen.dart — duplicated here (not imported, since that's
+// library-private in both files) for this screen's own cardio map sections.
+const String _kMapStyleUrl = 'https://tiles.openfreemap.org/styles/liberty';
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
@@ -60,19 +36,50 @@ class PostSessionSummaryScreen extends StatefulWidget {
 class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     with SingleTickerProviderStateMixin {
   bool _isSharing = false;
-  bool _exercisesExpanded = false;
+  bool _exercisesExpanded = true;
+  bool _wiseCoachExpanded = false;
   late AnimationController _entranceCtrl;
   late Animation<double> _checkScale;
+
+  // Fetched real session data — this screen now only requires
+  // extra['sessionId'] (see _loadSession()) and renders exclusively from
+  // this, never from any other extra field. Null until the fetch resolves;
+  // stays null (see _hasSession) if getSession() fails or the id/uid isn't
+  // available, in which case build() shows _buildErrorState() instead of
+  // crashing.
+  bool _loading = true;
+  Map<String, dynamic>? _sessionData;
+  bool get _hasSession => _sessionData != null;
+  Map<String, dynamic> get _session => _sessionData ?? {};
+
   String _wiseCoachSummary = '';
   bool _summaryLoading = true;
-  String? _planId;
-  bool _isCardio = false;
-  String _cardioActivity = '';
-  int _cardioCalories = 0;
-  int _goalMinutes = 0;
-  double? _avgHeartRate;
-  double? _maxHeartRate;
-  bool _heartRateLoaded = false;
+
+  // ── Cardio blocks / single-active-map — ported verbatim from
+  // activity_detail_screen.dart (see that file's own doc comments for the
+  // full reasoning). Genuinely shared logic with that screen — see this
+  // task's final report re: shared-widget feasibility.
+  MapLibreMapController? _cardioMapController;
+  final Map<int, GlobalKey> _cardioBlockKeys = {};
+  final Map<int, bool> _cardioBlockHasMap = {};
+  int? _activeCardioMapIndex;
+  final Map<int, MapLibreMapController> _cardioBlockMapControllers = {};
+  // Marks the actual scrollable viewport (the NotificationListener/
+  // SingleChildScrollView below _buildActionBar() in the Column) — see
+  // _updateActiveCardioMap()'s doc comment for why this screen needs its
+  // own real viewport bounds rather than the full device screen height.
+  final GlobalKey _scrollViewportKey = GlobalKey();
+
+  bool get _isGym => _session['type'] == 'gym';
+  bool get _isManual => _session['isManuallyLogged'] == true;
+  bool get _isCombined => _session['type'] == 'combined';
+  bool get _isCardio => !_isGym && !_isManual && !_isCombined;
+
+  // Recomputed once the fetch resolves (see _loadSession()) — can't be a
+  // `late final` initializer here the way activity_detail_screen.dart's is,
+  // since _session is only available asynchronously on this screen.
+  List<LatLng> _routePoints = [];
+  bool get _hasRoute => _routePoints.isNotEmpty;
 
   @override
   void initState() {
@@ -85,20 +92,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       parent: _entranceCtrl,
       curve: const Interval(0.0, 0.7, curve: Curves.elasticOut),
     );
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
-      _planId = extra?['planId'] as String?;
-      setState(() {
-        _isCardio = extra?['isCardio'] as bool? ?? false;
-        _cardioActivity = extra?['cardioActivity'] as String? ?? '';
-        _cardioCalories = (extra?['cardioCalories'] as num?)?.toInt() ?? 0;
-        _goalMinutes = (extra?['goalMinutes'] as num?)?.toInt() ?? 0;
-      });
-      if (_isCardio) {
-        _loadHeartRateData();
-      }
-      _generateWiseCoachSummary();
-    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadSession());
   }
 
   @override
@@ -107,168 +101,147 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     super.dispose();
   }
 
-  // ── Heart rate loader ─────────────────────────────────────────────────────
+  // ── Data loading ──────────────────────────────────────────────────────────
+  // Only extra['sessionId'] is read — every other field previously passed
+  // through extra by the finish handlers (isCardio, exercises, etc.) is no
+  // longer used at all; this screen renders exclusively from the fetched
+  // doc. Fails soft to _buildErrorState() (see build()) rather than
+  // crashing if sessionId/uid are missing or the fetch itself fails.
+  Future<void> _loadSession() async {
+    final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
+    final sessionId = extra?['sessionId'] as String?;
+    final uid = AuthService().getCurrentUser()?.uid;
 
-  Future<void> _loadHeartRateData() async {
-    try {
-      final uid = AuthService().getCurrentUser()?.uid;
-      if (uid == null) {
-        setState(() => _heartRateLoaded = true);
-        return;
-      }
-      final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
-      final avg = extra?['avgHeartRate'] as double?;
-      final max = extra?['maxHeartRate'] as double?;
-      if (avg != null && max != null) {
-        setState(() {
-          _avgHeartRate = avg;
-          _maxHeartRate = max;
-          _heartRateLoaded = true;
-        });
-        return;
-      }
-      final granted = await HealthService().requestPermissions();
-      if (granted) {
-        final now = DateTime.now();
-        final points = await HealthService().getHeartRateInRange(
-          now.subtract(const Duration(hours: 2)),
-          now,
-        );
-        if (points.isNotEmpty) {
-          final bpms = points.map((p) => p.bpm).toList();
-          setState(() {
-            _avgHeartRate = bpms.reduce((a, b) => a + b) / bpms.length;
-            _maxHeartRate = bpms.reduce((a, b) => a > b ? a : b);
-            _heartRateLoaded = true;
-          });
-          return;
-        }
-      }
-    } catch (_) {}
-    setState(() => _heartRateLoaded = true);
+    if (sessionId == null || uid == null) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+
+    final data = await FirestoreService().getSession(uid, sessionId);
+    if (!mounted) return;
+    setState(() {
+      _sessionData = data;
+      _loading = false;
+      _routePoints =
+          _parseRoutePoints((data?['route'] as List<dynamic>?) ?? []);
+    });
+    if (data != null) {
+      _generateWiseCoachSummary();
+    }
   }
 
-  // ── Data helpers ──────────────────────────────────────────────────────────
-
-  static List<Map<String, dynamic>> _parseExercises(dynamic raw) {
-    if (raw is! List) return _defaultExercises();
-    final list = raw.where((e) => e is Map).cast<Map>()
-        .map((e) => Map<String, dynamic>.from(e))
-        .toList();
-    return list.isEmpty ? _defaultExercises() : list;
-  }
-
-  static List<Map<String, dynamic>> _defaultExercises() => [
-        {
-          'name': 'Bench Press',
-          'muscle': 'Chest',
-          'sets': [
-            {'kg': '82.5', 'reps': '8', 'done': true},
-            {'kg': '82.5', 'reps': '8', 'done': true},
-            {'kg': '80', 'reps': '8', 'done': true},
-            {'kg': '77.5', 'reps': '8', 'done': true},
-          ]
-        },
-        {
-          'name': 'Overhead Press',
-          'muscle': 'Shoulders',
-          'sets': [
-            {'kg': '52.5', 'reps': '10', 'done': true},
-            {'kg': '52.5', 'reps': '10', 'done': true},
-            {'kg': '50', 'reps': '10', 'done': true},
-          ]
-        },
-        {
-          'name': 'Tricep Pushdown',
-          'muscle': 'Triceps',
-          'sets': [
-            {'kg': '30', 'reps': '12', 'done': true},
-            {'kg': '30', 'reps': '12', 'done': true},
-            {'kg': '27.5', 'reps': '12', 'done': true},
-          ]
-        },
-        {
-          'name': 'Lateral Raise',
-          'muscle': 'Shoulders',
-          'sets': [
-            {'kg': '12', 'reps': '15', 'done': true},
-            {'kg': '12', 'reps': '15', 'done': true},
-            {'kg': '12', 'reps': '15', 'done': true},
-          ]
-        },
-        {
-          'name': 'Cable Fly',
-          'muscle': 'Chest',
-          'sets': [
-            {'kg': '20', 'reps': '12', 'done': true},
-            {'kg': '20', 'reps': '12', 'done': true},
-            {'kg': '17.5', 'reps': '12', 'done': true},
-          ]
-        },
-      ];
-
-  static List<String> _getMusclesWorked(
-      List<Map<String, dynamic>> exercises) {
-    final counts = <String, int>{};
-    for (final e in exercises) {
-      final muscle = e['muscle']?.toString() ?? '';
-      if (muscle.isNotEmpty) {
-        counts[muscle] = (counts[muscle] ?? 0) + 1;
+  // Parameterized (not tied to the top-level session['route'] field) so
+  // _buildCardioBlockCard() can reuse this same conversion for a given
+  // cardioBlocks[] entry's own 'route' field — ported from
+  // activity_detail_screen.dart.
+  List<LatLng> _parseRoutePoints(List<dynamic> route) {
+    final points = <LatLng>[];
+    for (final entry in route) {
+      try {
+        final m = entry as Map<String, dynamic>;
+        final lat = (m['lat'] as num).toDouble();
+        final lng = (m['lng'] as num).toDouble();
+        points.add(LatLng(lat, lng));
+      } catch (_) {
+        // Skip just this point — a handful of malformed entries shouldn't
+        // blank out an otherwise-good route.
       }
     }
-    final sorted = counts.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    return sorted.map((entry) => entry.key).toList();
+    return points;
   }
 
-  ({int totalSets, double volume}) _calcStats(
-      List<Map<String, dynamic>> exercises) {
-    int totalSets = 0;
-    double volume = 0;
-    for (final e in exercises) {
-      final sets = e['sets'];
-      if (sets is! List) continue;
-      for (final s in sets) {
-        final m = s is Map ? s : <String, dynamic>{};
-        if (m['done'] == true) {
-          totalSets++;
-          final kg = double.tryParse(m['kg']?.toString() ?? '') ?? 0;
-          final reps = int.tryParse(m['reps']?.toString() ?? '') ?? 0;
-          volume += kg * reps;
-        }
-      }
+  // ── Formatting helpers — ported verbatim from activity_detail_screen.dart ──
+
+  String _formatDate(dynamic ts) {
+    DateTime date;
+    if (ts is Timestamp) {
+      date = ts.toDate();
+    } else {
+      return 'Unknown date';
     }
-    return (totalSets: totalSets, volume: volume);
+    const weekdays = [
+      'Monday', 'Tuesday', 'Wednesday', 'Thursday',
+      'Friday', 'Saturday', 'Sunday',
+    ];
+    const months = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December',
+    ];
+    return '${weekdays[date.weekday - 1]}, ${date.day} ${months[date.month - 1]} ${date.year}';
+  }
+
+  String _formatDuration() {
+    if (_isManual) {
+      final mins = _session['durationMinutes'];
+      return mins != null ? '$mins min' : '';
+    }
+    final secs = _session['durationSeconds'] as int?;
+    if (secs == null) return '';
+    if (secs < 60) return '${secs}s';
+    final mins = secs ~/ 60;
+    if (mins < 60) return '$mins min';
+    return '${mins ~/ 60}h ${mins % 60}m';
+  }
+
+  String _capitalize(String s) =>
+      s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+
+  String _formatVolume(int v) {
+    if (v >= 1000) return '${v ~/ 1000},${(v % 1000).toString().padLeft(3, '0')}';
+    return '$v';
+  }
+
+  String? _avgPaceLabel(double distanceMeters, int durationSeconds) {
+    if (distanceMeters < 50 || durationSeconds <= 0) return null;
+    final secondsPerKm = durationSeconds / (distanceMeters / 1000);
+    if (!secondsPerKm.isFinite) return null;
+    final mins = secondsPerKm ~/ 60;
+    final secs = (secondsPerKm % 60).round();
+    return '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')} /km';
   }
 
   // ── OpenAI summary ────────────────────────────────────────────────────────
 
   Future<void> _generateWiseCoachSummary() async {
-    final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
-    final sessionName = extra?['sessionName'] as String? ?? 'Gym Session';
-    final elapsedSeconds = extra?['elapsedSeconds'] as int? ?? 0;
+    final sessionName = _session['sessionName'] as String? ?? 'Session';
+    final elapsedSeconds = (_session['durationSeconds'] as num?)?.toInt() ?? 0;
+    final durationMins = elapsedSeconds ~/ 60;
 
     final String prompt;
-    if (_isCardio) {
-      final durationMins = elapsedSeconds ~/ 60;
-      prompt = 'Give a 2-sentence motivational summary for '
-          'someone who just completed a $_cardioActivity session '
-          'lasting $durationMins minutes and burned '
-          '$_cardioCalories calories. Be encouraging and specific. '
-          'Under 50 words.';
-    } else {
-      final exercises = _parseExercises(extra?['exercises']);
-      final stats = _calcStats(exercises);
-      final durationMins = elapsedSeconds ~/ 60;
-      final caloriesBurned = stats.totalSets * 8;
-      prompt =
-          'You are WiseCoach, an AI fitness coach. Generate a 2-3 sentence '
-          'post-workout summary for this gym session. Be encouraging and specific.\n'
+    if (_isCombined) {
+      final cardioBlocks = _session['cardioBlocks'] as List<dynamic>? ?? [];
+      final exercises = _session['exercises'] as List<dynamic>? ?? [];
+      final totalSets = (_session['totalSets'] as num?)?.toInt() ?? 0;
+      final cals = (_session['caloriesBurned'] as num?)?.toInt() ?? 0;
+      prompt = 'You are WiseCoach, an AI fitness coach. Generate a 2-3 '
+          'sentence post-workout summary for this combined gym + cardio '
+          'session. Be encouraging and specific.\n'
           'Session: $sessionName\n'
           'Duration: $durationMins minutes\n'
-          'Sets completed: ${stats.totalSets}\n'
-          'Total volume: ${stats.volume.round()} kg\n'
-          'Calories burned: $caloriesBurned kcal\n'
+          'Gym sets completed: $totalSets across ${exercises.length} exercises\n'
+          'Cardio blocks completed: ${cardioBlocks.length}\n'
+          'Calories burned: $cals kcal\n'
+          'Keep it under 60 words. Plain text only, no markdown.';
+    } else if (_isCardio) {
+      final activity = _session['activity'] as String? ?? 'cardio';
+      final cals = (_session['caloriesBurned'] as num?)?.toInt() ?? 0;
+      prompt = 'Give a 2-sentence motivational summary for someone who '
+          'just completed a $activity session lasting $durationMins '
+          'minutes and burned $cals calories. Be encouraging and specific. '
+          'Under 50 words.';
+    } else {
+      final exercises = _session['exercises'] as List<dynamic>? ?? [];
+      final totalSets = (_session['totalSets'] as num?)?.toInt() ?? 0;
+      final totalVolume = (_session['totalVolume'] as num?)?.toDouble() ?? 0;
+      final cals = (_session['caloriesBurned'] as num?)?.toInt() ?? 0;
+      prompt = 'You are WiseCoach, an AI fitness coach. Generate a 2-3 '
+          'sentence post-workout summary for this gym session. Be '
+          'encouraging and specific.\n'
+          'Session: $sessionName\n'
+          'Duration: $durationMins minutes\n'
+          'Sets completed: $totalSets across ${exercises.length} exercises\n'
+          'Total volume: ${totalVolume.round()} kg\n'
+          'Calories burned: $cals kcal\n'
           'Keep it under 60 words. Plain text only, no markdown.';
     }
 
@@ -294,10 +267,25 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         final text =
             data['choices'][0]['message']['content'] as String;
+        final trimmedSummary = text.trim();
         setState(() {
-          _wiseCoachSummary = text.trim();
+          _wiseCoachSummary = trimmedSummary;
           _summaryLoading = false;
         });
+
+        // Persist to the actual session document so activity_detail_screen
+        // .dart can show it later — best-effort only, in its own try/catch,
+        // so a write failure here never affects the local display above,
+        // which has already succeeded. Only ever called with a genuinely
+        // AI-generated summary, never the catch-block fallback string below.
+        final sessionId = _session['id'] as String?;
+        final uid = AuthService().getCurrentUser()?.uid;
+        if (sessionId != null && uid != null) {
+          try {
+            await FirestoreService()
+                .updateSessionSummary(uid, sessionId, trimmedSummary);
+          } catch (_) {}
+        }
       } else {
         throw Exception('${response.statusCode}');
       }
@@ -323,31 +311,31 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     if (_isSharing) return;
     setState(() => _isSharing = true);
     try {
-      final extra =
-          GoRouterState.of(context).extra as Map<String, dynamic>?;
-      final sessionName =
-          extra?['sessionName'] as String? ?? 'Workout';
+      final sessionName = _session['sessionName'] as String? ?? 'Workout';
       final elapsedSeconds =
-          extra?['elapsedSeconds'] as int? ?? 0;
-      final date = extra?['date'] is DateTime
-          ? extra!['date'] as DateTime
-          : DateTime.now();
-      final exercises = _parseExercises(extra?['exercises']);
-      final stats = _calcStats(exercises);
-      final caloriesBurned = _isCardio
-          ? _cardioCalories
-          : stats.totalSets * 8;
+          (_session['durationSeconds'] as num?)?.toInt() ?? 0;
+      final date =
+          (_session['date'] as Timestamp?)?.toDate() ?? DateTime.now();
+      final totalSets = (_session['totalSets'] as num?)?.toInt() ?? 0;
+      final totalVolume =
+          (_session['totalVolume'] as num?)?.toDouble() ?? 0;
+      final caloriesBurned =
+          (_session['caloriesBurned'] as num?)?.toInt() ?? 0;
+      final cardioActivity = _session['activity'] as String? ?? '';
 
       // Build the widget
       final cardWidget = ShareCardWidget(
         sessionName: sessionName,
         isCardio: _isCardio,
-        cardioActivity: _cardioActivity,
+        cardioActivity: cardioActivity,
         elapsedSeconds: elapsedSeconds,
         calories: caloriesBurned,
-        totalSets: stats.totalSets,
-        volume: stats.volume,
-        goalMinutes: _goalMinutes,
+        totalSets: totalSets,
+        volume: totalVolume,
+        // Not stored on the finalized session doc anywhere (it was always
+        // just cardio_session_screen.dart's own local, ephemeral "+5 min"
+        // goal state) — 0 matches the "no goal set" display elsewhere.
+        goalMinutes: 0,
         date: date,
       );
 
@@ -425,384 +413,286 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     }
   }
 
+  // Adapted from activity_detail_screen.dart's _updateActiveCardioMap() —
+  // that screen has no fixed bottom bar below its scrollview, so the full
+  // device screen height IS its visible viewport. This screen pins
+  // _buildActionBar() below the scrollable content (see build()), so the
+  // true visible/scrollable viewport is shorter than the device screen —
+  // using the raw screen height here let a card that had actually scrolled
+  // out of view (clipped behind the real viewport boundary, hidden beneath
+  // where the action bar sits) still register as "on screen," so the
+  // genuinely-visible card could go forever un-selected as
+  // _activeCardioMapIndex. The user would then only ever see that visible
+  // card's static mapSnapshotBase64 preview — which still shows the route
+  // line baked in from capture time, but is just a picture — instead of a
+  // live, pannable map, exactly matching "route renders but doesn't pan."
+  // Fixed by measuring the real scrollable viewport's own RenderBox (see
+  // _scrollViewportKey) instead of assuming it spans the whole screen.
+  void _updateActiveCardioMap() {
+    if (!mounted) return;
+    final viewportBox = _scrollViewportKey.currentContext?.findRenderObject();
+    if (viewportBox is! RenderBox || !viewportBox.attached) return;
+    final viewportTop = viewportBox.localToGlobal(Offset.zero).dy;
+    final viewportBottom = viewportTop + viewportBox.size.height;
+    final viewportCenter = (viewportTop + viewportBottom) / 2;
+    int? bestIndex;
+    double? bestDistance;
+    for (final entry in _cardioBlockKeys.entries) {
+      final index = entry.key;
+      if (_cardioBlockHasMap[index] != true) continue;
+      final renderObject = entry.value.currentContext?.findRenderObject();
+      if (renderObject is! RenderBox || !renderObject.attached) continue;
+      final position = renderObject.localToGlobal(Offset.zero);
+      final size = renderObject.size;
+      final isOnScreen = position.dy < viewportBottom &&
+          (position.dy + size.height) > viewportTop;
+      if (!isOnScreen) continue;
+      final cardCenter = position.dy + size.height / 2;
+      final distance = (cardCenter - viewportCenter).abs();
+      if (bestDistance == null || distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    }
+    if (bestIndex != null && bestIndex != _activeCardioMapIndex) {
+      final previousIndex = _activeCardioMapIndex;
+      setState(() => _activeCardioMapIndex = bestIndex);
+      if (previousIndex != null) {
+        _cardioBlockMapControllers.remove(previousIndex);
+      }
+    }
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
-    final sessionName = extra?['sessionName'] as String? ?? 'Push A';
-    final elapsedSeconds = extra?['elapsedSeconds'] as int? ?? 41 * 60;
-    final date = extra?['date'] is DateTime
-        ? extra!['date'] as DateTime
-        : DateTime.now();
-    final exercises = _parseExercises(extra?['exercises']);
-    final stats = _calcStats(exercises);
-    final xp = stats.totalSets * 15;
-    final caloriesBurned = stats.totalSets * 8;
+    if (_loading) {
+      return const Scaffold(
+        backgroundColor: WW.bg,
+        body: Center(child: CircularProgressIndicator(color: WW.primary)),
+      );
+    }
+
+    if (!_hasSession) {
+      return _buildErrorState();
+    }
+
+    final hasNotes = (_session['notes'] as String?)?.isNotEmpty == true;
+    // Top-level photoBase64 is only ever written for pure gym or pure
+    // cardio sessions (saveGymSession/saveCardioSession) — a combined
+    // session's photos live per-block inside cardioBlocks[] instead (see
+    // _buildCardioBlockCard()), and finalizeInProgressSession() never
+    // writes a top-level photoBase64 for type:'combined'.
+    final photoWidget = (_isGym || _isCardio) ? _buildPhotoWidget() : null;
+
+    if (_isCombined) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _updateActiveCardioMap());
+    }
 
     return Scaffold(
       backgroundColor: WW.bg,
-      body: Column(
-        children: [
-          Expanded(
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _buildHeader(sessionName, date),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _isCardio
-                            ? _buildCardioStatsRow(elapsedSeconds)
-                            : _buildStatsRow(elapsedSeconds, stats, caloriesBurned),
-                        const SizedBox(height: 16),
-                        if (!_isCardio) ...[
-                          _buildMusclesCard(exercises),
-                          const SizedBox(height: 16),
-                          _buildPbCard(),
-                          const SizedBox(height: 16),
-                        ],
-                        _buildWiseCoachCard(),
-                        const SizedBox(height: 16),
-                        if (!_isCardio) ...[
-                          _buildXpCard(xp),
-                          const SizedBox(height: 16),
-                          _buildBadgesCard(),
-                          const SizedBox(height: 16),
-                          _buildExercisesCard(exercises),
-                          const SizedBox(height: 20),
-                        ],
+      // top:true (the default) — the header's own content ("Great
+      // session!" etc.) previously sat flush against the very top of the
+      // screen with only a fixed 8px gap, so it rendered underneath the
+      // status bar/notch on any device with real top insets. bottom:false
+      // since _buildActionBar() already adds MediaQuery.of(context).padding
+      // .bottom itself — double-applying it here would just add extra
+      // empty space above the action bar.
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          children: [
+            Expanded(
+              child: NotificationListener<ScrollNotification>(
+                key: _scrollViewportKey,
+                onNotification: (notification) {
+                  if (_isCombined) _updateActiveCardioMap();
+                  return false;
+                },
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const SizedBox(height: 8),
+                      _buildHeaderCard(),
+                      const SizedBox(height: 16),
+                      _buildStatsRow(),
+                      const SizedBox(height: 12),
+                      _buildWiseCoachCard(),
+                      const SizedBox(height: 12),
+                      if (_isGym || _isCombined) ...[
+                        ..._xpCardWidgets(),
+                        _buildPbCard(),
+                        const SizedBox(height: 12),
+                        _buildBadgesCard(),
+                        const SizedBox(height: 12),
                       ],
-                    ),
+                      if (_isCardio && _hasRoute) ...[
+                        _buildCardioMapSection(),
+                        const SizedBox(height: 12),
+                      ],
+                      if (_isGym || _isCombined) ...[
+                        _buildExercisesSection(),
+                        const SizedBox(height: 12),
+                      ],
+                      if (_isCombined) ..._buildCardioBlocksSection(),
+                      if (hasNotes) ...[
+                        _buildNotesSection(),
+                        const SizedBox(height: 12),
+                      ],
+                      if (photoWidget != null) ...[
+                        photoWidget,
+                        const SizedBox(height: 12),
+                      ],
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
-          ),
-          _buildActionBar(context),
-        ],
+            _buildActionBar(context),
+          ],
+        ),
       ),
     );
   }
 
-  // ── Section 1 — Celebration header ───────────────────────────────────────
+  // ── Error state ───────────────────────────────────────────────────────────
+  // Same Icon/title/subtitle/button empty-state pattern already used
+  // elsewhere in this app (gym_session_screen.dart's "No active plan
+  // found", plan_detail_screen.dart's "Plan not found") — shown whenever
+  // extra['sessionId']/the current uid are missing, or getSession() itself
+  // fails or returns null, rather than crashing.
 
-  Widget _buildHeader(String sessionName, DateTime date) {
-    return Stack(
-      children: [
-        Container(
-          width: double.infinity,
-          padding: EdgeInsets.fromLTRB(
-            24,
-            MediaQuery.of(context).padding.top + 28,
-            24,
-            32,
-          ),
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [WW.primaryDark, Color(0xFF4a4ea8)],
-            ),
-          ),
-          child: Column(
-            children: [
-              ScaleTransition(
-                scale: _checkScale,
-                child: Container(
-                  width: 72,
-                  height: 72,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.15),
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.5),
-                      width: 2,
+  Widget _buildErrorState() {
+    return Scaffold(
+      backgroundColor: WW.bg,
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.error_outline_rounded,
+                    size: 48, color: WW.textSec),
+                const SizedBox(height: 16),
+                const Text(
+                  'Could not load this session',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  "It may not have saved properly, or something went wrong.",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 13, color: WW.textSec),
+                ),
+                const SizedBox(height: 20),
+                GestureDetector(
+                  onTap: () => context.go(Routes.home),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: WW.primary,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Text(
+                      'Go Home',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ),
-                  child: const Icon(
-                    Icons.check_rounded,
-                    color: Colors.white,
-                    size: 40,
-                  ),
                 ),
-              ),
-              const SizedBox(height: 16),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Header — flat, celebratory ───────────────────────────────────────────
+  // Same icon-circle/title/subtitle layout and spacing/typography family as
+  // activity_detail_screen.dart's _buildHeaderCard() — no gradient, no
+  // confetti — but scaled up and given a soft tinted glow (the same
+  // color.withValues(alpha:)+blurRadius+offset BoxShadow pattern already
+  // used throughout this app for celebratory/CTA elements, e.g. this same
+  // file's own _buildActionBar() Done button) so the moment still reads as
+  // "grand" without reintroducing a gradient background. WW.tealBg/WW.teal
+  // is this app's established "done"/success color (e.g.
+  // gym_session_screen.dart's completed-cardio-card checkmark).
+
+  Widget _buildHeaderCard() {
+    final duration = _formatDuration();
+    final subtitleParts = <String>[_formatDate(_session['date'])];
+    if (duration.isNotEmpty) subtitleParts.add(duration);
+    final subtitle = subtitleParts.join(' · ');
+    final sessionName = _session['sessionName'] as String? ?? 'Session';
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        ScaleTransition(
+          scale: _checkScale,
+          child: Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              color: WW.tealBg,
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: WW.teal.withValues(alpha: 0.35),
+                  blurRadius: 20,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            child: const Icon(Icons.check_rounded, color: WW.teal, size: 34),
+          ),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
               const Text(
-                'Session Complete!',
+                'Great session!',
                 style: TextStyle(
-                  fontSize: 26,
+                  fontSize: 24,
                   fontWeight: FontWeight.w800,
-                  color: Colors.white,
-                  letterSpacing: -0.4,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                sessionName,
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white.withValues(alpha: 0.75),
+                  color: WW.text,
+                  letterSpacing: -0.3,
                 ),
               ),
               const SizedBox(height: 4),
               Text(
-                _fmtDate(date),
-                style: TextStyle(
+                sessionName,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: WW.text,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                style: const TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w500,
-                  color: Colors.white.withValues(alpha: 0.55),
-                ),
-              ),
-            ],
-          ),
-        ),
-        const _ConfettiBurst(),
-      ],
-    );
-  }
-
-  // ── Section 2 — Stats row ─────────────────────────────────────────────────
-
-  Widget _buildStatsRow(
-    int secs,
-    ({int totalSets, double volume}) stats,
-    int calories,
-  ) {
-    return Column(
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: _StatCard(
-                label: 'Duration',
-                value: _fmtDuration(secs),
-                icon: Icons.timer_outlined,
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _StatCard(
-                label: 'Total Sets',
-                value: '${stats.totalSets}',
-                icon: Icons.fitness_center_rounded,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: _StatCard(
-                label: 'Volume',
-                value: '${_fmtVolume(stats.volume)} kg',
-                icon: Icons.bar_chart_rounded,
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _StatCard(
-                label: 'Calories',
-                value: '~$calories kcal',
-                icon: Icons.local_fire_department_rounded,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  // ── Section 2b — Cardio stats row ────────────────────────────────────────
-
-  Widget _buildCardioStatsRow(int secs) {
-    final durationMins = secs ~/ 60;
-    final durationSecs = secs % 60;
-    final durationStr = durationMins > 0
-        ? '${durationMins}m ${durationSecs}s'
-        : '${durationSecs}s';
-
-    String goalStr;
-    if (_goalMinutes <= 0) {
-      goalStr = 'Open run';
-    } else if (secs >= _goalMinutes * 60) {
-      goalStr = 'Goal reached ✓';
-    } else {
-      goalStr = '$_goalMinutes min';
-    }
-
-    final actIcon = _cardioActivity == 'Run'
-        ? Icons.directions_run_rounded
-        : _cardioActivity == 'Walk'
-            ? Icons.directions_walk_rounded
-            : Icons.directions_bike_rounded;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: _StatCard(
-                label: 'Duration',
-                value: durationStr,
-                icon: Icons.timer_outlined,
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _StatCard(
-                label: 'Calories',
-                value: '~$_cardioCalories kcal',
-                icon: Icons.local_fire_department_rounded,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: _StatCard(
-                label: 'Activity',
-                value: _cardioActivity,
-                icon: actIcon,
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _StatCard(
-                label: 'Goal',
-                value: goalStr,
-                icon: Icons.flag_rounded,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-
-        // Heart rate card
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: WW.card,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: WW.border, width: 0.5),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFEF4444).withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(
-                  Icons.favorite_rounded,
-                  color: Color(0xFFEF4444),
-                  size: 20,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Heart Rate',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: WW.text,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    if (!_heartRateLoaded)
-                      const Text(
-                        'Loading...',
-                        style: TextStyle(fontSize: 12, color: WW.textSec),
-                      )
-                    else if (_avgHeartRate != null && _maxHeartRate != null)
-                      Text(
-                        'Avg ${_avgHeartRate!.round()} bpm · Max ${_maxHeartRate!.round()} bpm',
-                        style: const TextStyle(fontSize: 12, color: WW.textSec),
-                      )
-                    else
-                      const Text(
-                        'Connect Apple Health to unlock',
-                        style: TextStyle(fontSize: 12, color: WW.textSec),
-                      ),
-                  ],
-                ),
-              ),
-              if (_avgHeartRate == null)
-                const Icon(
-                  Icons.lock_outline_rounded,
-                  size: 16,
                   color: WW.textSec,
                 ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 10),
-
-        // Pace placeholder card
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: WW.card,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: WW.border, width: 0.5),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: WW.primary.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(
-                  Icons.speed_rounded,
-                  color: WW.primary,
-                  size: 20,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: const [
-                    Text(
-                      'Pace & Distance',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: WW.text,
-                      ),
-                    ),
-                    SizedBox(height: 2),
-                    Text(
-                      'Available with GPS outdoor run',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: WW.textSec,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const Icon(
-                Icons.lock_outline_rounded,
-                size: 16,
-                color: WW.textSec,
               ),
             ],
           ),
@@ -811,71 +701,87 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     );
   }
 
-  // ── Section 3 — Muscles worked ────────────────────────────────────────────
+  // ── Stats row — ported verbatim from
+  // activity_detail_screen.dart's _buildStatsRow()/_statCell(). ─────────────
 
-  Widget _buildMusclesCard(List<Map<String, dynamic>> exercises) {
-    final muscles = _getMusclesWorked(exercises);
+  Widget _buildStatsRow() {
+    final List<({String label, String value})> stats;
+
+    if (_isGym || _isCombined) {
+      final sets = _session['totalSets'] as int? ?? 0;
+      final volume =
+          ((_session['totalVolume'] as num?)?.toDouble() ?? 0).round();
+      final cals = _session['caloriesBurned'] as int? ?? 0;
+      stats = [
+        (label: 'Sets', value: '$sets'),
+        (label: 'Volume', value: '${_formatVolume(volume)} kg'),
+        (label: 'Calories', value: '$cals kcal'),
+      ];
+    } else if (_isManual) {
+      final mins = _session['durationMinutes'] as int? ?? 0;
+      final cals = _session['caloriesBurned'] as int? ?? 0;
+      final intensity =
+          _capitalize(_session['intensity'] as String? ?? 'moderate');
+      stats = [
+        (label: 'Duration', value: '$mins min'),
+        (label: 'Calories', value: '$cals kcal'),
+        (label: 'Intensity', value: intensity),
+      ];
+    } else {
+      final dur = _formatDuration();
+      final cals = _session['caloriesBurned'] as int? ?? 0;
+      final distanceMeters = (_session['distanceMeters'] as num?)?.toDouble();
+      final elevationGain =
+          (_session['elevationGainMeters'] as num?)?.toDouble();
+      final durationSeconds = _session['durationSeconds'] as int? ?? 0;
+
+      if (distanceMeters != null && distanceMeters > 0) {
+        final pace = _avgPaceLabel(distanceMeters, durationSeconds);
+        stats = [
+          (label: 'Duration', value: dur.isEmpty ? '—' : dur),
+          (label: 'Distance', value: '${(distanceMeters / 1000).toStringAsFixed(2)} km'),
+          (label: 'Avg Pace', value: pace ?? '--:-- /km'),
+          (label: 'Calories', value: '$cals kcal'),
+          if (elevationGain != null)
+            (label: 'Elevation', value: '${elevationGain.round()} m'),
+        ];
+      } else {
+        stats = [
+          (label: 'Duration', value: dur.isEmpty ? '—' : dur),
+          (label: 'Calories', value: '$cals kcal'),
+          (label: 'Type', value: 'Cardio'),
+        ];
+      }
+    }
+
+    final rows = <List<({String label, String value})>>[];
+    for (var i = 0; i < stats.length; i += 3) {
+      final end = i + 3 <= stats.length ? i + 3 : stats.length;
+      rows.add(stats.sublist(i, end));
+    }
+
     return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: WW.cardDecoration,
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      decoration: BoxDecoration(
+        color: WW.elevated,
+        borderRadius: BorderRadius.circular(14),
+      ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Muscles Worked',
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              color: WW.text,
-            ),
-          ),
-          if (muscles.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: muscles.asMap().entries.map((entry) {
-                final isPrimary = entry.key < 2;
-                final color = isPrimary ? WW.primary : WW.lavender;
-                final bgColor = isPrimary ? WW.chipBg : WW.lavenderBg;
-                return Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: bgColor,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                        color: color.withValues(alpha: 0.3), width: 1),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 7,
-                        height: 7,
-                        decoration: BoxDecoration(
-                            color: color, shape: BoxShape.circle),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        entry.value,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: color,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 12),
+          for (var r = 0; r < rows.length; r++) ...[
+            if (r > 0) ...[
+              const SizedBox(height: 12),
+              Container(
+                height: 0.5,
+                margin: const EdgeInsets.symmetric(horizontal: 16),
+                color: WW.border,
+              ),
+              const SizedBox(height: 12),
+            ],
             Row(
-              children: const [
-                _LegendDot(color: WW.primary, label: 'Primary'),
-                SizedBox(width: 16),
-                _LegendDot(color: WW.lavender, label: 'Secondary'),
+              children: [
+                for (final stat in rows[r])
+                  Expanded(child: _statCell(stat.label, stat.value)),
               ],
             ),
           ],
@@ -884,7 +790,165 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     );
   }
 
-  // ── Section 4 — Personal Bests ────────────────────────────────────────────
+  Widget _statCell(String label, String value) {
+    return Column(
+      children: [
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w800,
+            color: WW.primaryDark,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w500,
+            color: WW.textSec,
+          ),
+          textAlign: TextAlign.center,
+        ),
+      ],
+    );
+  }
+
+  // ── WiseCoach card — ported verbatim from
+  // activity_detail_screen.dart's _buildWiseCoachCard() (WW.primary
+  // left-accent-stripe, collapsible). This screen previously used a
+  // distinct lavenderBg-filled, non-collapsible treatment — the odd one
+  // out, not an intentionally different style; now aligned.
+
+  Widget _buildWiseCoachCard() {
+    return Container(
+      decoration: const BoxDecoration(
+        border: Border(left: BorderSide(color: WW.primary, width: 3)),
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          GestureDetector(
+            onTap: () =>
+                setState(() => _wiseCoachExpanded = !_wiseCoachExpanded),
+            behavior: HitTestBehavior.opaque,
+            child: Row(
+              children: [
+                Container(
+                  width: 28,
+                  height: 28,
+                  decoration: const BoxDecoration(
+                    color: WW.primary,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Center(
+                    child: Icon(Icons.auto_awesome_rounded,
+                        color: Colors.white, size: 14),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'WISECOACH SUMMARY',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: WW.text,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ),
+                AnimatedRotation(
+                  turns: _wiseCoachExpanded ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 200),
+                  child: const Icon(Icons.keyboard_arrow_down_rounded,
+                      color: WW.textSec, size: 20),
+                ),
+              ],
+            ),
+          ),
+          if (_wiseCoachExpanded) ...[
+            const SizedBox(height: 10),
+            if (_summaryLoading)
+              const _WiseCoachTypingDots()
+            else
+              Text(
+                _wiseCoachSummary,
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: WW.text,
+                  height: 1.6,
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ── XP banner ─────────────────────────────────────────────────────────────
+  // Hardcoded progress bar/level text unchanged (out of scope) — xp itself
+  // is real, now sourced from the finalized doc's own xpEarned field
+  // instead of being recomputed locally.
+
+  List<Widget> _xpCardWidgets() {
+    final xp = (_session['xpEarned'] as num?)?.toInt() ?? 0;
+    if (xp <= 0) return [];
+    return [
+      Container(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        decoration: BoxDecoration(
+          color: WW.tealBg,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: WW.teal.withValues(alpha: 0.3), width: 1),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.bolt_rounded, color: WW.teal, size: 20),
+                const SizedBox(width: 6),
+                Text(
+                  '+$xp XP earned!',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: WW.teal,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: 0.72,
+                minHeight: 7,
+                backgroundColor: WW.teal.withValues(alpha: 0.15),
+                valueColor: const AlwaysStoppedAnimation<Color>(WW.teal),
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Level 4 — 720 / 1000 XP to next level',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+                color: WW.teal,
+              ),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 12),
+    ];
+  }
+
+  // ── Personal Bests — hardcoded placeholder, unchanged, out of scope ───────
 
   Widget _buildPbCard() {
     return Container(
@@ -912,109 +976,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     );
   }
 
-  // ── Section 5 — WiseCoach ─────────────────────────────────────────────────
-
-  Widget _buildWiseCoachCard() {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: WW.lavenderBg,
-        borderRadius: BorderRadius.circular(14),
-        border: const Border(
-          left: BorderSide(color: WW.lavender, width: 3),
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Icon(Icons.auto_awesome_rounded,
-              color: WW.lavender, size: 18),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'WiseCoach Insight',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: WW.lavenderDark,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                if (_summaryLoading)
-                  const _WiseCoachTypingDots()
-                else
-                  Text(
-                    _wiseCoachSummary,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: WW.lavenderText,
-                      height: 1.45,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ── Section 6 — XP banner ─────────────────────────────────────────────────
-
-  Widget _buildXpCard(int xp) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-      decoration: BoxDecoration(
-        color: WW.tealBg,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: WW.teal.withValues(alpha: 0.3), width: 1),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.bolt_rounded, color: WW.teal, size: 20),
-              const SizedBox(width: 6),
-              Text(
-                '+$xp XP earned!',
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w800,
-                  color: WW.teal,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: 0.72,
-              minHeight: 7,
-              backgroundColor: WW.teal.withValues(alpha: 0.15),
-              valueColor: const AlwaysStoppedAnimation<Color>(WW.teal),
-            ),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'Level 4 — 720 / 1000 XP to next level',
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w500,
-              color: WW.teal,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ── Section 7 — Badges ────────────────────────────────────────────────────
+  // ── Badges — hardcoded placeholder, unchanged, out of scope ───────────────
 
   Widget _buildBadgesCard() {
     return Container(
@@ -1075,67 +1037,206 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     );
   }
 
-  // ── Section 8 — Exercises (collapsible) ───────────────────────────────────
+  // ── Pure-cardio map section — ported verbatim from
+  // activity_detail_screen.dart's _buildCardioMapSection()/
+  // _onCardioMapCreated()/_onCardioStyleLoaded(). ─────────────────────────
 
-  static const Set<String> _pbExercises = {'Bench Press', 'Overhead Press'};
-
-  Widget _buildExercisesCard(List<Map<String, dynamic>> exercises) {
-    return Container(
-      decoration: WW.cardDecoration,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          GestureDetector(
-            onTap: () =>
-                setState(() => _exercisesExpanded = !_exercisesExpanded),
-            behavior: HitTestBehavior.opaque,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-              child: Row(
-                children: [
-                  const Text(
-                    'Exercises',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: WW.text,
-                    ),
-                  ),
-                  const Spacer(),
-                  Text(
-                    '${exercises.length} exercises',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      color: WW.textSec,
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  AnimatedRotation(
-                    turns: _exercisesExpanded ? 0.5 : 0,
-                    duration: const Duration(milliseconds: 200),
-                    child: const Icon(
-                      Icons.keyboard_arrow_down_rounded,
-                      color: WW.textSec,
-                      size: 20,
-                    ),
-                  ),
-                ],
+  Widget _buildCardioMapSection() {
+    final points = _routePoints;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: SizedBox(
+            height: 220,
+            child: MapLibreMap(
+              styleString: _kMapStyleUrl,
+              initialCameraPosition: CameraPosition(
+                target: points.first,
+                zoom: 14,
               ),
+              onMapCreated: _onCardioMapCreated,
+              onStyleLoadedCallback: _onCardioStyleLoaded,
             ),
           ),
-          if (_exercisesExpanded) ...[
-            Container(height: 0.5, color: WW.elevated),
-            ...exercises.map((e) {
-              final name = e['name']?.toString() ?? '';
-              final muscle = e['muscle']?.toString() ?? '';
-              final sets = e['sets'];
-              final setList = sets is List ? sets : [];
-              final doneSets = setList.where((s) {
-                return s is Map && s['done'] == true;
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          "Per-km splits aren't available — outdoor sessions only store "
+          'overall average pace today, not per-point timing.',
+          style: TextStyle(fontSize: 11, color: WW.textSec, height: 1.4),
+        ),
+      ],
+    );
+  }
+
+  void _onCardioMapCreated(MapLibreMapController controller) {
+    _cardioMapController = controller;
+  }
+
+  void _onCardioStyleLoaded() {
+    final controller = _cardioMapController;
+    if (controller == null) return;
+    _drawRouteLine(controller, _routePoints);
+    _fitCameraToRouteBounds(controller, _routePoints);
+  }
+
+  void _onCardioBlockMapCreated(int index, MapLibreMapController controller) {
+    _cardioBlockMapControllers[index] = controller;
+  }
+
+  void _onCardioBlockStyleLoaded(int index, List<LatLng> points) {
+    final controller = _cardioBlockMapControllers[index];
+    if (controller == null) return;
+    _drawRouteLine(controller, points);
+    _fitCameraToRouteBounds(controller, points);
+  }
+
+  Future<void> _drawRouteLine(
+    MapLibreMapController controller,
+    List<LatLng> points,
+  ) async {
+    if (points.isEmpty) return;
+    try {
+      await controller.addLine(
+        LineOptions(
+          geometry: points,
+          lineColor: WW.primary.toHexStringRGB(),
+          lineWidth: 4,
+        ),
+      );
+    } catch (e) {
+      debugPrint('PostSessionSummaryScreen: route line draw failed — $e');
+    }
+  }
+
+  Future<void> _fitCameraToRouteBounds(
+    MapLibreMapController controller,
+    List<LatLng> points,
+  ) async {
+    if (points.length < 2) return;
+    try {
+      var minLat = points.first.latitude;
+      var maxLat = points.first.latitude;
+      var minLng = points.first.longitude;
+      var maxLng = points.first.longitude;
+      for (final p in points) {
+        if (p.latitude < minLat) minLat = p.latitude;
+        if (p.latitude > maxLat) maxLat = p.latitude;
+        if (p.longitude < minLng) minLng = p.longitude;
+        if (p.longitude > maxLng) maxLng = p.longitude;
+      }
+      await controller.animateCamera(
+        CameraUpdate.newLatLngBounds(
+          LatLngBounds(
+            southwest: LatLng(minLat, minLng),
+            northeast: LatLng(maxLat, maxLng),
+          ),
+          left: 30,
+          top: 30,
+          right: 30,
+          bottom: 30,
+        ),
+      );
+    } catch (e) {
+      debugPrint('PostSessionSummaryScreen: camera bounds-fit failed — $e');
+    }
+  }
+
+  // ── Photo (gym or pure cardio) — ported verbatim from
+  // activity_detail_screen.dart's _buildPhotoWidget(). ─────────────────────
+
+  Widget? _buildPhotoWidget() {
+    final raw = _session['photoBase64'] as String?;
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final bytes = base64Decode(raw);
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: Image.memory(
+          bytes,
+          width: double.infinity,
+          height: 200,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => const SizedBox.shrink(),
+        ),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ── Exercises section (gym or combined) — ported verbatim from
+  // activity_detail_screen.dart's _buildExercisesSection(). ────────────────
+
+  Widget _buildExercisesSection() {
+    final exercises = _session['exercises'] as List<dynamic>? ?? [];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        GestureDetector(
+          onTap: () =>
+              setState(() => _exercisesExpanded = !_exercisesExpanded),
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(0, 0, 0, 14),
+            child: Row(
+              children: [
+                const Icon(Icons.fitness_center_rounded,
+                    size: 18, color: WW.primary),
+                const SizedBox(width: 8),
+                Text(
+                  'Exercises (${exercises.length})',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+                const Spacer(),
+                AnimatedRotation(
+                  turns: _exercisesExpanded ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 200),
+                  child: const Icon(Icons.keyboard_arrow_down_rounded,
+                      color: WW.textSec, size: 20),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_exercisesExpanded) ...[
+          Container(height: 0.5, color: WW.border),
+          if (exercises.isEmpty)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 12, 16, 14),
+              child: Text('No exercises recorded.',
+                  style: TextStyle(fontSize: 13, color: WW.textSec)),
+            )
+          else
+            ...List.generate(exercises.length, (ei) {
+              final ex = exercises[ei] as Map<String, dynamic>;
+              final sets = ex['sets'] as List<dynamic>? ?? [];
+              final completedSets = sets.where((s) {
+                final m = s as Map<String, dynamic>;
+                return m['done'] == true || m['completed'] == true;
               }).toList();
-              final isPb = _pbExercises.contains(name);
-              return Padding(
+              final muscle = ex['muscle'] as String? ??
+                  ex['muscleGroup'] as String? ??
+                  '';
+              final exName = ex['name'] as String? ??
+                  ex['exerciseName'] as String? ??
+                  'Exercise';
+
+              return Container(
+                decoration: BoxDecoration(
+                  border: Border(
+                    top: ei > 0
+                        ? const BorderSide(color: WW.border, width: 0.5)
+                        : BorderSide.none,
+                  ),
+                ),
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1144,85 +1245,353 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                       children: [
                         Expanded(
                           child: Text(
-                            name,
+                            exName,
                             style: const TextStyle(
                               fontSize: 13,
                               fontWeight: FontWeight.w700,
-                              color: WW.text,
+                              color: WW.primaryDark,
                             ),
                           ),
                         ),
-                        if (isPb)
+                        if (muscle.isNotEmpty)
                           Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 7, vertical: 2),
+                                horizontal: 8, vertical: 2),
                             decoration: BoxDecoration(
-                              color: WW.gold.withValues(alpha: 0.15),
+                              color: WW.elevated,
                               borderRadius: BorderRadius.circular(6),
                             ),
-                            child: const Text(
-                              'PB 🏆',
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                color: WW.gold,
-                              ),
+                            child: Text(
+                              muscle,
+                              style: const TextStyle(
+                                  fontSize: 11, color: WW.textSec),
                             ),
                           ),
                       ],
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      muscle,
-                      style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500,
-                        color: WW.textSec,
+                    if (completedSets.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        children: const [
+                          Expanded(
+                              flex: 1,
+                              child: Text('Set',
+                                  style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                      color: WW.textSec))),
+                          Expanded(
+                              flex: 2,
+                              child: Text('kg',
+                                  style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                      color: WW.textSec))),
+                          Expanded(
+                              flex: 2,
+                              child: Text('Reps',
+                                  style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                      color: WW.textSec))),
+                        ],
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    ...doneSets.map((s) {
-                      final m = s is Map ? s : <String, dynamic>{};
-                      final kg = m['kg']?.toString() ?? '';
-                      final reps = m['reps']?.toString() ?? '';
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 7,
-                              height: 7,
-                              decoration: const BoxDecoration(
-                                color: WW.teal,
-                                shape: BoxShape.circle,
-                              ),
+                      const SizedBox(height: 2),
+                      ...List.generate(completedSets.length, (si) {
+                        final s = completedSets[si] as Map<String, dynamic>;
+                        final weight = s['kg'] ??
+                            s['weight'] ??
+                            s['weightKg'] ??
+                            s['w'] ??
+                            0;
+                        final reps = s['reps'] ?? s['r'] ?? 0;
+                        return Container(
+                          padding: const EdgeInsets.symmetric(vertical: 3),
+                          decoration: const BoxDecoration(
+                            border: Border(
+                              top: BorderSide(color: WW.border, width: 0.5),
                             ),
-                            const SizedBox(width: 8),
-                            Text(
-                              kg.isNotEmpty && reps.isNotEmpty
-                                  ? '$kg kg × $reps'
-                                  : '—',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                                color: WW.textSec,
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    }),
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                  flex: 1,
+                                  child: Text('${si + 1}',
+                                      style: const TextStyle(
+                                          fontSize: 12,
+                                          color: WW.textSec))),
+                              Expanded(
+                                  flex: 2,
+                                  child: Text('$weight',
+                                      style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                          color: WW.text))),
+                              Expanded(
+                                  flex: 2,
+                                  child: Text('$reps',
+                                      style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                          color: WW.text))),
+                            ],
+                          ),
+                        );
+                      }),
+                    ],
                   ],
                 ),
               );
             }),
+        ],
+      ],
+    );
+  }
+
+  // ── Cardio blocks section (combined only) — ported verbatim from
+  // activity_detail_screen.dart's _buildCardioBlocksSection()/
+  // _buildCardioBlockCard() (including the single-active-map mechanism). ───
+
+  List<Widget> _buildCardioBlocksSection() {
+    final rawBlocks = _session['cardioBlocks'] as List<dynamic>? ?? [];
+    if (rawBlocks.isEmpty) return [];
+
+    final widgets = <Widget>[
+      Row(
+        children: [
+          const Icon(Icons.directions_run_rounded, size: 18, color: WW.primary),
+          const SizedBox(width: 8),
+          Text(
+            'Cardio (${rawBlocks.length})',
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              color: WW.text,
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 10),
+    ];
+    for (var i = 0; i < rawBlocks.length; i++) {
+      widgets.add(_buildCardioBlockCard(i, rawBlocks[i] as Map<String, dynamic>));
+      widgets.add(const SizedBox(height: 12));
+    }
+    return widgets;
+  }
+
+  IconData _cardioBlockActivityIcon(String activity) {
+    switch (activity) {
+      case 'Walk':
+        return Icons.directions_walk_rounded;
+      case 'Cycle':
+        return Icons.directions_bike_rounded;
+      default:
+        return Icons.directions_run_rounded;
+    }
+  }
+
+  String _fmtBlockDuration(int seconds) {
+    final h = seconds ~/ 3600;
+    final m = (seconds % 3600) ~/ 60;
+    final s = seconds % 60;
+    if (h > 0) {
+      return '${h.toString().padLeft(2, '0')}:'
+          '${m.toString().padLeft(2, '0')}:'
+          '${s.toString().padLeft(2, '0')}';
+    }
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  Widget? _decodeCardioBlockImage(String? raw, {double height = 160}) {
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final bytes = base64Decode(raw);
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.memory(
+          bytes,
+          width: double.infinity,
+          height: height,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => const SizedBox.shrink(),
+        ),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Widget _buildCardioBlockCard(int index, Map<String, dynamic> block) {
+    final isOutdoor = block['mode'] == 'outdoor';
+    final activity = block['activity'] as String? ?? 'Cardio';
+    final distanceMeters = (block['distanceMeters'] as num?)?.toDouble();
+    final avgHeartRate = (block['avgHeartRate'] as num?)?.toDouble();
+    final elevationGainMeters =
+        (block['elevationGainMeters'] as num?)?.toDouble();
+    final durationSeconds = (block['durationSeconds'] as num?)?.toInt();
+    final caloriesBurned = (block['caloriesBurned'] as num?)?.toInt();
+    final routePoints =
+        _parseRoutePoints(block['route'] as List<dynamic>? ?? []);
+    final notes = block['notes'] as String?;
+    final photoBase64 = block['photoBase64'] as String?;
+    final paceLabel = (distanceMeters != null && durationSeconds != null)
+        ? _avgPaceLabel(distanceMeters, durationSeconds)
+        : null;
+
+    final stats = <({String label, String value})>[
+      if (durationSeconds != null && durationSeconds > 0)
+        (label: 'Duration', value: _fmtBlockDuration(durationSeconds)),
+      if (isOutdoor && distanceMeters != null && distanceMeters > 0)
+        (
+          label: 'Distance',
+          value: '${(distanceMeters / 1000).toStringAsFixed(2)} km'
+        ),
+      if (isOutdoor && paceLabel != null) (label: 'Avg Pace', value: paceLabel),
+      if (caloriesBurned != null && caloriesBurned > 0)
+        (label: 'Calories', value: '$caloriesBurned kcal'),
+      if (isOutdoor && elevationGainMeters != null && elevationGainMeters > 0)
+        (label: 'Elevation', value: '${elevationGainMeters.round()} m'),
+      if (!isOutdoor && avgHeartRate != null && avgHeartRate > 0)
+        (label: 'Avg Heart Rate', value: '${avgHeartRate.round()} bpm'),
+    ];
+
+    final hasMapCandidate = isOutdoor && routePoints.isNotEmpty;
+    _cardioBlockHasMap[index] = hasMapCandidate;
+    final isActiveMap = hasMapCandidate && index == _activeCardioMapIndex;
+    final mapSnapshotBase64 = block['mapSnapshotBase64'] as String?;
+    final mapPreviewWidget = hasMapCandidate && !isActiveMap
+        ? _decodeCardioBlockImage(mapSnapshotBase64, height: 180)
+        : null;
+    final photoWidget = _decodeCardioBlockImage(photoBase64);
+
+    return Container(
+      key: _cardioBlockKeys.putIfAbsent(index, () => GlobalKey()),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: WW.elevated,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                _cardioBlockActivityIcon(activity),
+                size: 18,
+                color: WW.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  activity,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: WW.chipBg,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  isOutdoor ? 'Outdoor' : 'Indoor',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: WW.primary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (hasMapCandidate && isActiveMap) ...[
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                height: 180,
+                child: MapLibreMap(
+                  styleString: _kMapStyleUrl,
+                  initialCameraPosition: CameraPosition(
+                    target: routePoints.first,
+                    zoom: 14,
+                  ),
+                  onMapCreated: (controller) =>
+                      _onCardioBlockMapCreated(index, controller),
+                  onStyleLoadedCallback: () =>
+                      _onCardioBlockStyleLoaded(index, routePoints),
+                ),
+              ),
+            ),
+          ] else if (mapPreviewWidget != null) ...[
+            const SizedBox(height: 10),
+            mapPreviewWidget,
+          ],
+          if (stats.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                for (final stat in stats)
+                  Expanded(child: _statCell(stat.label, stat.value)),
+              ],
+            ),
+          ],
+          if (notes != null && notes.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              notes,
+              style: const TextStyle(fontSize: 13, color: WW.text, height: 1.4),
+            ),
+          ],
+          if (photoWidget != null) ...[
+            const SizedBox(height: 10),
+            photoWidget,
           ],
         ],
       ),
     );
   }
 
-  // ── Section 9 — Action bar ────────────────────────────────────────────────
+  // ── Notes section — ported verbatim from
+  // activity_detail_screen.dart's _buildNotesSection(). ────────────────────
+
+  Widget _buildNotesSection() {
+    final notes = _session['notes'] as String?;
+    final hasNotes = notes != null && notes.isNotEmpty;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'NOTES',
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            color: WW.textSec,
+            letterSpacing: 0.5,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          hasNotes ? notes : 'No notes added.',
+          style: TextStyle(
+            fontSize: 14,
+            color: hasNotes ? WW.text : WW.textSec,
+            height: 1.5,
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── Action bar ────────────────────────────────────────────────────────────
 
   Widget _buildActionBar(BuildContext context) {
     return Container(
@@ -1285,9 +1654,9 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
             flex: 2,
             child: GestureDetector(
               onTap: () {
-                if (!_isCardio) {
+                if (_isGym || _isCombined) {
                   final uid = AuthService().getCurrentUser()?.uid;
-                  final pid = _planId;
+                  final pid = _session['planId'] as String?;
                   if (uid != null && pid != null && pid.isNotEmpty) {
                     FirestoreService().markSessionComplete(uid, pid);
                   }
@@ -1373,7 +1742,7 @@ class _WiseCoachTypingDotsState extends State<_WiseCoachTypingDots>
               width: 6,
               height: 6,
               decoration: BoxDecoration(
-                color: WW.lavender.withOpacity(opacity),
+                color: WW.lavender.withValues(alpha: opacity),
                 shape: BoxShape.circle,
               ),
               transform: Matrix4.diagonal3Values(scale, scale, 1),
@@ -1382,64 +1751,6 @@ class _WiseCoachTypingDotsState extends State<_WiseCoachTypingDots>
           },
         );
       }),
-    );
-  }
-}
-
-// ── Stat card ─────────────────────────────────────────────────────────────────
-
-class _StatCard extends StatelessWidget {
-  final String label;
-  final String value;
-  final IconData icon;
-
-  const _StatCard({
-    required this.label,
-    required this.value,
-    required this.icon,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 14, 12, 14),
-      decoration: WW.cardDecoration,
-      child: Column(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: WW.chipBg,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(icon, color: WW.primary, size: 18),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w800,
-              color: WW.text,
-              letterSpacing: -0.2,
-            ),
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 2),
-          Text(
-            label,
-            style: const TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: WW.textSec,
-            ),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
     );
   }
 }
@@ -1509,125 +1820,3 @@ class _PbRow extends StatelessWidget {
     );
   }
 }
-
-// ── Confetti burst ────────────────────────────────────────────────────────────
-
-class _ConfettiBurst extends StatefulWidget {
-  const _ConfettiBurst();
-
-  @override
-  State<_ConfettiBurst> createState() => _ConfettiBurstState();
-}
-
-class _ConfettiBurstState extends State<_ConfettiBurst>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _ctrl;
-
-  static const int _count = 18;
-  static final List<Color> _palette = [
-    WW.primary,
-    WW.teal,
-    WW.lavender,
-    WW.gold,
-    Colors.white,
-  ];
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1600),
-    )..forward();
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final w = constraints.maxWidth;
-        final cx = w / 2;
-        return IgnorePointer(
-          child: AnimatedBuilder(
-            animation: _ctrl,
-            builder: (context, _) {
-              return SizedBox(
-                width: w,
-                height: 200,
-                child: Stack(
-                  children: List.generate(_count, (i) {
-                    final phase = i / _count;
-                    final angle = (phase * 2 * math.pi) - math.pi / 2;
-                    final progress = _ctrl.value;
-                    final t = ((progress - phase * 0.3).clamp(0.0, 1.0));
-                    if (t <= 0) return const SizedBox.shrink();
-                    final radius = t * 120.0;
-                    final x = cx + math.cos(angle) * radius;
-                    final y = 60 + math.sin(angle) * radius * 0.6 + t * t * 60;
-                    final opacity = (1.0 - t * t).clamp(0.0, 1.0);
-                    final color = _palette[i % _palette.length];
-                    return Positioned(
-                      left: x - 4,
-                      top: y - 4,
-                      child: Opacity(
-                        opacity: opacity,
-                        child: Transform.rotate(
-                          angle: t * angle * 3,
-                          child: Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              color: color.withValues(alpha: 0.85),
-                              borderRadius: BorderRadius.circular(2),
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  }),
-                ),
-              );
-            },
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _LegendDot extends StatelessWidget {
-  final Color color;
-  final String label;
-
-  const _LegendDot({required this.color, required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 5),
-        Text(
-          label,
-          style: const TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            color: WW.textSec,
-          ),
-        ),
-      ],
-    );
-  }
-}
-

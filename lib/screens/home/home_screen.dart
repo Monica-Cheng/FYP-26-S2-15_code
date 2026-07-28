@@ -1188,7 +1188,7 @@ class _CalorieRingPainter extends CustomPainter {
 
 // ── Today's Plan card ─────────────────────────────────────────────────────────
 
-class _TodayPlanCard extends StatelessWidget {
+class _TodayPlanCard extends StatefulWidget {
   final String trackedPlanName;
   final VoidCallback? onGoToPlans;
   final Map<String, dynamic>? todaySession;
@@ -1208,9 +1208,19 @@ class _TodayPlanCard extends StatelessWidget {
   });
 
   @override
+  State<_TodayPlanCard> createState() => _TodayPlanCardState();
+}
+
+// Stateful only for the exercise-list expand/collapse toggle below (purely
+// local UI state) — everything else this card renders comes from the
+// widget's own constructor params.
+class _TodayPlanCardState extends State<_TodayPlanCard> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
-    if (trackedPlanName.isEmpty) return _buildEmptyState(context);
-    if (todayIsRestDay) return _buildRestDayCard();
+    if (widget.trackedPlanName.isEmpty) return _buildEmptyState(context);
+    if (widget.todayIsRestDay) return _buildRestDayCard();
     return _buildPlanCard(context);
   }
 
@@ -1232,7 +1242,7 @@ class _TodayPlanCard extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           Text(
-            trackedPlanName,
+            widget.trackedPlanName,
             style: const TextStyle(fontSize: 13, color: WW.textSec),
             textAlign: TextAlign.center,
           ),
@@ -1275,7 +1285,7 @@ class _TodayPlanCard extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           GestureDetector(
-            onTap: onGoToPlans,
+            onTap: widget.onGoToPlans,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
               decoration: BoxDecoration(
@@ -1299,15 +1309,15 @@ class _TodayPlanCard extends StatelessWidget {
 
   Widget _buildPlanCard(BuildContext context) {
     final sessionName =
-        todaySession?['name'] as String? ?? '';
+        widget.todaySession?['name'] as String? ?? '';
     final estimatedMinutes =
-        (todaySession?['estimatedMinutes'] as num?)?.toInt() ?? 45;
+        (widget.todaySession?['estimatedMinutes'] as num?)?.toInt() ?? 45;
     final allExercises =
-        (todaySession?['exercises'] as List<dynamic>?)
+        (widget.todaySession?['exercises'] as List<dynamic>?)
             ?.cast<Map<String, dynamic>>() ??
             [];
     // FIX 3: filter to Primary-only when session is compressed.
-    final exercises = isCompressed
+    final exercises = widget.isCompressed
         ? allExercises.where((e) => e['tag'] == 'Primary').toList()
         : allExercises;
     final estimatedCals = (estimatedMinutes * 6.5).round();
@@ -1332,7 +1342,7 @@ class _TodayPlanCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
-                    'DAY $currentDayIndex',
+                    'DAY ${widget.currentDayIndex}',
                     style: const TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w800,
@@ -1347,7 +1357,7 @@ class _TodayPlanCard extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        trackedPlanName,
+                        widget.trackedPlanName,
                         style: const TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w700,
@@ -1366,7 +1376,7 @@ class _TodayPlanCard extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
-                      if (isCompressed) ...[
+                      if (widget.isCompressed) ...[
                         const SizedBox(height: 4),
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -1417,23 +1427,25 @@ class _TodayPlanCard extends StatelessWidget {
               height: 1, color: WW.elevated, indent: 16, endIndent: 16),
           const SizedBox(height: 10),
 
-          // Exercise list — show first 5, "+N more" if needed
-          ...exercises.take(5).map((e) {
-            final name = e['name'] as String? ?? 'Exercise';
-            final setsCount =
-                FirestoreService.parseExerciseSets(e['sets'], 3).length;
-            final reps = (e['reps'] as num?)?.toInt();
-            final label = reps != null && reps > 0
-                ? '$setsCount × $reps reps'
-                : '$setsCount sets';
-            return _exerciseTile(name, label);
-          }),
+          // Exercise list — show first 5 by default, expandable to the
+          // full list in place (see _expanded) rather than navigating
+          // anywhere else.
+          ...(_expanded ? exercises : exercises.take(5).toList())
+              .map((e) => _buildExerciseRow(e)),
           if (exercises.length > 5)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-              child: Text(
-                '+ ${exercises.length - 5} more',
-                style: const TextStyle(fontSize: 12, color: WW.textSec),
+              child: GestureDetector(
+                onTap: () => setState(() => _expanded = !_expanded),
+                behavior: HitTestBehavior.opaque,
+                child: Text(
+                  _expanded ? 'Show less' : 'See all (${exercises.length})',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: WW.primary,
+                  ),
+                ),
               ),
             ),
 
@@ -1442,7 +1454,7 @@ class _TodayPlanCard extends StatelessWidget {
           // Start Workout / Completed today
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: todayCompleted
+            child: widget.todayCompleted
                 ? Container(
                     height: 50,
                     decoration: BoxDecoration(
@@ -1503,19 +1515,60 @@ class _TodayPlanCard extends StatelessWidget {
     );
   }
 
-  Widget _exerciseTile(String name, String sets) {
+  // Branches on isCardio (build_routine_screen.dart's _addCardioBlock()
+  // writes 'isCardio': true, 'cardioActivity': <Run/Walk/Cycle>,
+  // 'cardioMinutes': <int> for these entries — see that method) rather
+  // than computing setsCount/reps from the fake single-entry 'sets' array
+  // and absent top-level 'reps' field it also seeds purely so older
+  // sets-based renderers wouldn't crash on a cardio block.
+  Widget _buildExerciseRow(Map<String, dynamic> e) {
+    if (e['isCardio'] == true) {
+      final activity = e['cardioActivity'] as String? ?? 'Cardio';
+      final minutes = (e['cardioMinutes'] as num?)?.toInt();
+      final duration = minutes != null && minutes > 0 ? '$minutes min' : '';
+      return _exerciseTile(activity, duration, icon: _cardioIcon(activity));
+    }
+    final name = e['name'] as String? ?? 'Exercise';
+    final setsCount =
+        FirestoreService.parseExerciseSets(e['sets'], 3).length;
+    final reps = (e['reps'] as num?)?.toInt();
+    final label = reps != null && reps > 0
+        ? '$setsCount × $reps reps'
+        : '$setsCount sets';
+    return _exerciseTile(name, label);
+  }
+
+  // Same Run/Walk/Cycle icon mapping already used by cardio_setup_screen.dart's
+  // _kActivities and activity_detail_screen.dart's _headerIcon — reused
+  // here (duplicated, not imported, since those are private to their own
+  // files) rather than inventing a new mapping. Run/unrecognized falls
+  // back to the running icon, matching both of those files' own default.
+  IconData _cardioIcon(String activity) {
+    switch (activity) {
+      case 'Walk':
+        return Icons.directions_walk_rounded;
+      case 'Cycle':
+        return Icons.directions_bike_rounded;
+      default:
+        return Icons.directions_run_rounded;
+    }
+  }
+
+  Widget _exerciseTile(String name, String sets, {IconData? icon}) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
       child: Row(
         children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: const BoxDecoration(
-              color: WW.primary,
-              shape: BoxShape.circle,
-            ),
-          ),
+          icon != null
+              ? Icon(icon, size: 14, color: WW.primary)
+              : Container(
+                  width: 8,
+                  height: 8,
+                  decoration: const BoxDecoration(
+                    color: WW.primary,
+                    shape: BoxShape.circle,
+                  ),
+                ),
           const SizedBox(width: 10),
           Expanded(
             child: Text(

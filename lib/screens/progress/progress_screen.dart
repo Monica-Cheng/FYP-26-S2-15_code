@@ -1,5 +1,6 @@
 // lib/screens/progress/progress_screen.dart
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -56,6 +57,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
   List<Map<String, dynamic>> _sessions = [];
   bool _sessionsLoading = true;
+  StreamSubscription<List<Map<String, dynamic>>>? _sessionsSub;
   int _totalXp = 0;
   int _level = 1;
   List<Map<String, dynamic>> _xpEvents = [];
@@ -130,7 +132,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
   @override
   void initState() {
     super.initState();
-    _loadSessions();
+    _startSessionsStream();
     _loadXpData();
     _loadXpEvents();
     _loadChartData();
@@ -142,6 +144,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
   @override
   void dispose() {
+    _sessionsSub?.cancel();
     _weightSub?.cancel();
     _userDocSub?.cancel();
     super.dispose();
@@ -254,22 +257,36 @@ class _ProgressScreenState extends State<ProgressScreen> {
     }
   }
 
-  Future<void> _loadSessions() async {
+  // Live stream (was a one-shot getRecentSessions() fetch) — mirrors
+  // _startWeightStream()'s exact pattern: a StreamSubscription field
+  // started here, cancelled in dispose(), updating state via setState on
+  // each snapshot. _sessionsLoading stays true until the first snapshot
+  // arrives (same convention as _weightLoading), not just "stream
+  // started" (unlike _checkInsStream/_checkInsLoading, which is consumed
+  // via a StreamBuilder elsewhere and has its own connectionState check
+  // to cover the "waiting for first data" gap — no StreamBuilder is used
+  // for sessions, so _sessionsLoading itself has to cover that here).
+  void _startSessionsStream() {
     final uid = AuthService().getCurrentUser()?.uid;
     if (uid == null) {
       setState(() => _sessionsLoading = false);
       return;
     }
-    try {
-      final result = await FirestoreService().getRecentSessions(uid, limit: 20);
-      if (!mounted) return;
-      setState(() {
-        _sessions = result;
-        _sessionsLoading = false;
-      });
-    } catch (_) {
-      if (mounted) setState(() => _sessionsLoading = false);
-    }
+    _sessionsSub = FirestoreService()
+        .getRecentSessionsStream(uid, limit: 20)
+        .listen(
+          (sessions) {
+            if (mounted) {
+              setState(() {
+                _sessions = sessions;
+                _sessionsLoading = false;
+              });
+            }
+          },
+          onError: (_) {
+            if (mounted) setState(() => _sessionsLoading = false);
+          },
+        );
   }
 
   Future<void> _loadGoalWeight() async {
@@ -475,19 +492,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
   String _formatDuration(int? seconds) {
     if (seconds == null) return '';
+    if (seconds < 60) return '${seconds}s';
     final mins = seconds ~/ 60;
     if (mins < 60) return '$mins min';
     return '${mins ~/ 60}h ${mins % 60}m';
-  }
-
-  String _buildManualSubtitle(Map<String, dynamic> session) {
-    final date = _formatDate(session['date'] as Timestamp?);
-    final mins = session['durationMinutes'];
-    final cals = session['caloriesBurned'];
-    final parts = [date];
-    if (mins != null) parts.add('$mins min');
-    if (cals != null) parts.add('$cals kcal');
-    return parts.join(' · ');
   }
 
   String _formatVolume(double? v) {
@@ -1520,15 +1528,29 @@ class _ProgressScreenState extends State<ProgressScreen> {
     return ListView.separated(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
       itemCount: sessions.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      // Flat rows now (no boxed cards — see _ActivityCard), so a thin
+      // divider marks the boundary between rows instead of a gap.
+      separatorBuilder: (_, __) => Container(height: 0.5, color: WW.border),
       itemBuilder: (_, i) {
         final s = sessions[i];
         final isManual = s['isManuallyLogged'] == true;
+        final dateLabel = _formatDate(s['date'] as Timestamp?);
 
         if (isManual) {
+          final mins = s['durationMinutes'];
+          final cals = s['caloriesBurned'];
+          final dist = s['distance'];
           return _ActivityCard(
             title: s['activityName'] as String? ?? 'Manual Activity',
-            subtitle: _buildManualSubtitle(s),
+            dateLabel: dateLabel,
+            stats: [
+              ('Duration', mins != null ? '$mins min' : '--'),
+              ('Calories', cals != null ? '$cals kcal' : '--'),
+              (
+                'Distance',
+                dist is num ? '${dist.toStringAsFixed(1)} km' : '--',
+              ),
+            ],
             xpLabel: 'Manual',
             isCardio: false,
             isManual: true,
@@ -1537,29 +1559,71 @@ class _ProgressScreenState extends State<ProgressScreen> {
         }
 
         final isCardio = s['type'] == 'cardio';
-        final ts = s['date'] as Timestamp?;
-        final duration = _formatDuration(s['durationSeconds'] as int?);
+        final durationSecondsRaw = s['durationSeconds'] as int?;
+        final duration = _formatDuration(durationSecondsRaw);
         final sets = s['totalSets'] as int? ?? 0;
         final volume = _formatVolume((s['totalVolume'] as num?)?.toDouble());
         final xp = (s['xpEarned'] as num?)?.toInt() ?? 0;
+        final distanceMeters = (s['distanceMeters'] as num?)?.toDouble();
+        final caloriesBurned = (s['caloriesBurned'] as num?)?.toInt();
+        final activity = s['activity'] as String?;
 
-        final parts = <String>[_formatDate(ts)];
-        if (duration.isNotEmpty) parts.add(duration);
-        if (!isCardio && sets > 0) parts.add('$sets sets');
-        if (!isCardio && volume.isNotEmpty) parts.add(volume);
-        final subtitle = parts.join(' · ');
+        final List<(String, String)> stats;
+        if (isCardio) {
+          final distanceLabel = (distanceMeters != null && distanceMeters > 0)
+              ? '${(distanceMeters / 1000).toStringAsFixed(2)} km'
+              : '--';
+          // Same 50m floor as outdoor_cardio_screen.dart's own pace
+          // display — below that, pace math is too noisy to be
+          // meaningful (a few meters of GPS jitter swings it wildly).
+          var paceLabel = '--';
+          if (distanceMeters != null &&
+              distanceMeters >= 50 &&
+              durationSecondsRaw != null &&
+              durationSecondsRaw > 0) {
+            final secondsPerKm = durationSecondsRaw / (distanceMeters / 1000);
+            if (secondsPerKm.isFinite) {
+              final paceMins = secondsPerKm ~/ 60;
+              final paceSecs = (secondsPerKm % 60).round();
+              paceLabel = '${paceMins.toString().padLeft(2, '0')}:'
+                  '${paceSecs.toString().padLeft(2, '0')}';
+            }
+          }
+          stats = [
+            ('Distance', distanceLabel),
+            ('Avg Pace', paceLabel),
+            ('Time', duration.isNotEmpty ? duration : '--'),
+          ];
+        } else {
+          stats = [
+            ('Sets', sets > 0 ? '$sets' : '--'),
+            ('Volume', volume.isNotEmpty ? volume : '--'),
+            (
+              'Calories',
+              caloriesBurned != null ? '$caloriesBurned kcal' : '--',
+            ),
+          ];
+        }
 
         return _ActivityCard(
           title: s['sessionName'] as String? ?? 'Workout',
-          subtitle: subtitle,
+          dateLabel: dateLabel,
+          stats: stats,
           xpLabel: '+$xp XP',
           isCardio: isCardio,
+          activity: activity,
+          mapSnapshotBase64: s['mapSnapshotBase64'] as String?,
           onTap: () => context.push(Routes.activityDetail, extra: s),
         );
       },
     );
   }
 
+  // Flat, color-only tab style — same pattern as _buildSubtabs() above and
+  // Club's subtab rows (font-weight + color change, no pill background) —
+  // replaces the old filled-pill chips, which were also the source of
+  // this file's only two hardcoded hex colors (0xFFF2F2F7 background,
+  // Colors.white active text) instead of WW.* tokens.
   Widget _buildActivityFilter() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
@@ -1567,26 +1631,15 @@ class _ProgressScreenState extends State<ProgressScreen> {
         children: List.generate(_actLabels.length, (i) {
           final active = i == _activityFilter;
           return Padding(
-            padding: EdgeInsets.only(right: i < _actLabels.length - 1 ? 8 : 0),
+            padding: EdgeInsets.only(right: i < _actLabels.length - 1 ? 20 : 0),
             child: GestureDetector(
               onTap: () => setState(() => _activityFilter = i),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                height: 30,
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                decoration: BoxDecoration(
-                  color: active ? WW.primary : const Color(0xFFF2F2F7),
-                  borderRadius: BorderRadius.circular(15),
-                ),
-                child: Center(
-                  child: Text(
-                    _actLabels[i],
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: active ? Colors.white : WW.textSec,
-                    ),
-                  ),
+              child: Text(
+                _actLabels[i],
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                  color: active ? WW.primary : WW.textSec,
                 ),
               ),
             ),
@@ -1982,79 +2035,151 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
 // ── Activity card ─────────────────────────────────────────────────────────────
 
+// NRC-style layout: a wide banner thumbnail (route snapshot, or an
+// icon-only fallback header) on top, then title + date, then a 3-stat
+// row underneath — replaces the previous slim icon-left/text-right row
+// now that cardio sessions can have a real map image to lead with.
+// Still flat (no card border/shadow, single accent color) — only the
+// content layout changed, not the "no boxed cards" design direction.
 class _ActivityCard extends StatelessWidget {
   final String title;
-  final String subtitle;
+  final String dateLabel;
+  final List<(String, String)> stats;
   final String xpLabel;
   final bool isCardio;
   final bool isManual;
+  final String? activity;
+  final String? mapSnapshotBase64;
   final VoidCallback? onTap;
+
+  static const double _headerHeight = 120;
 
   const _ActivityCard({
     required this.title,
-    required this.subtitle,
+    required this.dateLabel,
+    required this.stats,
     required this.xpLabel,
     required this.isCardio,
     this.isManual = false,
+    this.activity,
+    this.mapSnapshotBase64,
     this.onTap,
   });
 
+  // Matches cardio_setup_screen.dart's own Run/Walk/Cycle icon choices
+  // exactly, for consistency across the app, instead of showing the same
+  // running icon for every cardio type regardless of activity.
+  IconData get _iconData {
+    if (isManual) return Icons.edit_note_rounded;
+    if (!isCardio) return Icons.fitness_center_rounded;
+    switch (activity) {
+      case 'Walk':
+        return Icons.directions_walk_rounded;
+      case 'Cycle':
+        return Icons.directions_bike_rounded;
+      default:
+        return Icons.directions_run_rounded;
+    }
+  }
+
+  // Fallback header when there's no snapshot to show (gym, manual, or a
+  // cardio session saved before this feature existed) — same footprint
+  // as the thumbnail so the card doesn't resize depending on which is
+  // shown.
+  Widget _buildIconHeader() {
+    return Container(
+      height: _headerHeight,
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: WW.elevated,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Center(child: Icon(_iconData, color: WW.textSec, size: 36)),
+    );
+  }
+
+  Widget _buildStatCell(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            color: WW.text,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(label, style: const TextStyle(fontSize: 11, color: WW.textSec)),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final Color barColor;
-    final Color iconColor;
-    final IconData iconData;
-
-    if (isManual) {
-      barColor = WW.lavender;
-      iconColor = WW.lavender;
-      iconData = Icons.edit_note_rounded;
-    } else if (isCardio) {
-      barColor = WW.teal;
-      iconColor = WW.teal;
-      iconData = Icons.directions_run_rounded;
+    // Map thumbnail replaces the icon-only header when a snapshot is
+    // present (outdoor cardio sessions saved after the snapshot feature
+    // landed) — same footprint either way so cards don't resize
+    // depending on which is shown. Gym/manual rows and any cardio
+    // session saved before this field existed simply have no snapshot
+    // and fall straight back to the icon header; a decode failure does
+    // the same rather than breaking the card.
+    Widget header;
+    final snapshot = mapSnapshotBase64;
+    if (snapshot != null) {
+      try {
+        final bytes = base64Decode(snapshot);
+        header = ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: Image.memory(
+            bytes,
+            height: _headerHeight,
+            width: double.infinity,
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => _buildIconHeader(),
+          ),
+        );
+      } catch (_) {
+        header = _buildIconHeader();
+      }
     } else {
-      barColor = WW.primary;
-      iconColor = WW.primary;
-      iconData = Icons.fitness_center_rounded;
+      header = _buildIconHeader();
     }
 
+    // One consistent XP-badge color regardless of session type — matches
+    // the "one accent color, not one per category" flat-design principle
+    // already applied to Club/Progress elsewhere. The manual/earned
+    // distinction is still legible from the badge's own text ("Manual"
+    // vs "+X XP"), so a separate color for that isn't needed to keep it
+    // clear.
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        decoration: WW.cardDecoration,
-        clipBehavior: Clip.hardEdge,
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Left color bar
-              Container(width: 4, color: barColor),
-
-              // Icon
-              Padding(
-                padding: const EdgeInsets.fromLTRB(10, 14, 4, 14),
-                child: Icon(iconData, color: iconColor, size: 22),
-              ),
-
-              // Content
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(6, 12, 10, 12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            header,
+            const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         title,
                         style: const TextStyle(
-                          fontSize: 14,
+                          fontSize: 15,
                           fontWeight: FontWeight.w700,
                           color: WW.text,
                         ),
                       ),
-                      const SizedBox(height: 3),
+                      const SizedBox(height: 2),
                       Text(
-                        subtitle,
+                        dateLabel,
                         style: const TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w500,
@@ -2064,35 +2189,35 @@ class _ActivityCard extends StatelessWidget {
                     ],
                   ),
                 ),
-              ),
-
-              // Badge: XP for gym/cardio, "Manual" label for manual logs
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 14,
-                ),
-                child: Container(
+                const SizedBox(width: 8),
+                Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 8,
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: isManual ? WW.lavenderBg : WW.tealBg,
+                    color: WW.tealBg,
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
                     xpLabel,
-                    style: TextStyle(
+                    style: const TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w700,
-                      color: isManual ? WW.lavenderText : WW.teal,
+                      color: WW.teal,
                     ),
                   ),
                 ),
-              ),
-            ],
-          ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                for (final stat in stats)
+                  Expanded(child: _buildStatCell(stat.$1, stat.$2)),
+              ],
+            ),
+          ],
         ),
       ),
     );

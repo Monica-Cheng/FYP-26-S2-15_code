@@ -946,6 +946,26 @@ class _PlanCard extends StatelessWidget {
     required this.onTap,
   });
 
+  // Same plan['sport']/plan['type'] field and three-way branching structure
+  // (running/gym/default) as _ExploreScreenState's own _accentColor(), kept
+  // consistent so the icon and accent color always agree about a plan's
+  // category. Icons.fitness_center_rounded matches this app's own
+  // established gym icon elsewhere (e.g. gym_session_screen.dart's
+  // exercises-empty state, activity_detail_screen.dart's _headerIcon).
+  // Icons.sports_rounded is a neutral "other/unspecified" fallback — not
+  // tied to any particular sport, mirroring _accentColor()'s own neutral
+  // WW.lavender default.
+  IconData _sportIcon(String sport) {
+    switch (sport.toLowerCase()) {
+      case 'running':
+        return Icons.directions_run_rounded;
+      case 'gym':
+        return Icons.fitness_center_rounded;
+      default:
+        return Icons.sports_rounded;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final name = plan['name'] as String? ?? '';
@@ -1026,7 +1046,18 @@ class _PlanCard extends StatelessWidget {
                           if (level.isNotEmpty)
                             _Chip(label: level, bg: WW.chipBg, textColor: WW.primary),
                           if (sport.isNotEmpty)
-                            _Chip(label: sport, bg: WW.elevated, textColor: WW.textSec),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(_sportIcon(sport),
+                                    size: 12, color: WW.textSec),
+                                const SizedBox(width: 3),
+                                _Chip(
+                                    label: sport,
+                                    bg: WW.elevated,
+                                    textColor: WW.textSec),
+                              ],
+                            ),
                           if (days > 0)
                             _Chip(label: '$days d/wk', bg: WW.elevated, textColor: WW.textSec),
                           if (goal.isNotEmpty)
