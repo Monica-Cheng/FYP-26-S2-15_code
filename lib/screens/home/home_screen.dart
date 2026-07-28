@@ -31,6 +31,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
+  int _clubInitialSubtab = 0;
   final _homeTabKey = GlobalKey<_HomeTabState>();
 
   static const List<_TabItem> _tabItems = [
@@ -41,15 +42,28 @@ class _HomeScreenState extends State<HomeScreen> {
     _TabItem(label: 'Progress', icon: Icons.bar_chart_rounded),
   ];
 
-  late final List<Widget> _tabs = [
-    _HomeTab(key: _homeTabKey, onGoToPlans: () => _onTabTap(1)),
-    const PlansScreen(),
-    const CoachScreen(),
-    const ClubScreen(),
-    const ProgressScreen(),
-  ];
+  List<Widget> get _tabs => [
+        _HomeTab(
+          key: _homeTabKey,
+          onGoToPlans: () => _onTabTap(1),
+          onGoToClubFriends: _goToClubFriends,
+        ),
+        const PlansScreen(),
+        const CoachScreen(),
+        ClubScreen(initialSubtab: _clubInitialSubtab),
+        const ProgressScreen(),
+      ];
 
   void _onTabTap(int index) => setState(() => _selectedIndex = index);
+
+  // Switches to the Club tab with its Friends subtab selected — used when
+  // tapping a friend-request notification in the bell's bottom sheet.
+  void _goToClubFriends() {
+    setState(() {
+      _selectedIndex = 3;
+      _clubInitialSubtab = ClubScreen.kFriendsSubtabIndex;
+    });
+  }
 
   void _onFabTap() {
     showQuickAddSheet(context, [
@@ -179,7 +193,8 @@ class _BottomNav extends StatelessWidget {
 
 class _HomeTab extends StatefulWidget {
   final VoidCallback? onGoToPlans;
-  const _HomeTab({super.key, this.onGoToPlans});
+  final VoidCallback? onGoToClubFriends;
+  const _HomeTab({super.key, this.onGoToPlans, this.onGoToClubFriends});
 
   @override
   State<_HomeTab> createState() => _HomeTabState();
@@ -206,6 +221,8 @@ class _HomeTabState extends State<_HomeTab> {
   bool _isSessionCompressed = false;
   StreamSubscription<DocumentSnapshot>? _userStreamSub;
   StreamSubscription<Map<String, dynamic>?>? _progressStreamSub;
+  StreamSubscription<List<Map<String, dynamic>>>? _notificationsSub;
+  int _unreadNotificationCount = 0;
   bool _showMissedBanner = false;
   String _missedSessionDate = '';
   String _missedPlanId = '';
@@ -217,6 +234,18 @@ class _HomeTabState extends State<_HomeTab> {
     super.initState();
     _loadUserData();
     _startUserStream();
+    _startNotificationsStream();
+  }
+
+  void _startNotificationsStream() {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    _notificationsSub =
+        _firestoreService.getNotificationsStream(uid).listen((notifications) {
+      if (!mounted) return;
+      final unread = notifications.where((n) => n['read'] != true).length;
+      setState(() => _unreadNotificationCount = unread);
+    });
   }
 
   void _startUserStream() {
@@ -429,6 +458,7 @@ class _HomeTabState extends State<_HomeTab> {
   void dispose() {
     _userStreamSub?.cancel();
     _progressStreamSub?.cancel();
+    _notificationsSub?.cancel();
     super.dispose();
   }
 
@@ -484,6 +514,135 @@ class _HomeTabState extends State<_HomeTab> {
   Future<void> _handleLogout() async {
     await _authService.signOut();
     if (mounted) context.go(Routes.login);
+  }
+
+  void _showNotificationsSheet() {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return SizedBox(
+          height: MediaQuery.of(ctx).size.height * 0.7,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(top: 10, bottom: 14),
+                  decoration: BoxDecoration(
+                    color: WW.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(18, 0, 18, 12),
+                child: Text(
+                  'Notifications',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                    color: WW.primaryDark,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: StreamBuilder<List<Map<String, dynamic>>>(
+                  stream: _firestoreService.getNotificationsStream(uid),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return const Center(
+                        child: CircularProgressIndicator(color: WW.primary),
+                      );
+                    }
+                    final notifications = snapshot.data ?? [];
+                    if (notifications.isEmpty) {
+                      return const Center(
+                        child: Text(
+                          'No notifications yet',
+                          style: TextStyle(fontSize: 13, color: WW.textSec),
+                        ),
+                      );
+                    }
+                    return ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(18, 0, 18, 24),
+                      itemCount: notifications.length,
+                      separatorBuilder: (_, __) =>
+                          const Divider(height: 1, color: WW.elevated),
+                      itemBuilder: (_, i) {
+                        final n = notifications[i];
+                        final read = n['read'] == true;
+                        final notificationId = n['notificationId'] as String?;
+                        return InkWell(
+                          onTap: notificationId == null
+                              ? null
+                              : () {
+                                  _firestoreService.markNotificationRead(
+                                      uid, notificationId);
+                                  if (n['type'] == 'friend_request') {
+                                    Navigator.pop(ctx);
+                                    widget.onGoToClubFriends?.call();
+                                  }
+                                },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  margin: const EdgeInsets.only(right: 10),
+                                  decoration: BoxDecoration(
+                                    color: read ? Colors.transparent : WW.primary,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                Expanded(
+                                  child: Text(
+                                    _notificationText(n),
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight:
+                                          read ? FontWeight.w500 : FontWeight.w700,
+                                      color: WW.text,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  String _notificationText(Map<String, dynamic> n) {
+    final type = n['type'] as String? ?? '';
+    final fromName = n['fromDisplayName'] as String? ?? 'Someone';
+    switch (type) {
+      case 'friend_request':
+        return '$fromName sent you a friend request';
+      case 'friend_accepted':
+        return '$fromName accepted your friend request';
+      default:
+        return 'New notification';
+    }
   }
 
   String _greeting() {
@@ -600,8 +759,26 @@ class _HomeTabState extends State<_HomeTab> {
           ),
           // Bell icon
           IconButton(
-            icon: const Icon(Icons.notifications_outlined, color: WW.textSec, size: 24),
-            onPressed: () {},
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const Icon(Icons.notifications_outlined, color: WW.textSec, size: 24),
+                if (_unreadNotificationCount > 0)
+                  Positioned(
+                    right: -2,
+                    top: -2,
+                    child: Container(
+                      width: 9,
+                      height: 9,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFEF4444),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            onPressed: _showNotificationsSheet,
           ),
           const SizedBox(width: 4),
           // Avatar → Profile screen

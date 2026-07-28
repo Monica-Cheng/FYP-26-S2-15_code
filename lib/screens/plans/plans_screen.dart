@@ -60,7 +60,10 @@ class _PlansScreenState extends State<PlansScreen> {
         .snapshots()
         .skip(1) // skip initial snapshot — initState already called _loadPlans()
         .listen((snap) {
-      if (mounted) _loadPlans();
+      if (mounted) {
+        _loadPlans();
+        _loadTrackedPlan();
+      }
     });
   }
 
@@ -317,132 +320,133 @@ class _PlansScreenState extends State<PlansScreen> {
     final level = plan['level'] as String? ?? '';
     final days = (plan['daysPerWeek'] as num?)?.toInt() ?? 0;
 
-    return Container(
-      decoration: WW.cardDecoration,
-      clipBehavior: Clip.hardEdge,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Dark header strip
-          Container(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-            color: WW.primaryDark,
-            child: Row(
-              children: [
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: WW.primary,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: const Text(
-                    'TRACKED',
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
-                      letterSpacing: 0.4,
+    return GestureDetector(
+      onTap: () => context.push(Routes.gymSession,
+          extra: {'readOnly': true}),
+      child: Container(
+        decoration: WW.cardDecoration,
+        clipBehavior: Clip.hardEdge,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Dark header strip
+            Container(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+              color: WW.primaryDark,
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: WW.primary,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Text(
+                      'TRACKED',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                        letterSpacing: 0.5,
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ),
-          ),
-          // Body
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  name,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: WW.primaryDark,
-                    letterSpacing: -0.2,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: WW.elevated,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    '$type · $level · $days days/week',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: WW.textSec,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                // Buttons row
-                Row(
-                  children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => context.push(Routes.gymSession),
-                        child: Container(
-                          height: 42,
-                          decoration: BoxDecoration(
-                            color: WW.primary,
-                            borderRadius: BorderRadius.circular(11),
-                            boxShadow: [
-                              BoxShadow(
-                                color: WW.primary.withOpacity(0.3),
-                                blurRadius: 10,
-                                offset: const Offset(0, 3),
-                              ),
-                            ],
-                          ),
-                          child: const Center(
-                            child: Text(
-                              'Continue Session',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                                color: Colors.white,
-                              ),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: () => context.push(
+                        Routes.planSchedule,
+                        extra: _trackedPlan),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        border: Border.all(
+                            color: Colors.white38, width: 1),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.calendar_month_rounded,
+                              color: Colors.white70, size: 12),
+                          SizedBox(width: 4),
+                          Text(
+                            'Schedule',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white70,
                             ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // Body
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          name,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            color: WW.text,
+                            letterSpacing: -0.2,
                           ),
                         ),
                       ),
+                      const Icon(Icons.chevron_right_rounded,
+                          color: WW.textSec, size: 20),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: WW.elevated,
+                      borderRadius: BorderRadius.circular(8),
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => context.push(Routes.planSchedule, extra: _trackedPlan),
-                        child: Container(
-                          height: 42,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(11),
-                            border: Border.all(color: WW.primary, width: 1.5),
-                          ),
-                          child: const Center(
-                            child: Text(
-                              'Schedule',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                                color: WW.primary,
-                              ),
-                            ),
-                          ),
-                        ),
+                    child: Text(
+                      '$type · $level · $days days/week',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: WW.textSec,
                       ),
                     ),
-                  ],
-                ),
-              ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      const Icon(Icons.play_circle_outline_rounded,
+                          color: WW.primary, size: 16),
+                      const SizedBox(width: 6),
+                      const Text(
+                        'Tap to preview & start session',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: WW.primary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

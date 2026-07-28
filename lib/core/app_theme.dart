@@ -84,6 +84,26 @@ class WW {
     color: textSec,
   );
 
+  // Shared flat-list-row styles — reused by any screen rendering
+  // "avatar + name + stat" rows (e.g. Club's Leaderboard/Friends tabs).
+  // rowStat has no fixed color since callers vary it per row (e.g. the
+  // current user's own row vs. everyone else's) via .copyWith(color: ...).
+  static const TextStyle rowName = TextStyle(
+    fontSize: 14,
+    fontWeight: FontWeight.w600,
+    color: text,
+  );
+  static const TextStyle rowSecondary = TextStyle(
+    fontSize: 12,
+    fontWeight: FontWeight.w500,
+    color: textSec,
+  );
+  static const TextStyle rowStat = TextStyle(
+    fontSize: 15,
+    fontWeight: FontWeight.w700,
+    color: text,
+  );
+
   // Theme data for MaterialApp
   static ThemeData get theme => ThemeData(
     scaffoldBackgroundColor: bg,

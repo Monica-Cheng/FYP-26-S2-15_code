@@ -35,6 +35,9 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
   bool _healthPermissionGranted = false;
   Timer? _heartRateTimer;
   DateTime? _sessionStartTime;
+  bool _showInjuryWarning = false;
+  List<Map<String, dynamic>> _activeInjuries = [];
+  bool _injuryWarningDismissed = false;
 
   @override
   void initState() {
@@ -50,6 +53,7 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
             extra?['plannedMinutes'] as int? ?? 0;
       });
       _loadUserWeight();
+      _loadInjuryWarning();
       _startTimer();
       _sessionStartTime = DateTime.now();
       _initHealthKit();
@@ -77,6 +81,26 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
           raw.replaceAll(RegExp(r'[^0-9.]'), ''));
       if (parsed != null) setState(() => _weightKg = parsed);
     }
+  }
+
+  Future<void> _loadInjuryWarning() async {
+    if (_uid == null) return;
+    try {
+      final data = await FirestoreService()
+          .getUserInjuryData(_uid!);
+      final enabled =
+          data['injuryFilteringEnabled'] as bool? ?? false;
+      if (!enabled) return;
+      final injuries = List<Map<String, dynamic>>.from(
+          data['injuries'] as List? ?? []);
+      if (injuries.isEmpty) return;
+      if (mounted) {
+        setState(() {
+          _activeInjuries = injuries;
+          _showInjuryWarning = true;
+        });
+      }
+    } catch (_) {}
   }
 
   double get _calories {
@@ -263,6 +287,76 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
     }
   }
 
+  Widget _buildInjuryWarningBanner() {
+    if (!_showInjuryWarning || _injuryWarningDismissed) {
+      return const SizedBox.shrink();
+    }
+    final injuryNames = _activeInjuries
+        .map((i) => i['name'] as String? ?? '')
+        .where((n) => n.isNotEmpty)
+        .join(', ');
+    return Container(
+      width: double.infinity,
+      color: const Color(0xFFFEF3C7),
+      padding: EdgeInsets.fromLTRB(
+        16,
+        MediaQuery.of(context).padding.top + 10,
+        12,
+        10,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 2),
+            child: Icon(Icons.healing_rounded,
+                color: Color(0xFFD97706), size: 16),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Injury Alert',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF92400E),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Active injuries: $injuryNames. Listen to your body and stop if you feel pain. This is not medical advice.',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF92400E),
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              setState(() => _injuryWarningDismissed = true);
+            },
+            child: const Padding(
+              padding: EdgeInsets.all(4),
+              child: Icon(
+                Icons.close_rounded,
+                size: 18,
+                color: Color(0xFF92400E),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -276,6 +370,7 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
       backgroundColor: WW.primaryDark,
       body: Column(
         children: [
+          _buildInjuryWarningBanner(),
           // ── Top section ───────────────────────────────────────────────────
           Container(
             color: WW.primaryDark,

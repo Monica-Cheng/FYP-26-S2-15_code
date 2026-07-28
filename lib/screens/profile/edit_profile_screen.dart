@@ -31,6 +31,11 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   late final TextEditingController _usernameCtrl;
   late final TextEditingController _hometownCtrl;
   late final TextEditingController _bioCtrl;
+  late final FocusNode _usernameFocusNode;
+
+  String? _usernameFieldError;
+  bool _usernameChecking = false;
+  bool _usernameValid = false;
 
   bool get _isDirty =>
       _nameCtrl.text != _origName ||
@@ -51,6 +56,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     _hometownCtrl.addListener(_rebuild);
     _bioCtrl.addListener(_rebuild);
 
+    _usernameFocusNode = FocusNode();
+    _usernameFocusNode.addListener(_onUsernameFocusChange);
+
     _loadProfile();
   }
 
@@ -62,11 +70,80 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     _usernameCtrl.removeListener(_rebuild);
     _hometownCtrl.removeListener(_rebuild);
     _bioCtrl.removeListener(_rebuild);
+    _usernameFocusNode.removeListener(_onUsernameFocusChange);
+    _usernameFocusNode.dispose();
     _nameCtrl.dispose();
     _usernameCtrl.dispose();
     _hometownCtrl.dispose();
     _bioCtrl.dispose();
     super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
+  // On-blur username validation — runs format checks, then the async
+  // uniqueness check (skipped if unchanged from the loaded username).
+  // ---------------------------------------------------------------------------
+  void _onUsernameFocusChange() {
+    if (_usernameFocusNode.hasFocus) return;
+    final username = _usernameCtrl.text.trim();
+    if (username.isEmpty) {
+      setState(() {
+        _usernameFieldError = null;
+        _usernameValid = false;
+        _usernameChecking = false;
+      });
+      return;
+    }
+    _validateUsernameInline(username);
+  }
+
+  Future<void> _validateUsernameInline(String username) async {
+    if (username.length < 3 || username.length > 20) {
+      setState(() {
+        _usernameFieldError = 'Username must be between 3 and 20 characters.';
+        _usernameValid = false;
+        _usernameChecking = false;
+      });
+      return;
+    }
+    if (!RegExp(r'^[a-z0-9_]+$').hasMatch(username)) {
+      setState(() {
+        _usernameFieldError =
+            'Username can only contain lowercase letters, numbers, and underscores.';
+        _usernameValid = false;
+        _usernameChecking = false;
+      });
+      return;
+    }
+    if (username == _origUsername) {
+      setState(() {
+        _usernameFieldError = null;
+        _usernameValid = true;
+        _usernameChecking = false;
+      });
+      return;
+    }
+    setState(() {
+      _usernameFieldError = null;
+      _usernameChecking = true;
+      _usernameValid = false;
+    });
+    try {
+      final isTaken = await _firestore.isUsernameTaken(username);
+      if (!mounted) return;
+      setState(() {
+        _usernameChecking = false;
+        if (isTaken) {
+          _usernameFieldError = 'That username is already taken.';
+          _usernameValid = false;
+        } else {
+          _usernameFieldError = null;
+          _usernameValid = true;
+        }
+      });
+    } catch (_) {
+      if (mounted) setState(() => _usernameChecking = false);
+    }
   }
 
   Future<void> _loadProfile() async {
@@ -106,6 +183,24 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       return;
     }
 
+    final username = _usernameCtrl.text.trim();
+    if (username.length < 3 || username.length > 20) {
+      setState(() => _errorMessage = 'Username must be between 3 and 20 characters.');
+      return;
+    }
+    if (!RegExp(r'^[a-z0-9_]+$').hasMatch(username)) {
+      setState(() => _errorMessage =
+          'Username can only contain lowercase letters, numbers, and underscores.');
+      return;
+    }
+    if (username != _origUsername) {
+      final isTaken = await _firestore.isUsernameTaken(username);
+      if (isTaken) {
+        setState(() => _errorMessage = 'That username is already taken.');
+        return;
+      }
+    }
+
     setState(() {
       _saveState = 'loading';
       _errorMessage = null;
@@ -123,7 +218,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     try {
       await _firestore.updateUserProfile(uid, {
         'displayName': _nameCtrl.text.trim(),
-        'username': _usernameCtrl.text.trim(),
+        'username': username,
         'hometown': _hometownCtrl.text.trim(),
         'bio': _bioCtrl.text.trim(),
       });
@@ -415,6 +510,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           const SizedBox(height: 6),
           TextField(
             controller: _usernameCtrl,
+            focusNode: _usernameFocusNode,
             style: const TextStyle(fontSize: 15, color: WW.text),
             decoration: _kInputDecoration.copyWith(hintText: '@username'),
           ),
@@ -427,6 +523,23 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
               fontStyle: FontStyle.italic,
             ),
           ),
+          if (_usernameChecking) ...[
+            const SizedBox(height: 4),
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2, color: WW.primary),
+            ),
+          ] else if (_usernameFieldError != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              _usernameFieldError!,
+              style: const TextStyle(fontSize: 12, color: Color(0xFFEF4444)),
+            ),
+          ] else if (_usernameValid) ...[
+            const SizedBox(height: 4),
+            const Icon(Icons.check_circle_rounded, size: 16, color: Color(0xFF22C55E)),
+          ],
         ],
       ),
     );

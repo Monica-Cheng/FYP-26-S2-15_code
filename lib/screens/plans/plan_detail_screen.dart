@@ -346,7 +346,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     if (planId.isEmpty) return;
     await FirestoreService().setOverrideDayIndex(uid, planId, dayIndex);
     if (!mounted) return;
-    context.push(Routes.gymSession);
+    context.push(Routes.gymSession, extra: {'readOnly': true});
   }
 
   @override
@@ -904,8 +904,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
               (s['dayNumber'] as num?)?.toInt() ?? (idx + 1);
           return _DayCard(
             sessionData: s,
-            showStartButton: !_fromExplore,
-            onStart: _fromExplore ? null : () => _onStartDay(dayNumber),
+            onPreview: () => _onStartDay(dayNumber),
           );
         }),
       ],
@@ -1334,11 +1333,13 @@ class _DayCard extends StatefulWidget {
   final Map<String, dynamic> sessionData;
   final bool showStartButton;
   final VoidCallback? onStart;
+  final VoidCallback? onPreview;
 
   const _DayCard({
     required this.sessionData,
     this.showStartButton = false,
     this.onStart,
+    this.onPreview,
   });
 
   @override
@@ -1424,7 +1425,7 @@ class _DayCardState extends State<_DayCard> {
         children: [
           GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _expanded = !_expanded),
+            onTap: widget.onPreview,
             child: Padding(
               padding: const EdgeInsets.all(12),
               child: Row(
@@ -1489,11 +1490,14 @@ class _DayCardState extends State<_DayCard> {
                     ),
                     const SizedBox(width: 8),
                   ],
-                  AnimatedRotation(
-                    turns: _expanded ? 0.5 : 0,
-                    duration: const Duration(milliseconds: 200),
-                    child: const Icon(Icons.keyboard_arrow_down_rounded,
-                        color: WW.textSec, size: 18),
+                  GestureDetector(
+                    onTap: () => setState(() => _expanded = !_expanded),
+                    child: AnimatedRotation(
+                      turns: _expanded ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 200),
+                      child: const Icon(Icons.keyboard_arrow_down_rounded,
+                          color: WW.textSec, size: 18),
+                    ),
                   ),
                 ],
               ),
