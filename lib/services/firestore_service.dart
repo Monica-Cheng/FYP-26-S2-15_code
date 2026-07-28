@@ -1811,6 +1811,28 @@ class FirestoreService {
     return total;
   }
 
+  // ---------------------------------------------------------------------------
+  // Returns a user's full logged-meal history for users/{uid} (no "since
+  // midnight" filter, unlike getTodaysNutritionLogs), newest first — used
+  // by the Progress screen's Nutrition tab.
+  // ---------------------------------------------------------------------------
+  Future<List<Map<String, dynamic>>> getNutritionLogsHistory(
+    String uid, {
+    int limit = 100,
+  }) async {
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.nutritionLogs)
+        .orderBy('date', descending: true)
+        .limit(limit)
+        .get();
+
+    return snapshot.docs
+        .map((doc) => {'id': doc.id, ...doc.data()})
+        .toList();
+  }
+
   // ═══════════════════════════════════════════════════════════════════════
   // FEED / POSTS
   // A real, shared Firestore feed (top-level `posts` collection) so a
@@ -1823,20 +1845,34 @@ class FirestoreService {
   // ═══════════════════════════════════════════════════════════════════════
 
   // ---------------------------------------------------------------------------
-  // Creates a feed post. imageBase64 is optional (omit for text-described
-  // meals with no photo). Denormalizes authorName/authorInitial onto the
-  // post itself so the feed can render without an extra read per post.
+  // Creates a feed post. Two shapes share this collection, picked by `type`:
+  //   'meal'    (default) — foodName/calories/macros/imageBase64, posted
+  //             from nutrition_scan_screen.dart.
+  //   'workout' — sessionName/isCardio/cardioActivity/elapsedSeconds/
+  //             totalSets/volume (calories = burned), posted from
+  //             post_session_summary_screen.dart.
+  // imageBase64 is optional (omit for text-described meals with no photo,
+  // and always for workout posts). Denormalizes authorName/authorInitial
+  // onto the post itself so the feed can render without an extra read per
+  // post.
   // ---------------------------------------------------------------------------
   Future<void> createFeedPost({
     required String uid,
     required String authorName,
-    required String foodName,
     required int calories,
+    String type = 'meal',
+    String? foodName,
     int? proteinG,
     int? carbsG,
     int? fatG,
     String? imageBase64,
     String? caption,
+    String? sessionName,
+    bool? isCardio,
+    String? cardioActivity,
+    int? elapsedSeconds,
+    int? totalSets,
+    double? volume,
   }) async {
     final initial =
         authorName.trim().isNotEmpty ? authorName.trim()[0].toUpperCase() : '?';
@@ -1845,7 +1881,7 @@ class FirestoreService {
       'uid': uid,
       'authorName': authorName,
       'authorInitial': initial,
-      'type': 'meal',
+      'type': type,
       'foodName': foodName,
       'calories': calories,
       'proteinG': proteinG,
@@ -1853,6 +1889,12 @@ class FirestoreService {
       'fatG': fatG,
       'imageBase64': imageBase64,
       'caption': caption,
+      'sessionName': sessionName,
+      'isCardio': isCardio,
+      'cardioActivity': cardioActivity,
+      'elapsedSeconds': elapsedSeconds,
+      'totalSets': totalSets,
+      'volume': volume,
       'reactionCount': 0,
       'commentCount': 0,
       'createdAt': FieldValue.serverTimestamp(),
@@ -1870,6 +1912,17 @@ class FirestoreService {
         .snapshots()
         .map((snapshot) =>
             snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Deletes a post document. Firestore does not cascade-delete
+  // subcollections, so this leaves the post's `reactions`/`comments`
+  // subcollections orphaned (unreachable once the parent doc is gone, but
+  // not physically removed) — acceptable for FYP scope, but a real cleanup
+  // would need a Cloud Function or batched subcollection delete.
+  // ---------------------------------------------------------------------------
+  Future<void> deletePost(String postId) async {
+    await _db.collection(Collections.posts).doc(postId).delete();
   }
 
   // ---------------------------------------------------------------------------
@@ -1929,6 +1982,16 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Deletes a comment and decrements the post's denormalized commentCount —
+  // mirrors addComment's increment.
+  // ---------------------------------------------------------------------------
+  Future<void> deleteComment(String postId, String commentId) async {
+    final postRef = _db.collection(Collections.posts).doc(postId);
+    await postRef.collection('comments').doc(commentId).delete();
+    await postRef.update({'commentCount': FieldValue.increment(-1)});
+  }
+
+  // ---------------------------------------------------------------------------
   // Live stream of comments on a post, oldest first.
   // ---------------------------------------------------------------------------
   Stream<List<Map<String, dynamic>>> getCommentsStream(String postId) {
@@ -1940,6 +2003,79 @@ class FirestoreService {
         .snapshots()
         .map((snapshot) =>
             snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+  }
+
+// ---------------------------------------------------------------------------
+  // Live stream of a single user's feed posts, newest first — used by
+  // user_profile_screen.dart to show what a profile has posted.
+  // ---------------------------------------------------------------------------
+  Stream<List<Map<String, dynamic>>> getUserPostsStream(String uid, {int limit = 50}) {
+    return _db
+        .collection(Collections.posts)
+        .where('uid', isEqualTo: uid)
+        .orderBy('createdAt', descending: true)
+        .limit(limit)
+        .snapshots()
+        .map((snapshot) =>
+            snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // FOLLOWS
+  // Top-level `follows` collection, doc id `{followerUid}_{followingUid}` —
+  // lets doc existence double as the "is following" check without a query.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  Future<void> followUser(String followerUid, String followingUid) async {
+    await _db
+        .collection(Collections.follows)
+        .doc('${followerUid}_$followingUid')
+        .set({
+      'followerUid': followerUid,
+      'followingUid': followingUid,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> unfollowUser(String followerUid, String followingUid) async {
+    await _db
+        .collection(Collections.follows)
+        .doc('${followerUid}_$followingUid')
+        .delete();
+  }
+
+  Stream<bool> isFollowingStream(String followerUid, String followingUid) {
+    return _db
+        .collection(Collections.follows)
+        .doc('${followerUid}_$followingUid')
+        .snapshots()
+        .map((doc) => doc.exists);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Number of users following `uid` — uses Firestore's aggregate count()
+  // query (cloud_firestore ^5.4.4 here, well past the 4.9.0 minimum) so the
+  // count is computed server-side instead of fetching every follow doc.
+  // ---------------------------------------------------------------------------
+  Future<int> getFollowerCount(String uid) async {
+    final snapshot = await _db
+        .collection(Collections.follows)
+        .where('followingUid', isEqualTo: uid)
+        .count()
+        .get();
+    return snapshot.count ?? 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Number of users `uid` is following — same aggregate count() approach.
+  // ---------------------------------------------------------------------------
+  Future<int> getFollowingCount(String uid) async {
+    final snapshot = await _db
+        .collection(Collections.follows)
+        .where('followerUid', isEqualTo: uid)
+        .count()
+        .get();
+    return snapshot.count ?? 0;
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1959,7 +2095,7 @@ class FirestoreService {
     final snapshot = await _db
         .collection(Collections.users)
         .where('username', isGreaterThanOrEqualTo: query)
-        .where('username', isLessThanOrEqualTo: '$query')
+        .where('username', isLessThanOrEqualTo: '$query')
         .limit(20)
         .get();
     return snapshot.docs.map((doc) {

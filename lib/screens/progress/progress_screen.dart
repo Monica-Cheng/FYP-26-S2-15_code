@@ -80,11 +80,15 @@ class _ProgressScreenState extends State<ProgressScreen> {
   StreamSubscription<List<Map<String, dynamic>>>? _weightSub;
   StreamSubscription<DocumentSnapshot>? _userDocSub;
 
+  List<Map<String, dynamic>> _nutritionLogs = [];
+  bool _nutritionLoading = true;
+
   static const List<String> _subtabLabels = [
     'Charts',
     'Activities',
     'XP History',
     'Check-ins',
+    'Nutrition',
   ];
   static const List<String> _timeLabels = ['W', 'M', 'Y'];
   static const List<String> _actLabels = ['All', 'Gym', 'Cardio', 'Manual'];
@@ -140,6 +144,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
     _loadGoalWeight();
     _startUserDocStream();
     _startWeightStream();
+    _loadNutritionLogs();
   }
 
   @override
@@ -287,6 +292,24 @@ class _ProgressScreenState extends State<ProgressScreen> {
             if (mounted) setState(() => _sessionsLoading = false);
           },
         );
+  }
+
+  Future<void> _loadNutritionLogs() async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) {
+      setState(() => _nutritionLoading = false);
+      return;
+    }
+    try {
+      final result = await FirestoreService().getNutritionLogsHistory(uid);
+      if (!mounted) return;
+      setState(() {
+        _nutritionLogs = result;
+        _nutritionLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _nutritionLoading = false);
+    }
   }
 
   Future<void> _loadGoalWeight() async {
@@ -526,6 +549,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   _buildActivitiesTab(),
                   _buildXpTab(),
                   _buildCheckInsTab(),
+                  _buildNutritionTab(),
                 ],
               ),
             ),
@@ -2031,6 +2055,62 @@ class _ProgressScreenState extends State<ProgressScreen> {
       ),
     );
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // NUTRITION TAB
+  // ══════════════════════════════════════════════════════════════════════════
+
+  Widget _buildNutritionTab() {
+    if (_nutritionLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: WW.primary),
+      );
+    }
+
+    if (_nutritionLogs.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: const [
+            Icon(Icons.restaurant_rounded, size: 48, color: WW.textSec),
+            SizedBox(height: 12),
+            Text(
+              'No meals logged yet',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: WW.text,
+              ),
+            ),
+            SizedBox(height: 4),
+            Text(
+              'Scan, describe, or log a meal to see it here',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: WW.textSec,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
+      itemCount: _nutritionLogs.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      itemBuilder: (_, i) {
+        final log = _nutritionLogs[i];
+        return _NutritionLogCard(
+          foodName: log['foodName'] as String? ?? 'Meal',
+          calories: (log['calories'] as num?)?.toInt() ?? 0,
+          dateLabel: _formatDate(log['date'] as Timestamp?),
+          source: log['source'] as String? ?? 'manual',
+        );
+      },
+    );
+  }
 }
 
 // ── Activity card ─────────────────────────────────────────────────────────────
@@ -2216,6 +2296,117 @@ class _ActivityCard extends StatelessWidget {
                 for (final stat in stats)
                   Expanded(child: _buildStatCell(stat.$1, stat.$2)),
               ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Nutrition log card ──────────────────────────────────────────────────────
+// Mirrors _ActivityCard's layout (left color bar, icon, title/subtitle,
+// right badge) for visual consistency with the Activities tab.
+
+class _NutritionLogCard extends StatelessWidget {
+  final String foodName;
+  final int calories;
+  final String dateLabel;
+  final String source; // 'scan' | 'barcode' | 'manual'
+
+  const _NutritionLogCard({
+    required this.foodName,
+    required this.calories,
+    required this.dateLabel,
+    required this.source,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final Color barColor;
+    final IconData iconData;
+    final String sourceLabel;
+
+    switch (source) {
+      case 'scan':
+        barColor = WW.primary;
+        iconData = Icons.camera_alt_rounded;
+        sourceLabel = 'Scanned';
+        break;
+      case 'barcode':
+        barColor = WW.teal;
+        iconData = Icons.qr_code_scanner_rounded;
+        sourceLabel = 'Barcode';
+        break;
+      default:
+        barColor = WW.lavender;
+        iconData = Icons.edit_note_rounded;
+        sourceLabel = 'Manual';
+    }
+
+    return Container(
+      decoration: WW.cardDecoration,
+      clipBehavior: Clip.hardEdge,
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Left color bar
+            Container(width: 4, color: barColor),
+
+            // Icon
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 14, 4, 14),
+              child: Icon(iconData, color: barColor, size: 22),
+            ),
+
+            // Content
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(6, 12, 10, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      foodName,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: WW.text,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '$dateLabel · $sourceLabel',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: WW.textSec,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            // Badge: calories
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: WW.tealBg,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  '$calories kcal',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: WW.teal,
+                  ),
+                ),
+              ),
             ),
           ],
         ),

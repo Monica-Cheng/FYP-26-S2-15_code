@@ -21,6 +21,7 @@ import '../../services/auth_service.dart';
 import '../../services/barcode_service.dart';
 import '../../services/firestore_service.dart';
 import '../../services/nutrition_service.dart';
+import '../../widgets/caption_sheet.dart';
 import '../../widgets/nutrition_share_card_widget.dart';
 
 enum _Mode { scan, describe, barcode }
@@ -174,13 +175,20 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
   Future<String?> _encodeImageForPost(File file) async {
     try {
       final bytes = await file.readAsBytes();
+      debugPrint('[PostToFeed] _encodeImageForPost: read ${bytes.length} bytes from ${file.path}');
       final codec = await ui.instantiateImageCodec(bytes, targetWidth: 480);
       final frame = await codec.getNextFrame();
       final byteData =
           await frame.image.toByteData(format: ui.ImageByteFormat.png);
-      if (byteData == null) return null;
-      return base64Encode(byteData.buffer.asUint8List());
-    } catch (_) {
+      if (byteData == null) {
+        debugPrint('[PostToFeed] _encodeImageForPost: toByteData returned null');
+        return null;
+      }
+      final encoded = base64Encode(byteData.buffer.asUint8List());
+      debugPrint('[PostToFeed] _encodeImageForPost: encoded length ${encoded.length}');
+      return encoded;
+    } catch (e, st) {
+      debugPrint('[PostToFeed] _encodeImageForPost threw: $e\n$st');
       return null;
     }
   }
@@ -190,7 +198,16 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
   // from _logMeal (personal nutrition log) and _shareResult (native OS share
   // sheet). A user can do any combination of the three.
   // ---------------------------------------------------------------------------
-  Future<void> _postToFeed() async {
+  // Shows the optional-caption sheet, then posts. Dismissing the sheet
+  // without tapping "Post" cancels the whole post.
+  Future<void> _promptCaptionAndPostToFeed() async {
+    if (!mounted) return;
+    final result = await showCaptionSheet(context, fallbackLabel: 'the meal name');
+    if (result == null) return;
+    await _postToFeed(caption: result.isEmpty ? null : result);
+  }
+
+  Future<void> _postToFeed({String? caption}) async {
     final result = _result;
     if (result == null || _isPosting) return;
     final uid = _authService.getCurrentUser()?.uid;
@@ -206,6 +223,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
       if (_mode == _Mode.scan && _pickedImage != null) {
         imageBase64 = await _encodeImageForPost(_pickedImage!);
       }
+      debugPrint('[PostToFeed] nutrition _postToFeed: imageBase64 length = ${imageBase64?.length}');
 
       await _firestoreService.createFeedPost(
         uid: uid,
@@ -216,6 +234,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
         carbsG: result.carbsG,
         fatG: result.fatG,
         imageBase64: imageBase64,
+        caption: caption,
       );
 
       if (!mounted) return;
@@ -370,7 +389,14 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
     }
   }
 
-  Future<void> _postBarcodeSummaryToFeed() async {
+  Future<void> _promptCaptionAndPostBarcodeSummary() async {
+    if (!mounted) return;
+    final result = await showCaptionSheet(context, fallbackLabel: 'the scanned items');
+    if (result == null) return;
+    await _postBarcodeSummaryToFeed(caption: result.isEmpty ? null : result);
+  }
+
+  Future<void> _postBarcodeSummaryToFeed({String? caption}) async {
     if (_scannedProducts.isEmpty || _isPosting) return;
     final uid = _authService.getCurrentUser()?.uid;
     if (uid == null) return;
@@ -401,6 +427,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
         proteinG: totalProtein,
         carbsG: totalCarbs,
         fatG: totalFat,
+        caption: caption,
       );
 
       if (!mounted) return;
@@ -469,7 +496,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
         isPosting: _isPosting,
         onLog: _logMeal,
         onShare: _shareResult,
-        onPost: _postToFeed,
+        onPost: _promptCaptionAndPostToFeed,
         onDiscard: _reset,
       );
     }
@@ -480,7 +507,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
         isSaving: _isSaving,
         isPosting: _isPosting,
         onLogAll: _logAllBarcodeItems,
-        onPost: _postBarcodeSummaryToFeed,
+        onPost: _promptCaptionAndPostBarcodeSummary,
         onAddMore: () => setState(() => _stage = _Stage.input),
         onDiscard: _resetBarcode,
       );

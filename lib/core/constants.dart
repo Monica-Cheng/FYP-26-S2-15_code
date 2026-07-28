@@ -13,6 +13,7 @@ class Collections {
   static const String challenges = 'challenges';
   static const String nutritionLogs = 'nutritionLogs';
   static const String posts = 'posts';
+  static const String follows = 'follows';
   static const String friendRequests = 'friendRequests';
   static const String friends = 'friends';
   static const String notifications = 'notifications';

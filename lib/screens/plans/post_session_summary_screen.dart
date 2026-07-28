@@ -9,6 +9,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:share_plus/share_plus.dart';
 
@@ -16,6 +17,8 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../widgets/caption_sheet.dart';
+import '../../widgets/quick_add_sheet.dart';
 import '../../widgets/share_card_widget.dart';
 
 // Same OpenFreeMap style URL used in activity_detail_screen.dart/
@@ -36,6 +39,7 @@ class PostSessionSummaryScreen extends StatefulWidget {
 class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     with SingleTickerProviderStateMixin {
   bool _isSharing = false;
+  bool _isPosting = false;
   bool _exercisesExpanded = true;
   bool _wiseCoachExpanded = false;
   late AnimationController _entranceCtrl;
@@ -460,6 +464,145 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       if (previousIndex != null) {
         _cardioBlockMapControllers.remove(previousIndex);
       }
+    }
+  }
+
+  // ── Post to Feed ──────────────────────────────────────────────────────────
+  // Posts the session to the real, shared Club "Feed" tab — separate from
+  // _captureAndShare (native OS share sheet). Mirrors nutrition_scan_screen's
+  // _postToFeed pattern, including its optional photo attachment.
+
+  // Downscales a photo to a small PNG before base64-encoding — identical to
+  // nutrition_scan_screen.dart's _encodeImageForPost, kept well under
+  // Firestore's 1MB document limit. Returns null (post goes out without a
+  // photo) rather than failing the whole post if anything goes wrong.
+  Future<String?> _encodeImageForPost(File file) async {
+    try {
+      final exists = await file.exists();
+      debugPrint('[PostToFeed] _encodeImageForPost: file.exists()=$exists path=${file.path}');
+      final bytes = await file.readAsBytes();
+      debugPrint('[PostToFeed] _encodeImageForPost: read ${bytes.length} bytes from ${file.path}');
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 480);
+      final frame = await codec.getNextFrame();
+      final byteData =
+          await frame.image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) {
+        debugPrint('[PostToFeed] _encodeImageForPost: toByteData returned null');
+        return null;
+      }
+      final encoded = base64Encode(byteData.buffer.asUint8List());
+      debugPrint('[PostToFeed] _encodeImageForPost: encoded length ${encoded.length}');
+      return encoded;
+    } catch (e, st) {
+      debugPrint('[PostToFeed] _encodeImageForPost threw: $e\n$st');
+      return null;
+    }
+  }
+
+  // Lets the user optionally attach a photo before posting — a workout post
+  // without one (stats only) is just as valid, so "Skip" posts immediately.
+  Future<void> _promptPostToFeed() async {
+    if (_isPosting) return;
+    await showQuickAddSheet(context, [
+      QuickAddOption(
+        icon: Icons.camera_alt_rounded,
+        iconColor: WW.primary,
+        iconBg: WW.chipBg,
+        title: 'Take Photo',
+        subtitle: 'Snap a photo to attach to your post',
+        onTap: () => _pickAndPostToFeed(ImageSource.camera),
+      ),
+      QuickAddOption(
+        icon: Icons.photo_library_rounded,
+        iconColor: WW.teal,
+        iconBg: WW.tealBg,
+        title: 'Choose from Gallery',
+        subtitle: 'Pick an existing photo',
+        onTap: () => _pickAndPostToFeed(ImageSource.gallery),
+      ),
+      QuickAddOption(
+        icon: Icons.arrow_forward_rounded,
+        iconColor: WW.textSec,
+        iconBg: WW.elevated,
+        title: 'Skip',
+        subtitle: 'Post without a photo',
+        onTap: () => _promptCaptionAndPost(imageFile: null),
+      ),
+    ]);
+  }
+
+  Future<void> _pickAndPostToFeed(ImageSource source) async {
+    final picked = await ImagePicker().pickImage(
+      source: source,
+      maxWidth: 1024,
+      imageQuality: 80,
+    );
+    debugPrint('[PostToFeed] pickImage($source) returned path: ${picked?.path}');
+    if (picked == null) return;
+    final file = File(picked.path);
+    final exists = await file.exists();
+    final size = exists ? await file.length() : -1;
+    debugPrint('[PostToFeed] picked file exists=$exists size=$size bytes');
+    await _promptCaptionAndPost(imageFile: file);
+  }
+
+  // Lets the user type an optional caption before the post is created.
+  // Dismissing without tapping "Post" cancels the whole post — it does not
+  // fall back to posting with no caption.
+  Future<void> _promptCaptionAndPost({File? imageFile}) async {
+    if (!mounted) return;
+    final result = await showCaptionSheet(context, fallbackLabel: 'your session name');
+    if (result == null) return;
+    await _postToFeed(imageFile: imageFile, caption: result.isEmpty ? null : result);
+  }
+
+  Future<void> _postToFeed({File? imageFile, String? caption}) async {
+    if (_isPosting) return;
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+
+    setState(() => _isPosting = true);
+    try {
+      final sessionName = _session['sessionName'] as String? ?? 'Workout';
+      final elapsedSeconds = _session['durationSeconds'] as int? ?? 0;
+      final caloriesBurned = _session['caloriesBurned'] as int? ?? 0;
+      final totalSets = _session['totalSets'] as int? ?? 0;
+      final volume = (_session['totalVolume'] as num?)?.toDouble() ?? 0;
+      final cardioActivity = _session['activity'] as String? ?? '';
+
+      final profile = await FirestoreService().getUserProfile(uid);
+      final rawName = (profile?['displayName'] as String?)?.trim();
+      final authorName = (rawName != null && rawName.isNotEmpty) ? rawName : 'Someone';
+
+      debugPrint('[PostToFeed] workout _postToFeed: imageFile param = ${imageFile?.path}');
+      String? imageBase64;
+      if (imageFile != null) {
+        imageBase64 = await _encodeImageForPost(imageFile);
+      }
+      debugPrint('[PostToFeed] workout _postToFeed: imageBase64 length = ${imageBase64?.length}');
+
+      await FirestoreService().createFeedPost(
+        uid: uid,
+        authorName: authorName,
+        type: 'workout',
+        calories: caloriesBurned,
+        sessionName: sessionName,
+        isCardio: _isCardio,
+        cardioActivity: cardioActivity,
+        elapsedSeconds: elapsedSeconds,
+        totalSets: totalSets,
+        volume: volume,
+        imageBase64: imageBase64,
+        caption: caption,
+      );
+
+      if (!mounted) return;
+      _snack('Posted to your Club feed!');
+    } catch (e) {
+      if (!mounted) return;
+      _snack('Could not post: $e');
+    } finally {
+      if (mounted) setState(() => _isPosting = false);
     }
   }
 
@@ -1610,85 +1753,128 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
           Expanded(
             child: GestureDetector(
               onTap: _isSharing ? null : _captureAndShare,
-              child: Container(
-                height: 50,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: _isSharing ? WW.border : WW.primary,
-                    width: 1.5,
-                  ),
-                ),
-                child: Center(
-                  child: _isSharing
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            color: WW.primary,
-                            strokeWidth: 2,
-                          ),
-                        )
-                      : const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.ios_share_rounded,
-                                color: WW.primary, size: 16),
-                            SizedBox(width: 6),
-                            Text(
-                              'Share',
-                              style: TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
+                  child: Container(
+                    height: 48,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: _isSharing ? WW.border : WW.primary,
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Center(
+                      child: _isSharing
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
                                 color: WW.primary,
+                                strokeWidth: 2,
                               ),
+                            )
+                          : const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.ios_share_rounded,
+                                    color: WW.primary, size: 16),
+                                SizedBox(width: 6),
+                                Text(
+                                  'Share',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                    color: WW.primary,
+                                  ),
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 2,
-            child: GestureDetector(
-              onTap: () {
-                if (_isGym || _isCombined) {
-                  final uid = AuthService().getCurrentUser()?.uid;
-                  final pid = _session['planId'] as String?;
-                  if (uid != null && pid != null && pid.isNotEmpty) {
-                    FirestoreService().markSessionComplete(uid, pid);
-                  }
-                }
-                context.go(Routes.home);
-              },
-              child: Container(
-                height: 50,
-                decoration: BoxDecoration(
-                  color: WW.primary,
-                  borderRadius: BorderRadius.circular(14),
-                  boxShadow: [
-                    BoxShadow(
-                      color: WW.primary.withValues(alpha: 0.35),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: const Center(
-                  child: Text(
-                    'Done',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
                     ),
                   ),
                 ),
               ),
-            ),
-          ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: GestureDetector(
+                  onTap: _isPosting ? null : _promptPostToFeed,
+                  child: Container(
+                    height: 48,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: _isPosting ? WW.border : WW.primary,
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Center(
+                      child: _isPosting
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                color: WW.primary,
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.dynamic_feed_rounded,
+                                    color: WW.primary, size: 16),
+                                SizedBox(width: 6),
+                                Text(
+                                  'Post to Feed',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                    color: WW.primary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                flex: 2,
+                child: GestureDetector(
+                  onTap: () {
+                    if (_isGym || _isCombined) {
+                      final uid = AuthService().getCurrentUser()?.uid;
+                      final pid = _session['planId'] as String?;
+                      if (uid != null && pid != null && pid.isNotEmpty) {
+                        FirestoreService().markSessionComplete(uid, pid);
+                      }
+                    }
+                    context.go(Routes.home);
+                  },
+                  child: Container(
+                    height: 50,
+                    decoration: BoxDecoration(
+                      color: WW.primary,
+                      borderRadius: BorderRadius.circular(14),
+                      boxShadow: [
+                        BoxShadow(
+                          color: WW.primary.withValues(alpha: 0.35),
+                          blurRadius: 12,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: const Center(
+                      child: Text(
+                        'Done',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
         ],
       ),
     );
