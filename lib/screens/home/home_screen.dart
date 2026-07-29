@@ -15,6 +15,7 @@ import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/quick_add_sheet.dart';
+import '../../widgets/session_resume_prompt.dart';
 import '../plans/plans_screen.dart';
 import '../coach/coach_screen.dart';
 import '../club/club_screen.dart';
@@ -324,6 +325,27 @@ class _HomeTabState extends State<_HomeTab> {
         _todayIsRestDay = session['isRestDay'] == true;
       });
     } catch (_) {}
+  }
+
+  // Wired to _TodayPlanCard's Start Workout button (see its onStartWorkout
+  // prop) instead of that card navigating straight to Routes.gymSession
+  // itself — routes through the shared discovery-and-prompt step first, so
+  // an already-abandoned in-progress session for today's plan/day offers
+  // Resume/Start Over instead of silently being orphaned by a brand-new
+  // one. _todayCompleted already gates whether this button is even shown
+  // at all (see _TodayPlanCard's own build()), so no separate completed
+  // check is needed here — by the time this can fire, today genuinely
+  // isn't completed yet.
+  Future<void> _handleStartWorkoutTap() async {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null || _trackedPlanId.isEmpty) return;
+    await startOrResumeTrackedSession(
+      context: context,
+      uid: uid,
+      planId: _trackedPlanId,
+      dayIndex: _currentDayIndex,
+      startFresh: () async => context.push(Routes.gymSession),
+    );
   }
 
   Future<void> _checkMissedSession(String uid) async {
@@ -701,6 +723,7 @@ class _HomeTabState extends State<_HomeTab> {
               child: _TodayPlanCard(
                 trackedPlanName: _trackedPlanName,
                 onGoToPlans: widget.onGoToPlans,
+                onStartWorkout: _handleStartWorkoutTap,
                 todaySession: _todaySession,
                 todayIsRestDay: _todayIsRestDay,
                 currentDayIndex: _currentDayIndex,
@@ -1191,6 +1214,10 @@ class _CalorieRingPainter extends CustomPainter {
 class _TodayPlanCard extends StatefulWidget {
   final String trackedPlanName;
   final VoidCallback? onGoToPlans;
+  // Fires the shared discovery-and-prompt step (see
+  // widgets/session_resume_prompt.dart) instead of navigating to
+  // Routes.gymSession directly — see _buildPlanCard's Start Workout button.
+  final VoidCallback? onStartWorkout;
   final Map<String, dynamic>? todaySession;
   final bool todayIsRestDay;
   final int currentDayIndex;
@@ -1200,6 +1227,7 @@ class _TodayPlanCard extends StatefulWidget {
   const _TodayPlanCard({
     required this.trackedPlanName,
     this.onGoToPlans,
+    this.onStartWorkout,
     this.todaySession,
     this.todayIsRestDay = false,
     this.currentDayIndex = 1,
@@ -1483,7 +1511,7 @@ class _TodayPlanCardState extends State<_TodayPlanCard> {
                     ),
                   )
                 : GestureDetector(
-                    onTap: () => context.push(Routes.gymSession),
+                    onTap: widget.onStartWorkout,
                     child: Container(
                       height: 50,
                       decoration: BoxDecoration(

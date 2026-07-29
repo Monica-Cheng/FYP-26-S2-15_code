@@ -12,6 +12,7 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../widgets/session_resume_prompt.dart';
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,16 @@ class _PlansScreenState extends State<PlansScreen> {
   Map<String, dynamic>? _trackedPlan;
   bool _trackedPlanLoading = true;
   StreamSubscription<DocumentSnapshot>? _userDocSub;
+  // Fetched alongside _trackedPlan (see _loadTrackedPlan()) — same
+  // getPlanProgress() data home_screen.dart's own _todayCompleted and the
+  // discovery step in session_resume_prompt.dart both need.
+  // _trackedPlanDayIndex is the day the tracked-plan card's tap should
+  // target (mirrors home_screen.dart's _currentDayIndex); the other two
+  // feed _trackedPlanCompletedToday, matching home_screen.dart's own
+  // _todayCompleted convention exactly.
+  int _trackedPlanDayIndex = 1;
+  String? _lastCompletedDate;
+  int? _lastCompletedDayIndex;
 
   @override
   void initState() {
@@ -107,13 +118,63 @@ class _PlansScreenState extends State<PlansScreen> {
     try {
       final plan = await _firestoreService.getTrackedPlan(uid);
       if (!mounted) return;
+      final planId = plan?['id'] as String?;
+      // Same getPlanProgress() call home_screen.dart's own
+      // _loadTodaySession()/_startProgressStream() make — needed both for
+      // the tap target's dayIndex and for the completed-today check below.
+      Map<String, dynamic>? progress;
+      if (planId != null && planId.isNotEmpty) {
+        try {
+          progress = await _firestoreService.getPlanProgress(uid, planId);
+        } catch (_) {}
+      }
+      if (!mounted) return;
       setState(() {
         _trackedPlan = plan;
+        _trackedPlanDayIndex =
+            (progress?['currentDayIndex'] as num?)?.toInt() ?? 1;
+        _lastCompletedDate = progress?['lastCompletedDate'] as String?;
+        _lastCompletedDayIndex =
+            (progress?['lastCompletedDayIndex'] as num?)?.toInt();
         _trackedPlanLoading = false;
       });
     } catch (_) {
       if (mounted) setState(() => _trackedPlanLoading = false);
     }
+  }
+
+  // Matches home_screen.dart's own _todayCompleted check exactly
+  // (lastCompletedDate == today, for the specific day that was completed)
+  // — this card previously had no completion-awareness at all, unlike
+  // Home/Plan Detail/Plan Schedule, which is why it could unconditionally
+  // restart an already-completed day's session.
+  bool get _trackedPlanCompletedToday {
+    if (_lastCompletedDayIndex != _trackedPlanDayIndex) return false;
+    final today = DateTime.now().toString().substring(0, 10);
+    return _lastCompletedDate == today;
+  }
+
+  // Wired to _buildTrackedPlanCard's tap instead of navigating straight to
+  // Routes.gymSession — routes through the same shared discovery-and-
+  // prompt step already used by home_screen.dart, plan_detail_screen.dart,
+  // and plan_schedule_screen.dart (session_resume_prompt.dart), so an
+  // already-abandoned in-progress session for this planId+dayIndex offers
+  // Resume/Start Over instead of silently being orphaned by a brand-new
+  // one. Only reachable when the card isn't already showing the completed
+  // state (see _buildTrackedPlanCard), so no separate completed check is
+  // needed here.
+  Future<void> _handleStartTrackedPlan() async {
+    final uid = _authService.getCurrentUser()?.uid;
+    final planId = _trackedPlan?['id'] as String?;
+    if (uid == null || planId == null || planId.isEmpty) return;
+    await startOrResumeTrackedSession(
+      context: context,
+      uid: uid,
+      planId: planId,
+      dayIndex: _trackedPlanDayIndex,
+      startFresh: () async =>
+          context.push(Routes.gymSession, extra: {'readOnly': true}),
+    );
   }
 
   void _snack(String msg) {
@@ -320,9 +381,10 @@ class _PlansScreenState extends State<PlansScreen> {
     final level = plan['level'] as String? ?? '';
     final days = (plan['daysPerWeek'] as num?)?.toInt() ?? 0;
 
+    final isCompletedToday = _trackedPlanCompletedToday;
+
     return GestureDetector(
-      onTap: () => context.push(Routes.gymSession,
-          extra: {'readOnly': true}),
+      onTap: isCompletedToday ? null : _handleStartTrackedPlan,
       child: Container(
         decoration: WW.cardDecoration,
         clipBehavior: Clip.hardEdge,
@@ -427,21 +489,41 @@ class _PlansScreenState extends State<PlansScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      const Icon(Icons.play_circle_outline_rounded,
-                          color: WW.primary, size: 16),
-                      const SizedBox(width: 6),
-                      const Text(
-                        'Tap to preview & start session',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          color: WW.primary,
+                  // Same teal check-circle "Completed today!" convention
+                  // as home_screen.dart's own Today's Plan card — see
+                  // _trackedPlanCompletedToday's own doc comment.
+                  if (isCompletedToday)
+                    const Row(
+                      children: [
+                        Icon(Icons.check_circle_rounded,
+                            color: WW.teal, size: 16),
+                        SizedBox(width: 6),
+                        Text(
+                          'Completed today!',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: WW.teal,
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
+                      ],
+                    )
+                  else
+                    const Row(
+                      children: [
+                        Icon(Icons.play_circle_outline_rounded,
+                            color: WW.primary, size: 16),
+                        SizedBox(width: 6),
+                        Text(
+                          'Tap to preview & start session',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            color: WW.primary,
+                          ),
+                        ),
+                      ],
+                    ),
                 ],
               ),
             ),

@@ -86,6 +86,15 @@ class _SetData {
   bool done;
   String kg;
   String reps;
+  // Real wall-clock moment this set last transitioned to done:true — see
+  // _markSetDone() for exactly when this is set (fresh, every time) and
+  // cleared (on un-done, so a reversed completion never leaves stale/
+  // misleading data behind). Null until the set has been marked done at
+  // least once. Pure data capture for now, per this task's explicit
+  // scope — nothing reads this for plausibility/validation yet; that's a
+  // separate future prompt once real captured data exists to pick
+  // sensible thresholds from.
+  DateTime? completedAt;
 
   _SetData({
     required this.prev,
@@ -93,6 +102,7 @@ class _SetData {
     this.done = false,
     this.kg = '',
     this.reps = '',
+    this.completedAt,
   });
 }
 
@@ -1045,12 +1055,19 @@ class _GymSessionState extends State<GymSessionScreen> {
                   ? _SetType.dropSet
                   : _SetType.normal;
         }
+        // s['completedAt'] round-trips through Firestore as a Timestamp
+        // (the HYDRATE path reads it straight back from
+        // inProgressSessions/{sessionRunId}) — never a raw DateTime at
+        // this point, since nothing in this file writes it any other way.
+        final rawCompletedAt = wasListSets ? s['completedAt'] : null;
         return _SetData(
           prev: '—',
           type: type,
           done: wasListSets ? (s['done'] as bool? ?? false) : false,
           kg: wasListSets ? s['kg']?.toString() ?? '' : '',
           reps: wasListSets ? s['reps']?.toString() ?? '' : '',
+          completedAt:
+              rawCompletedAt is Timestamp ? rawCompletedAt.toDate() : null,
         );
       }).toList();
       final isCardio = exMap['isCardio'] as bool? ?? false;
@@ -1154,6 +1171,10 @@ class _GymSessionState extends State<GymSessionScreen> {
         set.kg = kg;
         set.reps = reps;
         set.done = true;
+        // Captured fresh on every false->true transition (including a
+        // re-tick after an earlier un-tick) — never reused from a prior
+        // completion. See _SetData.completedAt's own doc comment.
+        set.completedAt = DateTime.now();
         if (restTime > 0) {
           _showRest = true;
           _restSecs = restTime;
@@ -1170,7 +1191,14 @@ class _GymSessionState extends State<GymSessionScreen> {
         _syncBlockDone(exIndex);
       }
     } else {
-      setState(() => set.done = false);
+      setState(() {
+        set.done = false;
+        // Cleared, not left stale — a set with done:false but a leftover
+        // completedAt from a previous (reversed) completion would be
+        // misleading data for the future plausibility check this is prep
+        // for. Re-ticking the same set fills it in fresh again above.
+        set.completedAt = null;
+      });
       // Un-ticking also needs to sync — otherwise the Firestore in-progress
       // doc keeps reporting this block (and potentially the whole session,
       // via isInProgressSessionFullyDone) as done even after the user
@@ -1212,7 +1240,21 @@ class _GymSessionState extends State<GymSessionScreen> {
       'muscle': ex.muscle,
       'restTime': ex.restTime,
       'sets': ex.sets
-          .map((s) => {'kg': s.kg, 'reps': s.reps, 'done': s.done})
+          .map((s) => {
+                'kg': s.kg,
+                'reps': s.reps,
+                'done': s.done,
+                // Timestamp.fromDate (this codebase's existing convention
+                // for a client-captured specific moment — see
+                // saveManualActivity()'s 'date' field in
+                // firestore_service.dart), not FieldValue.serverTimestamp():
+                // that sentinel only resolves to "now, at write time" and
+                // isn't supported inside array elements at all, so it's
+                // never correct for a per-set moment captured earlier.
+                'completedAt': s.completedAt != null
+                    ? Timestamp.fromDate(s.completedAt!)
+                    : null,
+              })
           .toList(),
     };
     FirestoreService().updateInProgressSessionBlock(
@@ -1252,6 +1294,7 @@ class _GymSessionState extends State<GymSessionScreen> {
                           'kg': s.kg,
                           'reps': s.reps,
                           'done': s.done,
+                          'completedAt': s.completedAt,
                         })
                     .toList(),
               })
@@ -1288,7 +1331,14 @@ class _GymSessionState extends State<GymSessionScreen> {
             'muscle': ex.muscle,
             'restTime': ex.restTime,
             'sets': ex.sets
-                .map((s) => {'kg': s.kg, 'reps': s.reps, 'done': s.done})
+                .map((s) => {
+                      'kg': s.kg,
+                      'reps': s.reps,
+                      'done': s.done,
+                      'completedAt': s.completedAt != null
+                          ? Timestamp.fromDate(s.completedAt!)
+                          : null,
+                    })
                 .toList(),
           };
           await FirestoreService().updateInProgressSessionBlock(
@@ -1366,6 +1416,162 @@ class _GymSessionState extends State<GymSessionScreen> {
     if (!mounted) return;
     setState(() => _isSaving = false);
     context.go(Routes.postSessionSummary, extra: sessionData);
+  }
+
+  // Confirms, then leaves an active (non-_readOnly) session mid-way without
+  // finalizing it — distinct from _showFinishDialog()'s "End Session",
+  // which finalizes/saves-to-sessions-collection. The inProgressSessions
+  // doc is left exactly as-is: _syncBlockDone() (fired on every set
+  // toggle, see _markSetDone) already keeps it current, but that write is
+  // fire-and-forget, so — mirroring _saveAndNavigate()'s own identical
+  // precaution before finalizing — this re-syncs every gym exercise's
+  // current state and awaits it, guaranteeing a toggle made just before
+  // tapping Leave isn't still in flight when the user navigates away.
+  // Nothing here calls finalizeInProgressSession() or writes to
+  // sessions/{id} — the doc simply stays in inProgressSessions, ready for
+  // the Resume/Start Over flow (session_resume_prompt.dart) the next time
+  // this plan/day is started.
+  //
+  // Standalone sessions (_sessionRunId == null — no plan was ever
+  // involved) have no inProgressSessions doc to sync in the first place;
+  // the sync loop below naturally no-ops for that case via its own guard,
+  // and leaving just discards the in-memory progress, same as it always
+  // has (standalone sessions were never resumable, before or after this
+  // feature).
+  //
+  // Navigates to Routes.home rather than context.pop(): this screen can be
+  // reached via context.push() (Home/Plan Schedule/Plan Detail/Plans tab's
+  // fresh-start paths) or context.go() (the Resume path in
+  // session_resume_prompt.dart, and mid_plan_cardio_complete_screen.dart's
+  // "Next" button) — a go()-originated instance may have nothing on the
+  // stack to pop back to. Routes.home is a destination that's always
+  // reachable regardless of how this screen was entered, and it's where
+  // the Today's Plan card (itself now Resume-aware) naturally surfaces
+  // this same session again.
+  Future<void> _handleLeaveSession() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogCtx) => Dialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: WW.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const Text(
+                'Leave workout?',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  color: WW.text,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Your progress is saved — you can resume this session later.',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: WW.textSec,
+                  height: 1.5,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(dialogCtx, false),
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: WW.border),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 13),
+                      ),
+                      child: const Text(
+                        'Keep Going',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: WW.text,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.pop(dialogCtx, true),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: WW.primary,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 13),
+                        elevation: 0,
+                      ),
+                      child: const Text(
+                        'Leave',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final sessionRunId = _sessionRunId;
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (sessionRunId != null && uid != null) {
+      setState(() => _isSaving = true);
+      for (final ex in _exercises) {
+        if (ex.isCardio) continue;
+        final blockData = {
+          'name': ex.name,
+          'muscle': ex.muscle,
+          'restTime': ex.restTime,
+          'sets': ex.sets
+              .map((s) => {
+                    'kg': s.kg,
+                    'reps': s.reps,
+                    'done': s.done,
+                    'completedAt': s.completedAt != null
+                        ? Timestamp.fromDate(s.completedAt!)
+                        : null,
+                  })
+              .toList(),
+        };
+        await FirestoreService().updateInProgressSessionBlock(
+            uid, sessionRunId, ex.originalIndex, blockData);
+      }
+      if (!mounted) return;
+      setState(() => _isSaving = false);
+    }
+
+    if (!mounted) return;
+    context.go(Routes.home);
   }
 
   void _showFinishDialog() {
@@ -2193,7 +2399,16 @@ class _GymSessionState extends State<GymSessionScreen> {
             'muscle': muscle,
             'restTime': 90,
             'sets': sets
-                .map((s) => {'kg': s.kg, 'reps': s.reps, 'done': s.done})
+                .map((s) => {
+                      'kg': s.kg,
+                      'reps': s.reps,
+                      'done': s.done,
+                      // Always null here — these sets were just created,
+                      // not yet completed — but included for shape
+                      // consistency with every other blockData['sets']
+                      // write site.
+                      'completedAt': s.completedAt,
+                    })
                 .toList(),
           });
           if (!mounted) return;
@@ -2583,6 +2798,15 @@ class _GymSessionState extends State<GymSessionScreen> {
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
       child: Row(
         children: [
+          // Leave (not Finish) — see _handleLeaveSession()'s own doc
+          // comment. Same arrow_back_rounded icon as the _readOnly
+          // branch's own back-chevron above, for the same "leave this
+          // screen" meaning in either state.
+          _TopBarButton(
+            icon: Icons.arrow_back_rounded,
+            onTap: _handleLeaveSession,
+          ),
+          const SizedBox(width: 8),
           // Elapsed timer
           Expanded(
             child: Row(

@@ -123,6 +123,69 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Estimates gym calories from actual work done, not just elapsed time —
+  // replaces the old flat `5.0 * weightKg * durationHours` formula (sets/
+  // reps/weight lifted had zero effect on it, so a session with zero
+  // completed sets earned the same calories as a genuinely hard one of the
+  // same duration). Three components, each with its own reasoning:
+  //  - durationComponent: 1.0 kcal/kg/hour — deliberately close to resting
+  //    metabolic rate (not a light-activity MET like ~3-4), so duration
+  //    alone no longer meaningfully rewards an empty/idle session; it's
+  //    still present because a real gym session involves more than the
+  //    barbell moving (setup, walking between stations, holding
+  //    positions).
+  //  - volumeComponent: 0.05 kcal per kg of totalVolume (kg x reps summed
+  //    across every done set — the same "volume load" metric this app
+  //    already surfaces via _formatVolume elsewhere), scaled by the
+  //    user's own body weight relative to a 70kg reference — a rough,
+  //    deliberately conservative approximation for resistance-training
+  //    energy expenditure scaling with both moved load and lifter mass.
+  //  - setsComponent: 0.15 kcal/kg per completed set — a small flat
+  //    per-set overhead (bracing, rest, setup) that volume alone
+  //    under-counts for lighter-load/bodyweight exercises.
+  // Zero sets and zero volume correctly collapses to just the (now much
+  // smaller) duration component, so an empty session barely registers
+  // instead of accruing meaningful calories purely from elapsed time.
+  // Floor lowered from the old formula's 50 to 10 (still non-zero for
+  // display sanity, but no longer a reward floor that would undermine the
+  // point of this change for a genuinely trivial/empty session); ceiling
+  // kept at 2000 as a sane per-session sanity cap.
+  // ---------------------------------------------------------------------------
+  int _estimateGymCalories({
+    required double weightKg,
+    required int durationSeconds,
+    required int totalSets,
+    required double totalVolume,
+  }) {
+    final durationHours = durationSeconds / 3600;
+    final durationComponent = 1.0 * weightKg * durationHours;
+    final volumeComponent = 0.05 * totalVolume * (weightKg / 70.0);
+    final setsComponent = 0.15 * weightKg * totalSets;
+    final total = durationComponent + volumeComponent + setsComponent;
+    return total.round().clamp(10, 2000);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Normalizes a set's completedAt value into the Timestamp this app's
+  // existing convention uses for a client-captured specific moment (see
+  // saveManualActivity()'s 'date': Timestamp.fromDate(...) below for the
+  // precedent) — FieldValue.serverTimestamp() is never the right choice
+  // here: it only resolves "now, at write time" (wrong for a moment
+  // captured earlier) and isn't supported inside array elements at all.
+  // Accepts either a plain DateTime (saveGymSession()'s sessionData is
+  // built directly in Dart, not round-tripped through Firestore first) or
+  // an already-deserialized Timestamp (finalizeInProgressSession() reads
+  // its data straight back from a doc) — anything else (missing field,
+  // legacy data with no completedAt at all) returns null rather than
+  // throwing.
+  // ---------------------------------------------------------------------------
+  Timestamp? _normalizeSetCompletedAt(dynamic raw) {
+    if (raw is Timestamp) return raw;
+    if (raw is DateTime) return Timestamp.fromDate(raw);
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
   // Saves a completed gym session to users/{uid}/sessions/{auto-id}.
   // Calculates totalSets, totalVolume, caloriesBurned, and xpEarned from the
   // exercises list. Uses add() so each call creates a unique document.
@@ -151,7 +214,12 @@ class FirestoreService {
           final reps = int.tryParse(s['reps']?.toString() ?? '');
           totalSets++;
           totalVolume += (kg ?? 0) * (reps ?? 0);
-          doneSets.add({'kg': kg, 'reps': reps, 'done': true});
+          doneSets.add({
+            'kg': kg,
+            'reps': reps,
+            'done': true,
+            'completedAt': _normalizeSetCompletedAt(s['completedAt']),
+          });
         }
 
         if (doneSets.isNotEmpty) {
@@ -167,9 +235,12 @@ class FirestoreService {
     final profile = await getUserProfile(uid);
     final weightKg =
         double.tryParse(profile?['weight']?.toString() ?? '70') ?? 70.0;
-    final durationHours = (sessionData['elapsedSeconds'] as int) / 3600;
-    int caloriesBurned = (5.0 * weightKg * durationHours).round();
-    caloriesBurned = caloriesBurned.clamp(50, 2000);
+    final caloriesBurned = _estimateGymCalories(
+      weightKg: weightKg,
+      durationSeconds: sessionData['elapsedSeconds'] as int,
+      totalSets: totalSets,
+      totalVolume: totalVolume,
+    );
 
     // sessionData['planId'] is usually empty for a genuinely standalone
     // session, but gym_session_screen.dart's _saveAndNavigate() also falls
@@ -1620,7 +1691,12 @@ class FirestoreService {
         final reps = int.tryParse(s['reps']?.toString() ?? '');
         totalSets++;
         totalVolume += (kg ?? 0) * (reps ?? 0);
-        doneSets.add({'kg': kg, 'reps': reps, 'done': true});
+        doneSets.add({
+          'kg': kg,
+          'reps': reps,
+          'done': true,
+          'completedAt': _normalizeSetCompletedAt(s['completedAt']),
+        });
       }
       if (doneSets.isNotEmpty) {
         cleanedExercises.add({
@@ -1646,11 +1722,37 @@ class FirestoreService {
         : (hasCardio ? 'cardio' : 'gym');
 
     int durationSeconds = 0;
-    int caloriesBurned = 0;
     for (final b in [...gymBlocks, ...cardioBlocks]) {
       durationSeconds += (b['durationSeconds'] as num?)?.toInt() ?? 0;
-      caloriesBurned += (b['caloriesBurned'] as num?)?.toInt() ?? 0;
     }
+    // Gym blocks never carry their own caloriesBurned or durationSeconds
+    // field (see gym_session_screen.dart's _syncBlockDone blockData shape —
+    // only name/muscle/restTime/sets), so the old `caloriesBurned +=
+    // b['caloriesBurned']` loop above always added 0 for every gym block —
+    // a combined session's total silently excluded the gym portion
+    // entirely. Estimated here instead via the same _estimateGymCalories()
+    // formula saveGymSession() uses, with durationSeconds: 0 since there's
+    // no reliable per-gym-block duration signal to pass (the volume/sets
+    // components still correctly reward real work done without it).
+    // Cardio blocks DO carry their own caloriesBurned (computed
+    // client-side by the outdoor/indoor cardio screens before being synced
+    // here) — summed as before, unchanged.
+    final profile = await getUserProfile(uid);
+    final weightKg =
+        double.tryParse(profile?['weight']?.toString() ?? '70') ?? 70.0;
+    final gymCaloriesBurned = hasGym
+        ? _estimateGymCalories(
+            weightKg: weightKg,
+            durationSeconds: 0,
+            totalSets: totalSets,
+            totalVolume: totalVolume,
+          )
+        : 0;
+    final cardioCaloriesBurned = cardioBlocks.fold<int>(
+      0,
+      (acc, b) => acc + ((b['caloriesBurned'] as num?)?.toInt() ?? 0),
+    );
+    final caloriesBurned = gymCaloriesBurned + cardioCaloriesBurned;
     final xpEarned = totalSets * 15 +
         cardioBlocks.fold<int>(0, (acc, b) {
           final cals = (b['caloriesBurned'] as num?)?.toInt() ?? 0;
@@ -1780,6 +1882,45 @@ class FirestoreService {
         .collection(_inProgressSessions)
         .doc(sessionRunId)
         .delete();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Returns the sessionRunId (doc id) of an existing in-progress session for
+  // this exact planId+dayIndex combination, or null if none exists. A doc
+  // only ever exists in this subcollection while genuinely unfinished —
+  // finalizeInProgressSession() deletes it the moment it's finalized (see
+  // that method) — so any doc found here is, by construction, still a
+  // genuinely resumable/abandoned session. Used by the pre-Start discovery
+  // step (see widgets/session_resume_prompt.dart) so Home/Plan Detail/Plan
+  // Schedule can offer Resume vs. Start Over instead of silently creating a
+  // new doc alongside an already-orphaned one. Two equality-only filters
+  // (planId, dayIndex) — no composite index required, Firestore's automatic
+  // single-field indexes already cover this. limit(1): at most one
+  // in-progress session should ever exist per planId+dayIndex per user in
+  // practice, and this discovery step is exactly what's meant to keep it
+  // that way going forward. Fails soft (logs, returns null) on any error,
+  // matching this file's existing convention.
+  // ---------------------------------------------------------------------------
+  Future<String?> findInProgressSessionRunId(
+    String uid,
+    String planId,
+    int dayIndex,
+  ) async {
+    try {
+      final snapshot = await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .collection(_inProgressSessions)
+          .where('planId', isEqualTo: planId)
+          .where('dayIndex', isEqualTo: dayIndex)
+          .limit(1)
+          .get();
+      if (snapshot.docs.isEmpty) return null;
+      return snapshot.docs.first.id;
+    } catch (e) {
+      print('findInProgressSessionRunId error: $e');
+      return null;
+    }
   }
 
   // ---------------------------------------------------------------------------

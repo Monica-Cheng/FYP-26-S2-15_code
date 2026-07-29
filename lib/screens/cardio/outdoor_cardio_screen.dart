@@ -52,6 +52,50 @@ const Map<String, double> _kMaxSpeedKmhByActivity = {
 };
 const double _kDefaultMaxSpeedKmh = 30;
 
+// Rolling-average window (seconds) for the active-seconds accrual pause
+// gate's implausible-speed check — see _computeAccrualPaused(). Short and
+// deliberately NOT single-point instantaneous speed: a single jittery GPS
+// point can spike a point-to-point speed reading well past any realistic
+// threshold even after the accuracy/per-point speed gates in _onPosition
+// already ran, so averaging over a few seconds smooths that out while
+// still catching a genuinely sustained implausible-speed stretch. 4s: the
+// middle of a 3-5s range — reacts quickly without being noise-prone.
+const int _kSpeedRollingWindowSeconds = 4;
+
+// Window (seconds) + distance threshold (meters) for the active-seconds
+// accrual pause gate's stationary-detection check — see
+// _computeAccrualPaused(). Deliberately much longer than the speed window:
+// a brief stop (traffic light, tying a shoelace) shouldn't immediately
+// pause accrual, only a sustained lack of real movement should. 12s / 3m:
+// middle of the suggested 10-15s / ~3m ranges — comfortably above
+// realistic GPS jitter-while-stationary (a few meters of drift is normal
+// even standing still) while still catching genuine idling well within a
+// typical rest period.
+const int _kStationaryWindowSeconds = 12;
+const double _kStationaryThresholdMeters = 3.0;
+
+// Hysteresis for the _accrualPaused transition — see _startTimer()'s tick
+// callback. The underlying per-tick _computeAccrualPaused() check (and its
+// thresholds above) is unchanged; this only smooths how its raw true/false
+// result gets applied, since flipping _accrualPaused on every single tick's
+// raw result made the warning banner flicker during completely normal
+// usage (briefly slowing for stairs, a moment of GPS noise). Deliberately
+// asymmetric: pausing (denying calorie/XP credit) requires more sustained
+// evidence than resuming (restoring it), since a false pause only costs UX
+// while a false resume costs real anti-cheat effectiveness.
+//  - _kAccrualPauseDebounceTicks = 3: the raw "should pause" condition must
+//    hold for 3 consecutive 1s ticks (~3s) before _accrualPaused actually
+//    flips true — long enough that one momentary blip can't trigger it, in
+//    line with the existing _kSpeedRollingWindowSeconds/
+//    _kStationaryWindowSeconds windows this check is layered on top of.
+//  - _kAccrualResumeDebounceTicks = 2: shorter than the pause threshold —
+//    once genuinely resumed, the user shouldn't be kept waiting as long to
+//    get credit back — but still more than a single tick, so one lucky
+//    good reading during an otherwise-ongoing bad stretch can't
+//    immediately flip the banner off and back on.
+const int _kAccrualPauseDebounceTicks = 3;
+const int _kAccrualResumeDebounceTicks = 2;
+
 // Below this much recorded distance, pace math is too noisy to be
 // meaningful (a few meters of GPS jitter can swing it wildly) — show
 // "--:--" instead.
@@ -172,6 +216,31 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   // reason: an elevation delta spanning a pause gap would be meaningless.
   // Null until the first point of a segment is accepted.
   double? _lastAcceptedAltitude;
+
+  // Recently-accepted points (including any stale-fallback-accepted ones —
+  // both flow through the same acceptance path in _onPosition, so neither
+  // is special-cased here), each paired with its own fix timestamp. Used
+  // by _computeAccrualPaused() to compute rolling average speed and
+  // stationary detection for the active-seconds accrual gate. Bounded to
+  // the longer of the two windows (_kStationaryWindowSeconds) by trimming
+  // stale entries every time _computeAccrualPaused() runs; reset alongside
+  // the rest of this session's per-segment state on Start/Resume.
+  final List<({LatLng point, DateTime time})> _recentAcceptedPoints = [];
+  // True while active-seconds accrual (and therefore calories/pace/XP) is
+  // paused — see _computeAccrualPaused()'s own doc comment for exactly
+  // what the underlying per-tick check looks at, and _startTimer()'s tick
+  // callback for the debounce that sits on top of it before this flag
+  // actually flips (see _kAccrualPauseDebounceTicks/
+  // _kAccrualResumeDebounceTicks). Purely a display/gating flag; never
+  // affects route/tail line drawing, which reads _segments directly and is
+  // untouched by this.
+  bool _accrualPaused = false;
+  // Consecutive-tick streak counters feeding the debounce in _startTimer()
+  // — incrementing one always resets the other, since each tick's raw
+  // _computeAccrualPaused() result is one or the other, never both. Reset
+  // alongside _accrualPaused on Start/Resume.
+  int _consecutivePauseConditionTicks = 0;
+  int _consecutiveClearConditionTicks = 0;
 
   double _totalDistanceMeters = 0;
   double _elevationGainMeters = 0;
@@ -662,6 +731,10 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       _lastAcceptedTime = null;
       _segmentStartTime = DateTime.now();
       _lastAcceptedAltitude = null;
+      _recentAcceptedPoints.clear();
+      _accrualPaused = false;
+      _consecutivePauseConditionTicks = 0;
+      _consecutiveClearConditionTicks = 0;
     });
     if (oldTail != null) _removeLine(oldTail);
     _startTimer();
@@ -828,6 +901,9 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
         segment.isEmpty ? rawPoint : _smoothPoint(segment.last, rawPoint);
     segment.add(acceptedPoint);
     _lastAcceptedTime = position.timestamp;
+    // Feeds _computeAccrualPaused()'s rolling speed/stationary checks —
+    // see that method's own doc comment.
+    _recentAcceptedPoints.add((point: acceptedPoint, time: position.timestamp));
     _followCameraOnAcceptedPoint(acceptedPoint);
 
     // Elevation gain: only count increases, matching how most fitness
@@ -968,12 +1044,126 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     }
   }
 
+  // Ticks every second regardless of accrual state — this is also the only
+  // place _accrualPaused is (re)computed, not just where it's consumed,
+  // since a genuinely stationary user may not generate any new GPS fixes
+  // at all (the OS's distanceFilter means nothing fires below ~5m of
+  // movement), so the pause gate can't rely solely on _onPosition running.
+  // _activeSeconds only increments when the DEBOUNCED _accrualPaused says
+  // the user is genuinely, plausibly moving — calories/pace/XP all derive
+  // from _activeSeconds/_totalDistanceMeters, so pausing accrual here is
+  // sufficient to keep all three honest without touching those getters.
+  //
+  // The raw per-tick _computeAccrualPaused() result is NOT applied to
+  // _accrualPaused directly — doing that flipped the warning banner on
+  // every single tick's result, which flickered during completely normal
+  // usage (briefly slowing for stairs, a moment of GPS noise). Instead,
+  // each raw result only extends a same-direction streak counter (see
+  // _consecutivePauseConditionTicks/_consecutiveClearConditionTicks —
+  // incrementing one always resets the other, so a flip in the raw result
+  // restarts whichever streak from zero), and _accrualPaused only
+  // transitions once one streak has held for its own debounce threshold
+  // (_kAccrualPauseDebounceTicks / _kAccrualResumeDebounceTicks — see
+  // those constants' own doc comment for the asymmetric reasoning). This
+  // is purely a smoothing layer on top of _computeAccrualPaused()'s
+  // existing thresholds — that method, and what it checks, is unchanged.
   void _startTimer() {
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      setState(() => _activeSeconds++);
+      setState(() {
+        final rawShouldPause = _computeAccrualPaused();
+        if (rawShouldPause) {
+          _consecutivePauseConditionTicks++;
+          _consecutiveClearConditionTicks = 0;
+        } else {
+          _consecutiveClearConditionTicks++;
+          _consecutivePauseConditionTicks = 0;
+        }
+
+        if (!_accrualPaused &&
+            _consecutivePauseConditionTicks >= _kAccrualPauseDebounceTicks) {
+          _accrualPaused = true;
+        } else if (_accrualPaused &&
+            _consecutiveClearConditionTicks >= _kAccrualResumeDebounceTicks) {
+          _accrualPaused = false;
+        }
+
+        if (!_accrualPaused) _activeSeconds++;
+      });
     });
+  }
+
+  // True when active-seconds accrual should be paused this tick — either
+  // the user is effectively stationary (near-zero real movement over the
+  // last _kStationaryWindowSeconds) or recent accepted points imply an
+  // unrealistic sustained speed for this activity (a rolling average over
+  // _kSpeedRollingWindowSeconds, not a single-point spike — see that
+  // constant's own doc comment). Route/tail line drawing is entirely
+  // unaffected — this only ever gates _activeSeconds, never _segments.
+  // Coexists with the 18s stale-fallback without any special-casing: a
+  // stale-fallback-accepted point flows through the exact same
+  // segment.add/_recentAcceptedPoints.add path as a normal one in
+  // _onPosition, so it's naturally included in both checks below.
+  bool _computeAccrualPaused() {
+    final now = DateTime.now();
+
+    // Stationary check: sums cumulative path distance (consecutive-pair
+    // distances — the same method _totalDistanceMeters itself uses, robust
+    // against back-and-forth jitter since it doesn't rely on net
+    // displacement alone) among accepted points from the last
+    // _kStationaryWindowSeconds. Fewer than 2 such points — including none
+    // at all, e.g. no fix has landed recently — is treated as stationary
+    // too: a deliberately conservative default, since unverified time
+    // shouldn't accrue calories/XP just because there's no data either way.
+    final stationaryWindowStart =
+        now.subtract(const Duration(seconds: _kStationaryWindowSeconds));
+    _recentAcceptedPoints.removeWhere((p) => p.time.isBefore(stationaryWindowStart));
+    double stationaryDistance = 0;
+    for (var i = 1; i < _recentAcceptedPoints.length; i++) {
+      stationaryDistance += Geolocator.distanceBetween(
+        _recentAcceptedPoints[i - 1].point.latitude,
+        _recentAcceptedPoints[i - 1].point.longitude,
+        _recentAcceptedPoints[i].point.latitude,
+        _recentAcceptedPoints[i].point.longitude,
+      );
+    }
+    final isStationary = _recentAcceptedPoints.length < 2 ||
+        stationaryDistance < _kStationaryThresholdMeters;
+
+    // Speed check: rolling average over a much shorter window than the
+    // stationary one — skipped (never triggers a pause on its own) when
+    // there's insufficient recent data, since the stationary check above
+    // already owns the "no data" conservative case.
+    final speedWindowStart =
+        now.subtract(const Duration(seconds: _kSpeedRollingWindowSeconds));
+    final speedWindowPoints = _recentAcceptedPoints
+        .where((p) => p.time.isAfter(speedWindowStart))
+        .toList();
+    var isImplausiblySpeedy = false;
+    if (speedWindowPoints.length >= 2) {
+      double windowDistance = 0;
+      for (var i = 1; i < speedWindowPoints.length; i++) {
+        windowDistance += Geolocator.distanceBetween(
+          speedWindowPoints[i - 1].point.latitude,
+          speedWindowPoints[i - 1].point.longitude,
+          speedWindowPoints[i].point.latitude,
+          speedWindowPoints[i].point.longitude,
+        );
+      }
+      final windowSeconds = speedWindowPoints.last.time
+              .difference(speedWindowPoints.first.time)
+              .inMilliseconds /
+          1000;
+      if (windowSeconds > 0) {
+        final windowSpeedKmh = (windowDistance / windowSeconds) * 3.6;
+        final maxSpeedKmh =
+            _kMaxSpeedKmhByActivity[_activity] ?? _kDefaultMaxSpeedKmh;
+        isImplausiblySpeedy = windowSpeedKmh > maxSpeedKmh;
+      }
+    }
+
+    return isStationary || isImplausiblySpeedy;
   }
 
   void _pauseTracking() {
@@ -993,6 +1183,10 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       _lastAcceptedTime = null;
       _segmentStartTime = DateTime.now();
       _lastAcceptedAltitude = null;
+      _recentAcceptedPoints.clear();
+      _accrualPaused = false;
+      _consecutivePauseConditionTicks = 0;
+      _consecutiveClearConditionTicks = 0;
     });
     if (oldTail != null) _removeLine(oldTail);
     _startTimer();
@@ -1076,7 +1270,17 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   // _calories getter, but driven by _activeSeconds (already excludes
   // paused time — see _startTimer/_pauseTracking) rather than a raw
   // wall-clock elapsed counter, consistent with how distance/pace here
-  // already exclude paused time.
+  // already exclude paused time. This also means it automatically excludes
+  // any stretch _computeAccrualPaused() has gated out (implausible speed /
+  // stationary) — no separate logic needed here, since _activeSeconds
+  // itself simply doesn't increment during those stretches (see
+  // _startTimer). _paceLabel below gets the same benefit for the same
+  // reason. _totalDistanceMeters is a narrower case: sustained implausible
+  // speed is already blocked point-by-point by _onPosition's own
+  // pre-existing per-point speed gate, but small GPS jitter while
+  // genuinely stationary isn't independently re-gated by
+  // _computeAccrualPaused() — that drift is bounded/negligible in
+  // practice and pre-existing to this change, not introduced by it.
   double get _calories {
     final met = _activity == 'Run'
         ? 9.0
@@ -1247,7 +1451,10 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (_isWaitingForGpsFix) _buildGpsWaitingBanner(),
+          if (_isWaitingForGpsFix)
+            _buildGpsWaitingBanner()
+          else if (_accrualPaused)
+            _buildAccrualPausedBanner(),
           _buildStatsCard(),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -1296,6 +1503,56 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
               fontSize: 13,
               fontWeight: FontWeight.w600,
               color: WW.primary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Shown while _accrualPaused (the DEBOUNCED flag — see _startTimer()'s
+  // tick callback) has paused active-seconds accrual (implausible
+  // sustained speed, or effectively stationary), never the raw per-tick
+  // _computeAccrualPaused() result directly — so this can't flicker on a
+  // single momentary blip the same way the underlying check alone would.
+  // Mutually exclusive with the GPS-waiting banner above (before any fix
+  // has landed at all, _isWaitingForGpsFix already covers the relevant
+  // status, and _accrualPaused would independently also end up true there
+  // since the stationary check treats "no recent points" as paused —
+  // showing both at once would be redundant). Non-blocking: no dismiss
+  // action, doesn't stop the session/freeze any controls, and clears
+  // itself automatically once the resume-side debounce threshold is met.
+  // Amber warning styling matches gym_session_screen.dart's own
+  // _buildInjuryFilteredBanner() (same color pair), distinct from the
+  // neutral WW.chipBg/WW.primary info style used for the GPS-waiting
+  // banner above, since this is a warning rather than a status update.
+  Widget _buildAccrualPausedBanner() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF3C7),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: const Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.pause_circle_outline_rounded,
+            size: 16,
+            color: Color(0xFFD97706),
+          ),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              "Pace doesn't look right — pausing tracking until this "
+              'clears up.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFFD97706),
+              ),
             ),
           ),
         ],
