@@ -9,6 +9,7 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../widgets/session_resume_prompt.dart';
 
 class PlanScheduleScreen extends StatefulWidget {
   const PlanScheduleScreen({super.key});
@@ -27,6 +28,14 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
   bool _breakModeActive = false;
   String? _breakEndDate;
   int _breakDays = 3;
+  // Same completion signal home_screen.dart's own _todayCompleted uses —
+  // captured from the same getPlanProgress() call _init() already makes
+  // for _currentDayIndex, just reading two more fields off the same
+  // result. Used by _statusOf() to correct the 'today' status once
+  // today's session has actually been completed (see that method's own
+  // comment for why _currentDayIndex alone isn't enough for this).
+  String? _lastCompletedDate;
+  int? _lastCompletedDayIndex;
 
   int _selectedWeekIdx = 0;
   bool _isLoading = true;
@@ -119,6 +128,9 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
           _breakModeActive = breakActive;
           _breakEndDate = rawBreakEnd;
           _compressedDays = loadedCompressedDays;
+          _lastCompletedDate = progress?['lastCompletedDate'] as String?;
+          _lastCompletedDayIndex =
+              (progress?['lastCompletedDayIndex'] as num?)?.toInt();
           _isLoading = false;
           if (_sessions.isNotEmpty) {
             _selectedWeekIdx = ((currentDay - 1) ~/ 7).clamp(0, _totalWeeks - 1);
@@ -143,11 +155,50 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
 
   int _dayIndexOf(int weekIdx, int posInWeek) => weekIdx * 7 + posInWeek + 1;
 
+  // dayIndex < _currentDayIndex alone used to be the only way this reported
+  // 'completed' — but markSessionComplete() (firestore_service.dart)
+  // deliberately doesn't advance currentDayIndex itself ("the advance
+  // happens on the next app open via checkAndAdvanceDay"), so right after
+  // finishing today's session this index comparison still can't see it:
+  // dayIndex == _currentDayIndex, so it'd report 'today' — same status as
+  // before starting — leaving the Start Session button visibly tappable
+  // for an already-completed day until the next app open. Checking
+  // lastCompletedDate/lastCompletedDayIndex (the same signal
+  // home_screen.dart's own _todayCompleted uses) for the specific
+  // dayIndex == _currentDayIndex case closes that gap; every other case is
+  // unchanged.
   String _statusOf(int dayIndex, bool isRest) {
     if (isRest) return 'rest';
     if (dayIndex < _currentDayIndex) return 'completed';
-    if (dayIndex == _currentDayIndex) return 'today';
+    if (dayIndex == _currentDayIndex) {
+      final today = DateTime.now().toString().substring(0, 10);
+      final completedToday = _lastCompletedDayIndex == dayIndex &&
+          _lastCompletedDate == today;
+      return completedToday ? 'completed' : 'today';
+    }
     return 'upcoming';
+  }
+
+  // Wired to _ScheduleDayCard's Start Session button instead of that card
+  // navigating straight to Routes.gymSession — routes through the shared
+  // discovery-and-prompt step (see widgets/session_resume_prompt.dart)
+  // first, so an already-abandoned in-progress session for this
+  // planId+dayIndex offers Resume/Start Over instead of silently being
+  // orphaned by a brand-new one. This button only ever renders for
+  // status == 'today' (see _buildDayCards' showTodayActions), and
+  // _statusOf() above already excludes an already-completed "today" from
+  // that status, so no separate completed check is needed here.
+  Future<void> _handleStartSession(int dayIndex) async {
+    final uid = _uid;
+    final planId = _planId;
+    if (uid == null || planId == null || planId.isEmpty) return;
+    await startOrResumeTrackedSession(
+      context: context,
+      uid: uid,
+      planId: planId,
+      dayIndex: dayIndex,
+      startFresh: () async => context.push(Routes.gymSession),
+    );
   }
 
   void _snack(String msg) {
@@ -606,7 +657,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
           isCompressed: isCompressed,
           showTodayActions: status == 'today',
           showCompress: hasAccessory && !isCompressed,
-          onStartSession: () => context.push(Routes.gymSession),
+          onStartSession: () => _handleStartSession(dayIndex),
           onCompress: () => _showCompressSheet(session, dayIndex),
           onRestore: () => _restoreDaySession(dayIndex),
         ),

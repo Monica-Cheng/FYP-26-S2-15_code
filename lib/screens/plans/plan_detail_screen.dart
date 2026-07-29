@@ -9,6 +9,7 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../widgets/session_resume_prompt.dart';
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,14 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
   bool _fromExplore = false;
   Map<String, dynamic>? _planData;
   StreamSubscription<Map<String, dynamic>?>? _planStreamSub;
+  // Same completion signal home_screen.dart's own _todayCompleted already
+  // uses (lastCompletedDate/lastCompletedDayIndex on the plan-progress
+  // doc) — see _checkCompletionState()/_isDayCompletedToday(). Null until
+  // that fetch resolves, which _isDayCompletedToday() treats as "not
+  // completed" (fails soft, matching _checkTrackedState()'s own
+  // try/catch-and-do-nothing convention).
+  String? _lastCompletedDate;
+  int? _lastCompletedDayIndex;
 
   @override
   void initState() {
@@ -49,6 +58,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
       }
       _checkTrackedState();
       _checkSavedState();
+      _checkCompletionState();
     });
   }
 
@@ -69,6 +79,34 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
       final trackedId = profile?['trackedPlanId'] as String?;
       setState(() => _isTracked = trackedId == planId);
     } catch (_) {}
+  }
+
+  Future<void> _checkCompletionState() async {
+    final planId = _planData?['id'] as String?;
+    if (planId == null || planId.isEmpty) return;
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final progress = await FirestoreService().getPlanProgress(uid, planId);
+      if (!mounted) return;
+      setState(() {
+        _lastCompletedDate = progress?['lastCompletedDate'] as String?;
+        _lastCompletedDayIndex =
+            (progress?['lastCompletedDayIndex'] as num?)?.toInt();
+      });
+    } catch (_) {}
+  }
+
+  // Matches home_screen.dart's own _todayCompleted check exactly
+  // (lastCompletedDate == today) — this narrowly means "the day that was
+  // just completed today", not a full historical per-day completion
+  // ledger (this app doesn't track one), so only whichever single day
+  // matches lastCompletedDayIndex ever shows as completed here, same as
+  // Home only ever shows one completed day at a time.
+  bool _isDayCompletedToday(int dayIndex) {
+    if (_lastCompletedDayIndex != dayIndex) return false;
+    final today = DateTime.now().toString().substring(0, 10);
+    return _lastCompletedDate == today;
   }
 
   void _snack(String msg) {
@@ -344,9 +382,26 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     if (uid == null) return;
     final planId = _planData?['id'] as String? ?? '';
     if (planId.isEmpty) return;
-    await FirestoreService().setOverrideDayIndex(uid, planId, dayIndex);
-    if (!mounted) return;
-    context.push(Routes.gymSession, extra: {'readOnly': true});
+    // Routes through the shared discovery-and-prompt step (see
+    // widgets/session_resume_prompt.dart) — an already-abandoned
+    // in-progress session for this exact planId+dayIndex offers Resume/
+    // Start Over instead of silently being orphaned by a brand-new one.
+    // _DayCard already hides this tap entirely for a day
+    // _isDayCompletedToday() reports as completed (see
+    // _buildSessionSchedule), so no separate completed check is needed
+    // here. The fresh-start path itself (setOverrideDayIndex + push) is
+    // unchanged from before this feature.
+    await startOrResumeTrackedSession(
+      context: context,
+      uid: uid,
+      planId: planId,
+      dayIndex: dayIndex,
+      startFresh: () async {
+        await FirestoreService().setOverrideDayIndex(uid, planId, dayIndex);
+        if (!mounted) return;
+        context.push(Routes.gymSession, extra: {'readOnly': true});
+      },
+    );
   }
 
   @override
@@ -902,9 +957,11 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
           final s = entry.value;
           final dayNumber =
               (s['dayNumber'] as num?)?.toInt() ?? (idx + 1);
+          final isCompleted = _isDayCompletedToday(dayNumber);
           return _DayCard(
             sessionData: s,
-            onPreview: () => _onStartDay(dayNumber),
+            isCompleted: isCompleted,
+            onPreview: isCompleted ? null : () => _onStartDay(dayNumber),
           );
         }),
       ],
@@ -1334,12 +1391,22 @@ class _DayCard extends StatefulWidget {
   final bool showStartButton;
   final VoidCallback? onStart;
   final VoidCallback? onPreview;
+  // True when this day matches _isDayCompletedToday() — shows a small
+  // teal "Completed" pill (same color/icon convention as home_screen.dart's
+  // own completed state, and identical to plan_schedule_screen.dart's own
+  // _StatusBadge 'completed' case, just sized for this compact list-row
+  // context) instead of a tappable preview row. Callers are expected to
+  // also pass onPreview: null when this is true (see
+  // _buildSessionSchedule) — this widget doesn't re-derive that itself,
+  // just reflects it visually.
+  final bool isCompleted;
 
   const _DayCard({
     required this.sessionData,
     this.showStartButton = false,
     this.onStart,
     this.onPreview,
+    this.isCompleted = false,
   });
 
   @override
@@ -1492,6 +1559,32 @@ class _DayCardState extends State<_DayCard> {
                     ),
                   ),
                 ),
+                if (widget.isCompleted) ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: WW.tealBg,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.check_rounded, color: WW.teal, size: 11),
+                        SizedBox(width: 3),
+                        Text(
+                          'Completed',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            color: WW.teal,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 if (widget.showStartButton) ...[
                   const SizedBox(width: 8),
                   FilledButton(
