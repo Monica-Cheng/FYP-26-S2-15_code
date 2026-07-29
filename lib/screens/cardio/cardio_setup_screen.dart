@@ -195,20 +195,30 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
               Row(
                 children: _kActivities.map((activity) {
                   final isSelected = _selectedActivity == activity.id;
+                  // Plan-launched cardio has its activity fixed by the plan
+                  // block — lock the selector to that activity and grey out
+                  // the other two, reusing the same WW.elevated/WW.textSec
+                  // muted-disabled treatment as the cardio placeholder's
+                  // Start button in gym_session_screen.dart's _readOnly gate,
+                  // rather than inventing a new disabled style.
+                  final isLockedOut =
+                      _fromPlan && _planActivity != null && !isSelected;
                   return Expanded(
                     child: Padding(
                       padding: EdgeInsets.only(
                         right: activity.id != 'Cycle' ? 8 : 0,
                       ),
                       child: GestureDetector(
-                        onTap: () =>
-                            setState(() => _selectedActivity = activity.id),
+                        onTap: isLockedOut
+                            ? null
+                            : () =>
+                                setState(() => _selectedActivity = activity.id),
                         child: Container(
                           height: 80,
                           decoration: BoxDecoration(
                             color: isSelected
                                 ? activity.color.withValues(alpha: 0.12)
-                                : WW.card,
+                                : (isLockedOut ? WW.elevated : WW.card),
                             borderRadius: BorderRadius.circular(14),
                             border: Border.all(
                               color:
@@ -220,7 +230,10 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               Icon(activity.icon,
-                                  size: 28, color: activity.color),
+                                  size: 28,
+                                  color: isLockedOut
+                                      ? WW.textSec
+                                      : activity.color),
                               const SizedBox(height: 4),
                               Text(
                                 activity.label,

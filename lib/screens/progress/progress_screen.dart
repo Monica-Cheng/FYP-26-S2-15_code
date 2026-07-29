@@ -91,7 +91,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
     'Nutrition',
   ];
   static const List<String> _timeLabels = ['W', 'M', 'Y'];
-  static const List<String> _actLabels = ['All', 'Gym', 'Cardio', 'Manual'];
+  static const List<String> _actLabels = [
+    'All',
+    'Gym',
+    'Cardio',
+    'Manual',
+    'Custom',
+  ];
 
   static const _kXpThresholds = [
     0,
@@ -498,6 +504,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
     if (_activityFilter == 0) return _sessions;
     if (_activityFilter == 3) {
       return _sessions.where((s) => s['isManuallyLogged'] == true).toList();
+    }
+    if (_activityFilter == 4) {
+      // Cross-references type entirely — any custom-plan session of any
+      // activity type (gym/cardio/combined) matches here.
+      return _sessions.where((s) => s['planIsCustom'] == true).toList();
     }
     final type = _activityFilter == 1 ? 'gym' : 'cardio';
     return _sessions.where((s) => s['type'] == type).toList();
@@ -1635,6 +1646,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
           stats: stats,
           xpLabel: '+$xp XP',
           isCardio: isCardio,
+          isCustom: s['planIsCustom'] == true,
           activity: activity,
           mapSnapshotBase64: s['mapSnapshotBase64'] as String?,
           onTap: () => context.push(Routes.activityDetail, extra: s),
@@ -2128,6 +2140,7 @@ class _ActivityCard extends StatelessWidget {
   final String xpLabel;
   final bool isCardio;
   final bool isManual;
+  final bool isCustom;
   final String? activity;
   final String? mapSnapshotBase64;
   final VoidCallback? onTap;
@@ -2141,6 +2154,7 @@ class _ActivityCard extends StatelessWidget {
     required this.xpLabel,
     required this.isCardio,
     this.isManual = false,
+    this.isCustom = false,
     this.activity,
     this.mapSnapshotBase64,
     this.onTap,
@@ -2151,7 +2165,12 @@ class _ActivityCard extends StatelessWidget {
   // running icon for every cardio type regardless of activity.
   IconData get _iconData {
     if (isManual) return Icons.edit_note_rounded;
-    if (!isCardio) return Icons.fitness_center_rounded;
+    // Same clipboard icon used elsewhere for custom routines (e.g.
+    // gym_session_screen.dart's read-only header) instead of the barbell,
+    // when this session came from a custom-built plan.
+    if (!isCardio) {
+      return isCustom ? Icons.assignment_rounded : Icons.fitness_center_rounded;
+    }
     switch (activity) {
       case 'Walk':
         return Icons.directions_walk_rounded;

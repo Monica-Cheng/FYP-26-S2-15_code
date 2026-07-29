@@ -171,6 +171,22 @@ class FirestoreService {
     int caloriesBurned = (5.0 * weightKg * durationHours).round();
     caloriesBurned = caloriesBurned.clamp(50, 2000);
 
+    // sessionData['planId'] is usually empty for a genuinely standalone
+    // session, but gym_session_screen.dart's _saveAndNavigate() also falls
+    // back to this method when the plan-linked finalizeInProgressSession()
+    // path throws — and _planId there is still set to the real tracked
+    // plan's id in that case. So this lookup mirrors
+    // finalizeInProgressSession()'s own fail-soft getPlan() pattern rather
+    // than assuming planId is always blank here.
+    final gymSessionPlanId = sessionData['planId'] as String? ?? '';
+    var planIsCustom = false;
+    if (gymSessionPlanId.isNotEmpty) {
+      try {
+        final plan = await getPlan(gymSessionPlanId);
+        planIsCustom = plan?['isCustom'] as bool? ?? false;
+      } catch (_) {}
+    }
+
     try {
       print('Writing to Firestore...');
       // notes/photoBase64 are optional — only ever present on sessionData
@@ -199,6 +215,7 @@ class FirestoreService {
         'caloriesBurned': caloriesBurned,
         'xpEarned': totalSets * 15,
         'isManuallyLogged': false,
+        'planIsCustom': planIsCustom,
         if (notes != null && notes.isNotEmpty) 'notes': notes,
         if (photoBase64 != null && photoBase64.isNotEmpty)
           'photoBase64': photoBase64,
@@ -661,6 +678,8 @@ class FirestoreService {
       'createdAt': FieldValue.serverTimestamp(),
       'isManuallyLogged': true,
       'xpEarned': 0,
+      // No plan is ever involved in a manually-logged activity.
+      'planIsCustom': false,
     });
   }
 
@@ -1191,6 +1210,10 @@ class FirestoreService {
       'exercises': [],
       'totalSets': 0,
       'totalVolume': 0.0,
+      // This method has no planId parameter today, so a real custom-plan
+      // lookup isn't possible here yet — known gap, always false until
+      // planId plumbing is added separately (out of scope for now).
+      'planIsCustom': false,
       'avgHeartRate': ?avgHeartRate,
       'maxHeartRate': ?maxHeartRate,
       'distanceMeters': ?distanceMeters,
@@ -1370,6 +1393,105 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Appends a brand-new block to an in-progress session's blocks[] array and
+  // returns its new index (the array's new length - 1) — for a block added
+  // mid-session (gym_session_screen.dart's "+ Add" sheets) that never had a
+  // slot from createInProgressSession()'s original seeding at all, unlike
+  // updateInProgressSessionBlock(), which only ever replaces an EXISTING
+  // slot and fails soft on an out-of-range index rather than growing the
+  // array. done:false is always seeded on, same as createInProgressSession()
+  // does for every block it originally seeds. Fails soft (logs, returns
+  // null) on a missing doc or any error — an add should never be able to
+  // block the user from continuing their workout; the caller falls back to
+  // originalIndex: -1 (no sync) exactly as it already does today when this
+  // returns null.
+  // ---------------------------------------------------------------------------
+  Future<int?> appendInProgressSessionBlock(
+    String uid,
+    String sessionRunId,
+    Map<String, dynamic> blockData,
+  ) async {
+    final docRef = _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_inProgressSessions)
+        .doc(sessionRunId);
+    try {
+      final doc = await docRef.get();
+      if (!doc.exists) {
+        print('appendInProgressSessionBlock: no such session $sessionRunId');
+        return null;
+      }
+      final rawBlocks = doc.data()?['blocks'];
+      final blocks = rawBlocks is List
+          ? rawBlocks.map((b) => Map<String, dynamic>.from(b as Map)).toList()
+          : <Map<String, dynamic>>[];
+      blocks.add({...blockData, 'done': false});
+      final newIndex = blocks.length - 1;
+      await docRef.update({'blocks': blocks});
+      return newIndex;
+    } catch (e) {
+      print('appendInProgressSessionBlock error: $e');
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Marks injury review as dismissed for this in-progress session (so
+  // gym_session_screen.dart's initState() postFrameCallback chain doesn't
+  // re-run _checkExercisesForInjuries()/re-show the review sheet on a later
+  // resume of the same sessionRunId — see that file's
+  // _injuryReviewAlreadyDismissed field doc) and, in the same
+  // read-modify-write, removes whichever blocks[] entries the user chose to
+  // remove during that review — same read-the-whole-array,
+  // replace-write-it-back approach as updateInProgressSessionBlock(), since
+  // Firestore has no in-place array-element removal either.
+  // removedOriginalIndices are each block's stable originalIndex (not a
+  // transient in-memory _exercises array position — see
+  // gym_session_screen.dart's _ExerciseData.originalIndex), removed
+  // highest-index-first so removing one never shifts the position of
+  // another index still queued for removal in the same pass. Fails soft
+  // (logs, doesn't throw) matching updateInProgressSessionBlock()'s own
+  // convention — a stray/late call after the session was already
+  // finalized/abandoned shouldn't crash the caller.
+  // ---------------------------------------------------------------------------
+  Future<void> dismissInjuryReview(
+    String uid,
+    String sessionRunId,
+    List<int> removedOriginalIndices,
+  ) async {
+    final docRef = _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_inProgressSessions)
+        .doc(sessionRunId);
+    try {
+      final doc = await docRef.get();
+      if (!doc.exists) {
+        print('dismissInjuryReview: no such session $sessionRunId');
+        return;
+      }
+      final rawBlocks = doc.data()?['blocks'];
+      final blocks = rawBlocks is List
+          ? rawBlocks.map((b) => Map<String, dynamic>.from(b as Map)).toList()
+          : <Map<String, dynamic>>[];
+      final sortedIndices = [...removedOriginalIndices]
+        ..sort((a, b) => b.compareTo(a));
+      for (final index in sortedIndices) {
+        if (index >= 0 && index < blocks.length) {
+          blocks.removeAt(index);
+        }
+      }
+      await docRef.update({
+        'blocks': blocks,
+        'injuryReviewDismissed': true,
+      });
+    } catch (e) {
+      print('dismissInjuryReview error: $e');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Reads inProgressSessions/{sessionRunId} and returns its data, or null if
   // missing or on any read error (fail-soft, logs per this file's
   // convention). Used to resume a plan session's exercise/tick state (see
@@ -1468,24 +1590,22 @@ class FirestoreService {
           'isCardio=${b['isCardio']} done=${b['done']}');
     }
 
-    // Only blocks actually marked done are ever finalized — an incomplete
-    // block simply doesn't appear in the output, rather than blocking the
-    // whole finalize.
-    final doneBlocks = blocks.where((b) => b['done'] == true).toList();
-
-    final gymBlocks = doneBlocks.where((b) => b['isCardio'] != true).toList();
+    // Cardio blocks: completion is genuinely all-or-nothing, so the
+    // existing block-level done == true gate is semantically correct here
+    // and stays unchanged.
     final cardioBlocks =
-        doneBlocks.where((b) => b['isCardio'] == true).toList();
-    final hasGym = gymBlocks.isNotEmpty;
+        blocks.where((b) => b['isCardio'] == true && b['done'] == true).toList();
     final hasCardio = cardioBlocks.isNotEmpty;
-    // Defaults to 'gym' whenever there's no cardio — including the
-    // zero-done-blocks edge case (hasGym and hasCardio both false) —
-    // matching saveGymSession()'s own existing precedent, which
-    // unconditionally writes type:'gym' even with zero completed sets,
-    // rather than rejecting or inventing new handling for that case.
-    final type = hasGym && hasCardio
-        ? 'combined'
-        : (hasCardio ? 'cardio' : 'gym');
+
+    // Gym blocks: a block's own 'done' flag means "every set on this
+    // exercise is done" — partial completion (some sets done, some not) is
+    // the normal case, not an edge case. So every gym block is passed
+    // through here regardless of its own done flag; the per-set extraction
+    // loop below already correctly filters to just the done sets within
+    // each exercise and skips an exercise entirely only if doneSets ends up
+    // empty. Pre-filtering by block-level done here would silently drop
+    // any exercise that isn't 100% complete before that loop ever runs.
+    final gymBlocks = blocks.where((b) => b['isCardio'] != true).toList();
 
     final List<Map<String, dynamic>> cleanedExercises = [];
     int totalSets = 0;
@@ -1511,9 +1631,23 @@ class FirestoreService {
       }
     }
 
+    // hasGym reflects whether any exercise actually ended up with a
+    // completed set (post per-set extraction) — not the block-level done
+    // flag — otherwise a combined session with only partially-done gym
+    // exercises would incorrectly resolve to type:'cardio' below.
+    final hasGym = cleanedExercises.isNotEmpty;
+    // Defaults to 'gym' whenever there's no cardio — including the
+    // zero-done-blocks edge case (hasGym and hasCardio both false) —
+    // matching saveGymSession()'s own existing precedent, which
+    // unconditionally writes type:'gym' even with zero completed sets,
+    // rather than rejecting or inventing new handling for that case.
+    final type = hasGym && hasCardio
+        ? 'combined'
+        : (hasCardio ? 'cardio' : 'gym');
+
     int durationSeconds = 0;
     int caloriesBurned = 0;
-    for (final b in doneBlocks) {
+    for (final b in [...gymBlocks, ...cardioBlocks]) {
       durationSeconds += (b['durationSeconds'] as num?)?.toInt() ?? 0;
       caloriesBurned += (b['caloriesBurned'] as num?)?.toInt() ?? 0;
     }
@@ -1534,6 +1668,7 @@ class FirestoreService {
     // a cosmetic session-name lookup shouldn't be able to block finalizing
     // an otherwise-complete session.
     var sessionName = 'Plan Day $dayIndex';
+    var planIsCustom = false;
     if (planId.isNotEmpty) {
       try {
         final plan = await getPlan(planId);
@@ -1541,12 +1676,14 @@ class FirestoreService {
         if (planName != null && planName.isNotEmpty) {
           sessionName = '$planName Day $dayIndex';
         }
+        planIsCustom = plan?['isCustom'] as bool? ?? false;
       } catch (_) {}
     }
 
     final sessionDoc = <String, dynamic>{
       'type': type,
       'sessionName': sessionName,
+      'planIsCustom': planIsCustom,
       'planId': planId,
       'date': FieldValue.serverTimestamp(),
       'createdAt': FieldValue.serverTimestamp(),

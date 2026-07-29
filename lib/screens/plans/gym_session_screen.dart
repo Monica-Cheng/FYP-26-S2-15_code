@@ -250,6 +250,16 @@ class _GymSessionState extends State<GymSessionScreen> {
   List<Map<String, dynamic>> _flaggedExercises = [];
   bool _injuryReviewPending = false;
   bool _isInjuryFiltered = false;
+  // Set from _hydrateFromInProgressSession()'s own already-in-scope read of
+  // the inProgressSessions doc (no second Firestore read needed) when
+  // resuming an existing sessionRunId whose injury review was already
+  // completed in an earlier mount of this screen — checked by initState()'s
+  // postFrameCallback chain to skip re-running
+  // _enrichExercisesWithInjuryRisk()/_checkExercisesForInjuries() and
+  // re-showing the sheet on this resume. Stays at its default false for a
+  // fresh-start session (no sessionRunId yet, or one just created this
+  // load), which correctly always runs the check once, as intended.
+  bool _injuryReviewAlreadyDismissed = false;
 
   Timer? _elapsedTimer;
   Timer? _restTimer;
@@ -279,10 +289,18 @@ class _GymSessionState extends State<GymSessionScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadPlanSession().then((_) async {
         await _loadPreviousSessionData();
-        await _enrichExercisesWithInjuryRisk();
-        await _loadInjuryData();
-        if (_injuryReviewPending && mounted) {
-          await _showInjuryReviewSheet();
+        // Skipped entirely on a resume whose injury review was already
+        // dismissed in an earlier mount (see _injuryReviewAlreadyDismissed's
+        // field doc) — nothing left to enrich/check/prompt for, since the
+        // user already made their keep/remove choices for this sessionRunId
+        // and any removed exercises were already persisted out of blocks[]
+        // by dismissInjuryReview() (see _applyInjuryFilter()).
+        if (!_injuryReviewAlreadyDismissed) {
+          await _enrichExercisesWithInjuryRisk();
+          await _loadInjuryData();
+          if (_injuryReviewPending && mounted) {
+            await _showInjuryReviewSheet();
+          }
         }
       });
     });
@@ -615,6 +633,9 @@ class _GymSessionState extends State<GymSessionScreen> {
       _isCustomPlan = isCustom;
       _planSport = sport;
       _isLoadingSession = false;
+      // Reused from this same already-fetched `data` — no second Firestore
+      // read needed. See _injuryReviewAlreadyDismissed's field doc.
+      _injuryReviewAlreadyDismissed = data['injuryReviewDismissed'] == true;
     });
     return true;
   }
@@ -764,10 +785,22 @@ class _GymSessionState extends State<GymSessionScreen> {
         .where((f) => f['remove'] == true)
         .map((f) => f['index'] as int)
         .toSet();
+    // Stable Firestore-bound slots for whichever exercises are actually
+    // being removed — ex.originalIndex, not their transient _exercises
+    // array position, matching how every other Firestore-bound write in
+    // this file (_syncBlockDone, _buildCardioPlaceholderCard) already
+    // distinguishes the two. Collected regardless of which branch below
+    // runs, since the "keep everything" case still needs to report an
+    // empty removal list to dismissInjuryReview() below.
+    final removedOriginalIndices = <int>[];
     if (toRemove.isNotEmpty) {
       final newExercises = <_ExerciseData>[];
       for (int i = 0; i < _exercises.length; i++) {
-        if (!toRemove.contains(i)) newExercises.add(_exercises[i]);
+        if (toRemove.contains(i)) {
+          removedOriginalIndices.add(_exercises[i].originalIndex);
+        } else {
+          newExercises.add(_exercises[i]);
+        }
       }
       setState(() {
         _exercises = newExercises;
@@ -776,6 +809,24 @@ class _GymSessionState extends State<GymSessionScreen> {
       });
     } else {
       setState(() => _injuryReviewPending = false);
+    }
+
+    // Persists the dismissal — and whichever exercises were actually
+    // removed, by stable originalIndex — so a later resume of this same
+    // sessionRunId (the mid-plan-cardio return trip, or a full
+    // app-kill-and-reopen) doesn't re-prompt for the same exercises and
+    // doesn't silently reintroduce ones the user already chose to remove.
+    // Standalone sessions (sessionRunId == null) have nowhere to persist
+    // this to — the in-memory removal above is already the whole story
+    // for those, exactly as before this change. Fire-and-forget, matching
+    // this file's existing convention for non-critical-path writes (e.g.
+    // _createInProgressSession) — nothing after this call site depends on
+    // its completion.
+    final uid = AuthService().getCurrentUser()?.uid;
+    final sessionRunId = _sessionRunId;
+    if (uid != null && sessionRunId != null) {
+      FirestoreService()
+          .dismissInjuryReview(uid, sessionRunId, removedOriginalIndices);
     }
   }
 
@@ -2059,17 +2110,51 @@ class _GymSessionState extends State<GymSessionScreen> {
     );
   }
 
+  // Gives a mid-session-added block (gym or cardio, via either "+ Add"
+  // sheet) a REAL Firestore blocks[] slot instead of the originalIndex: -1
+  // sentinel every such block got before this fix (which meant
+  // _syncBlockDone()/_buildCardioPlaceholderCard's onTap always silently
+  // no-op'd via updateInProgressSessionBlock's own out-of-range guard —
+  // for a cardio block specifically, this meant tapping "Start <Activity>"
+  // did nothing visibly wrong, just never synced). Only relevant for a
+  // plan-linked session (_sessionRunId != null) — a standalone session has
+  // no in-progress doc to append to at all, so this returns -1 immediately
+  // with no Firestore call, leaving that case completely unchanged from
+  // today. Also fails soft to -1 if the append call itself fails
+  // (appendInProgressSessionBlock's own fail-soft return of null) — an add
+  // should never block the user from continuing their workout, just accept
+  // that this one block won't sync, same degraded fallback as today.
+  // Awaited by both call sites BEFORE the setState that actually adds the
+  // block to _exercises, so no tappable "Start <Activity>"/set row for it
+  // can ever render before its real index (or the -1 fallback) is decided
+  // — no race where a fast tap targets a not-yet-resolved index.
+  Future<int> _appendBlockIfMidSession(Map<String, dynamic> blockData) async {
+    final sessionRunId = _sessionRunId;
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (sessionRunId == null || uid == null) return -1;
+    final index = await FirestoreService()
+        .appendInProgressSessionBlock(uid, sessionRunId, blockData);
+    return index ?? -1;
+  }
+
   // Mirrors _addCardioBlock()'s shape in build_routine_screen.dart (name
   // baked as "$activity ${minutes}min", muscle:'Cardio', a single fake
   // set carrying minutes as its reps — matches this app's other
   // isCardio:true block convention) but builds a typed _ExerciseData for
   // this screen's own in-memory model instead of a raw Firestore map.
-  // originalIndex is left at its default (-1) — same as every exercise
-  // _showAddExerciseSheet() already adds today, since neither has a
-  // corresponding Firestore blocks[] slot; see that field's own doc
-  // comment and this task's own report on why that's a pre-existing,
-  // unrelated gap rather than something new here.
-  void _addCardioExercise(String activity, int minutes) {
+  Future<void> _addCardioExercise(String activity, int minutes) async {
+    final originalIndex = await _appendBlockIfMidSession({
+      'isCardio': true,
+      'cardioActivity': activity,
+      'cardioMinutes': minutes,
+      'name': '$activity ${minutes}min',
+      'muscle': 'Cardio',
+      'restTime': 0,
+      'sets': [
+        {'id': '1', 'type': 'N', 'kg': '', 'reps': '$minutes'},
+      ],
+    });
+    if (!mounted) return;
     setState(() {
       _exercises.add(_ExerciseData(
         name: '$activity ${minutes}min',
@@ -2080,6 +2165,7 @@ class _GymSessionState extends State<GymSessionScreen> {
         cardioActivity: activity,
         cardioMinutes: minutes,
         injuryRisk: [],
+        originalIndex: originalIndex,
       ));
     });
   }
@@ -2095,19 +2181,30 @@ class _GymSessionState extends State<GymSessionScreen> {
       ),
       builder: (ctx) => _GymExerciseSearchSheet(
         alreadyAdded: currentNames,
-        onAdd: (name, muscle) {
+        onAdd: (name, muscle) async {
           Navigator.of(ctx).pop();
+          final sets = [
+            _SetData(prev: '—', type: _SetType.warmup),
+            _SetData(prev: '—', type: _SetType.normal),
+            _SetData(prev: '—', type: _SetType.normal),
+          ];
+          final originalIndex = await _appendBlockIfMidSession({
+            'name': name,
+            'muscle': muscle,
+            'restTime': 90,
+            'sets': sets
+                .map((s) => {'kg': s.kg, 'reps': s.reps, 'done': s.done})
+                .toList(),
+          });
+          if (!mounted) return;
           setState(() {
             _exercises.add(_ExerciseData(
               name: name,
               muscle: muscle,
               restTime: 90,
-              sets: [
-                _SetData(prev: '—', type: _SetType.warmup),
-                _SetData(prev: '—', type: _SetType.normal),
-                _SetData(prev: '—', type: _SetType.normal),
-              ],
+              sets: sets,
               injuryRisk: [],
+              originalIndex: originalIndex,
             ));
           });
           _loadPreviousSessionData();

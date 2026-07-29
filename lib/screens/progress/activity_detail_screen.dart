@@ -32,6 +32,26 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
   // is actually ready to accept annotations.
   MapLibreMapController? _cardioMapController;
 
+  // Whether the full-screen map view (opened by tapping the small preview
+  // in _buildCardioMapSection()) is currently showing. Pure local UI
+  // state, same pattern as outdoor_cardio_screen.dart's own
+  // _statsExpanded/_buildExpandedStatsView() full-screen toggle — this
+  // codebase has no dedicated photo/image-viewer route or dialog anywhere
+  // (confirmed by search), so this in-place state-driven overlay is the
+  // closest existing "expand to full screen" precedent to follow rather
+  // than inventing a new route/dialog pattern.
+  bool _cardioMapFullScreen = false;
+  // Separate controller for the full-screen map's own MapLibreMap
+  // instance — a completely independent widget/controller from
+  // _cardioMapController above, not a reused one. Safe to do here (unlike
+  // outdoor_cardio_screen.dart's live-tracking map, which had to stay
+  // mounted across its own full-screen toggle to avoid losing
+  // incrementally-recorded state) since _routePoints is fixed, already-
+  // saved data — the full-screen map just redraws the exact same static
+  // route from scratch, so there's nothing to lose by letting the small
+  // preview's map mount/unmount independently of this one.
+  MapLibreMapController? _cardioMapFullScreenController;
+
   // At most one cardio block's map is ever a live, interactive MapLibreMap
   // at a time — see _updateActiveCardioMap()'s doc comment for why (avoids
   // N simultaneous native GL platform views/tile-fetch contention). One
@@ -336,6 +356,7 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
             ],
           ),
           if (_deleteDialogOpen) _buildDeleteDialog(),
+          if (_cardioMapFullScreen) _buildCardioMapFullScreen(),
         ],
       ),
     );
@@ -711,10 +732,24 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
   }
 
   // ── Outdoor cardio map section ─────────────────────────────────────────────
-  // Interactive MapLibreMap (real gestures — no restrictions applied) showing
-  // the recorded route: same style URL, line color/width, and bounds-fitting
-  // approach as outdoor_cardio_screen.dart's live tracking map/
-  // _fitCameraToRoute, just fitted once on load instead of live-updated.
+  // Small preview: still a real, live-rendering MapLibreMap underneath (same
+  // style URL, line color/width, and bounds-fitting approach as
+  // outdoor_cardio_screen.dart's live tracking map/_fitCameraToRoute, just
+  // fitted once on load instead of live-updated) — kept live rather than
+  // swapped for a static image so it still shows the genuine map/route with
+  // no extra snapshot-decoding step. Its own pan/zoom/rotate/tilt gesture
+  // recognizers are explicitly disabled below — an opaque GestureDetector
+  // sitting on top of a MapLibreMap with those still enabled (the previous
+  // state of this code) is a genuine, unresolved gesture-arena race against
+  // the native platform view's own recognizers (confirmed via maplibre_gl's
+  // own source: all of rotate/scroll/zoom/tilt/dragEnabled default to true),
+  // not just a hit-test-ordering matter — HitTestBehavior.opaque alone only
+  // makes the overlay reachable in Flutter's own hit-test, it doesn't defeat
+  // a separately-registered native recognizer underneath. Disabling those
+  // flags here removes the native recognizer from the arena entirely, so
+  // the overlay's tap has nothing left to race against. All real
+  // interaction now happens in _buildCardioMapFullScreen() instead, which
+  // keeps every one of these gestures enabled (its default, unchanged).
 
   Widget _buildCardioMapSection() {
     final points = _routePoints;
@@ -725,14 +760,46 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
           borderRadius: BorderRadius.circular(16),
           child: SizedBox(
             height: 220,
-            child: MapLibreMap(
-              styleString: _kMapStyleUrl,
-              initialCameraPosition: CameraPosition(
-                target: points.first,
-                zoom: 14,
-              ),
-              onMapCreated: _onCardioMapCreated,
-              onStyleLoadedCallback: _onCardioStyleLoaded,
+            child: Stack(
+              children: [
+                MapLibreMap(
+                  styleString: _kMapStyleUrl,
+                  initialCameraPosition: CameraPosition(
+                    target: points.first,
+                    zoom: 14,
+                  ),
+                  onMapCreated: _onCardioMapCreated,
+                  onStyleLoadedCallback: _onCardioStyleLoaded,
+                  scrollGesturesEnabled: false,
+                  zoomGesturesEnabled: false,
+                  rotateGesturesEnabled: false,
+                  tiltGesturesEnabled: false,
+                  dragEnabled: false,
+                ),
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => setState(() => _cardioMapFullScreen = true),
+                  ),
+                ),
+                Positioned(
+                  right: 10,
+                  bottom: 10,
+                  child: Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.45),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.open_in_full_rounded,
+                      size: 15,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -771,6 +838,98 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
     if (controller == null) return;
     _drawRouteLine(controller, _routePoints);
     _fitCameraToRouteBounds(controller, _routePoints);
+  }
+
+  // ── Full-screen cardio map (opened by tapping the small preview) ───────────
+  // Entirely independent MapLibreMap/controller from the small preview's —
+  // see _cardioMapFullScreenController's field doc for why that's safe here.
+  // Reuses _drawRouteLine/_fitCameraToRouteBounds as-is (both already take
+  // an explicit controller + points, exactly for this kind of reuse).
+
+  void _onCardioMapFullScreenCreated(MapLibreMapController controller) {
+    _cardioMapFullScreenController = controller;
+  }
+
+  void _onCardioMapFullScreenStyleLoaded() {
+    final controller = _cardioMapFullScreenController;
+    if (controller == null) return;
+    _drawRouteLine(controller, _routePoints);
+    _fitCameraToRouteBounds(controller, _routePoints);
+  }
+
+  // Full-screen, fully-interactive (no restrictions applied) MapLibreMap —
+  // same opaque-Container-over-the-whole-screen + close-button pattern as
+  // outdoor_cardio_screen.dart's own _buildExpandedStatsView(), the closest
+  // existing full-screen-toggle precedent in this codebase (no dedicated
+  // photo/image-viewer route or dialog exists anywhere to reuse instead —
+  // confirmed by search). Dismissing just flips _cardioMapFullScreen back to
+  // false; the controller field is left to be naturally replaced next time
+  // this view is reopened (MapLibreMap's own State.dispose() already tears
+  // down the underlying platform view when this widget leaves the tree, per
+  // the same precedent already relied on elsewhere in this file — see
+  // _updateActiveCardioMap()'s doc comment).
+  Widget _buildCardioMapFullScreen() {
+    final points = _routePoints;
+    return Positioned.fill(
+      child: Container(
+        color: WW.bg,
+        child: SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Route',
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800,
+                        color: WW.text,
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () =>
+                          setState(() => _cardioMapFullScreen = false),
+                      child: Container(
+                        width: 36,
+                        height: 36,
+                        decoration: const BoxDecoration(
+                          color: WW.elevated,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Center(
+                          child: Icon(
+                            Icons.close_fullscreen_rounded,
+                            size: 16,
+                            color: WW.textSec,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: points.isEmpty
+                    ? const SizedBox.shrink()
+                    : MapLibreMap(
+                        styleString: _kMapStyleUrl,
+                        initialCameraPosition: CameraPosition(
+                          target: points.first,
+                          zoom: 14,
+                        ),
+                        onMapCreated: _onCardioMapFullScreenCreated,
+                        onStyleLoadedCallback:
+                            _onCardioMapFullScreenStyleLoaded,
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   // One controller per cardioBlocks[] entry — a combined session can have

@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -26,6 +27,18 @@ const String _kOpenFreeMapLibertyStyle =
 // treated as GPS noise and skipped — not added to the route or distance
 // total.
 const double _kMinAcceptableAccuracyMeters = 15;
+
+// If no fix has passed _kMinAcceptableAccuracyMeters for at least this
+// long, the next fix is accepted anyway regardless of accuracy — a rough
+// point is better than an indefinitely frozen route during a prolonged
+// GPS dead zone. 18s: comfortably inside the requested 15-20s range,
+// closer to the middle than either edge — long enough that ordinary
+// short accuracy dips (the first few fixes after Start, momentary
+// multipath in dense areas) still resolve on their own via the primary
+// gate without ever reaching this fallback, but short enough that a
+// genuinely prolonged dead zone doesn't leave the user staring at a
+// frozen route for too long.
+const Duration _kStaleAcceptanceThreshold = Duration(seconds: 18);
 
 // Max plausible speed per activity (km/h) — generous buffers above
 // realistic max effort (even elite race pace/sprinting/cycling), so this
@@ -146,6 +159,14 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   // current segment — reset alongside _currentLine on each new segment.
   // Used to compute implied speed for the plausibility check.
   DateTime? _lastAcceptedTime;
+  // Wall-clock time this tracking segment began (Start or Resume) — the
+  // reference point for the stale-GPS fallback in _onPosition() when
+  // _lastAcceptedTime is still null (no fix has been accepted yet this
+  // segment), so a long stretch of poor-accuracy fixes right after
+  // Start/Resume still eventually gets a fallback acceptance instead of
+  // waiting forever for _lastAcceptedTime to exist. Reset alongside
+  // _lastAcceptedTime on each new segment.
+  DateTime? _segmentStartTime;
   // Altitude (meters) of the last accepted point in the current segment —
   // reset alongside _lastAcceptedTime on each new segment, for the same
   // reason: an elevation delta spanning a pause gap would be meaningless.
@@ -190,12 +211,30 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   File? _pickedPhoto;
   bool _isSaving = false;
 
-  // Captured once, at the moment the hold-to-finish gesture completes
-  // (see _finishTracking) — must happen before _trackingState flips to
-  // finished, since that's what unmounts the MapLibreMap widget (and its
-  // controller) per build()'s ternary. Read by _saveActivity() instead of
-  // capturing fresh there, which was always too late to find a live map.
+  // Resolved value of _pendingSnapshotFuture, once it completes — see that
+  // field's doc. Kept as a plain fallback for _saveActivity() in case
+  // _pendingSnapshotFuture is somehow null when it runs; in practice
+  // _finishTracking() always sets _pendingSnapshotFuture before either
+  // save path (plan-linked or standalone) can reach _saveActivity().
   String? _capturedMapSnapshotBase64;
+
+  // Kicked off fire-and-forget by _finishTracking() the moment Finish
+  // completes, so the map-snapshot's animateCamera/
+  // waitUntilMapTilesAreLoaded/takeSnapshot chain (which can
+  // intermittently take several seconds on a slow network or a large
+  // route) never blocks the user from immediately seeing the finished/
+  // success screen. _saveActivity() awaits this directly (rather than
+  // reading _capturedMapSnapshotBase64 synchronously) so the snapshot is
+  // never silently dropped if a save happens before the capture resolves.
+  Future<String?>? _pendingSnapshotFuture;
+
+  // True from the moment Finish is tapped until _pendingSnapshotFuture
+  // resolves — keeps the MapLibreMap widget (and its controller) mounted
+  // just long enough for the background snapshot capture to actually have
+  // a live controller to call, even though _trackingState has already
+  // flipped to finished and the UI has moved on to the finished/success
+  // screen. See build()'s showMap computation.
+  bool _mapNeededForSnapshot = false;
 
   @override
   void initState() {
@@ -299,11 +338,14 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   // map on that noisy signal would visually fight the route-line
   // smoothing already in place (_smoothPoint) — a fixed north-up view
   // that just re-centers is the more conservative, less-janky default
-  // here. This widget is unmounted entirely once _trackingState reaches
-  // finished (see build()'s ternary), so this never overlaps with
-  // _fitCameraToRoute()/_captureMapSnapshot() at save-time — those only
-  // ever run after Finish, by which point this tracking-mode camera
-  // behavior is already gone along with the map widget itself.
+  // here. This property alone wasn't reliably engaging the native follow
+  // behavior on-device, so _onPosition() also does an explicit
+  // moveCamera() on every accepted fix as a guaranteed backstop — see
+  // _followCameraOnAcceptedPoint(). The map widget itself now stays
+  // mounted through _trackingState reaching finished (see build()'s
+  // showMap) for as long as _mapNeededForSnapshot needs it for the
+  // background snapshot capture, but this getter still correctly returns
+  // `none` by then since _trackingState is no longer `tracking`.
   MyLocationTrackingMode get _myLocationTrackingMode =>
       _trackingState == _TrackingState.tracking
           ? MyLocationTrackingMode.tracking
@@ -618,6 +660,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       _currentLine = null;
       _tailLine = null;
       _lastAcceptedTime = null;
+      _segmentStartTime = DateTime.now();
       _lastAcceptedAltitude = null;
     });
     if (oldTail != null) _removeLine(oldTail);
@@ -728,8 +771,24 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     _updateLiveTail(position);
 
     // Low-quality fix — don't let GPS noise inflate the route/distance;
-    // just wait for the next update.
-    if (position.accuracy > _kMinAcceptableAccuracyMeters) return;
+    // just wait for the next update. UNLESS no accepted fix has landed
+    // for at least _kStaleAcceptanceThreshold — then accept this one
+    // anyway (falling through to the normal acceptance path below,
+    // rather than returning) so a prolonged GPS dead zone doesn't leave
+    // the route looking frozen indefinitely. The stored/used accuracy
+    // value itself is never faked — this just lets a real, lower-accuracy
+    // point through as-is.
+    if (position.accuracy > _kMinAcceptableAccuracyMeters) {
+      final referenceTime =
+          _lastAcceptedTime ?? _segmentStartTime ?? position.timestamp;
+      final staleness = DateTime.now().difference(referenceTime);
+      if (staleness <= _kStaleAcceptanceThreshold) return;
+      // Falls through to the normal acceptance path below — same
+      // distance calc/segment.add/_lastAcceptedTime update as an
+      // ordinary accurate fix. Setting _lastAcceptedTime there is what
+      // prevents this from cascading: the next poor fix must wait out
+      // the full threshold again from this new timestamp.
+    }
 
     final rawPoint = LatLng(position.latitude, position.longitude);
     final segment = _segments.last;
@@ -769,6 +828,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
         segment.isEmpty ? rawPoint : _smoothPoint(segment.last, rawPoint);
     segment.add(acceptedPoint);
     _lastAcceptedTime = position.timestamp;
+    _followCameraOnAcceptedPoint(acceptedPoint);
 
     // Elevation gain: only count increases, matching how most fitness
     // apps report "gain" rather than net elevation change. Position
@@ -792,6 +852,20 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
 
     if (mounted) setState(() {});
     _drawCurrentSegment();
+  }
+
+  // Explicit backstop for the native myLocationTrackingMode follow
+  // behavior (see that getter's doc) — called on every accepted fix while
+  // tracking, so the camera reliably re-centers on the user regardless of
+  // whether the platform's own tracking-mode property is behaving
+  // correctly. moveCamera (an instant snap) rather than animateCamera:
+  // this fires as often as every ~5m of movement
+  // (_buildLocationSettings' distanceFilter), and stacking animateCamera
+  // calls faster than each one's own implicit fly-to animation finishes
+  // fights itself into visible stutter — an instant snap at this cadence
+  // reads smoother in practice than competing animations.
+  void _followCameraOnAcceptedPoint(LatLng point) {
+    _mapController?.moveCamera(CameraUpdate.newLatLng(point));
   }
 
   // Simple exponential moving average: blends the new raw fix with the
@@ -917,6 +991,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       _currentLine = null;
       _tailLine = null;
       _lastAcceptedTime = null;
+      _segmentStartTime = DateTime.now();
       _lastAcceptedAltitude = null;
     });
     if (oldTail != null) _removeLine(oldTail);
@@ -941,13 +1016,31 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     _tailLine = null;
     if (oldTail != null) _removeLine(oldTail);
 
-    _capturedMapSnapshotBase64 = await _captureMapSnapshot();
-
+    // UI transitions immediately — the map-snapshot capture below (whose
+    // animateCamera/waitUntilMapTilesAreLoaded/takeSnapshot chain can
+    // intermittently take several seconds on a slow network or a large
+    // route) is no longer on the critical path for Finish. The map widget
+    // stays mounted behind the finished-state UI for as long as
+    // _mapNeededForSnapshot is true (see build()'s showMap), so the
+    // capture below still has a live controller to call.
     if (!mounted) return;
     setState(() {
       _trackingState = _TrackingState.finished;
       _statsExpanded = false;
+      _mapNeededForSnapshot = true;
     });
+
+    // Fire-and-forget from this method's point of view — _saveActivity()
+    // (below, and the standalone "Save Activity" button tap) awaits this
+    // same future directly rather than reading _capturedMapSnapshotBase64
+    // synchronously, so the snapshot is never silently dropped if a save
+    // happens before the capture resolves.
+    final snapshotFuture = _captureMapSnapshot();
+    _pendingSnapshotFuture = snapshotFuture;
+    unawaited(snapshotFuture.then((snapshot) {
+      _capturedMapSnapshotBase64 = snapshot;
+      if (mounted) setState(() => _mapNeededForSnapshot = false);
+    }));
 
     // Plan-linked blocks (sessionRunId present) never show the standalone
     // name/notes/photo form below — see build()'s ternary — so there's no
@@ -958,7 +1051,9 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     // instead. _pickedPhoto/_notesController stay at their untouched
     // defaults here, so blockData naturally carries no notes/photoBase64
     // — that collection happens exclusively on
-    // mid_plan_cardio_complete_screen.dart.
+    // mid_plan_cardio_complete_screen.dart. _saveActivity() itself awaits
+    // _pendingSnapshotFuture before reading the snapshot, so this doesn't
+    // race the capture kicked off above.
     if (_sessionRunId != null) {
       await _saveActivity();
     }
@@ -967,6 +1062,15 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   // ── Derived stats ─────────────────────────────────────────────────────
 
   double get _distanceKm => _totalDistanceMeters / 1000;
+
+  // True once tracking has started but no fix has yet passed
+  // _kMinAcceptableAccuracyMeters in _onPosition — i.e. every segment
+  // (including a fresh one just started via Resume) is still empty, so
+  // the route hasn't started drawing yet. Cleared automatically the
+  // moment the first point is accepted.
+  bool get _isWaitingForGpsFix =>
+      _trackingState == _TrackingState.tracking &&
+      _segments.every((segment) => segment.isEmpty);
 
   // Same MET formula/values as cardio_session_screen.dart's own
   // _calories getter, but driven by _activeSeconds (already excludes
@@ -1010,6 +1114,18 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
 
   @override
   Widget build(BuildContext context) {
+    final isFinished = _trackingState == _TrackingState.finished;
+    // The map now stays mounted continuously from before Start all the
+    // way through a brief window after Finish — never unmounted just
+    // because _statsExpanded toggles (that was the maximize/minimize bug:
+    // a remount meant a brand-new controller while _currentLine/_tailLine
+    // still pointed at the old, disposed one, so the route line could
+    // never be re-added) — and kept alive past _trackingState reaching
+    // finished for as long as _mapNeededForSnapshot needs it, so the
+    // background snapshot capture kicked off by _finishTracking() still
+    // has a live controller to call.
+    final showMap = !isFinished || _mapNeededForSnapshot;
+
     return Scaffold(
       backgroundColor: WW.bg,
       appBar: AppBar(
@@ -1030,47 +1146,61 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       ),
       body: _locationState == _LocationState.denied
           ? _buildPermissionDeniedMessage()
-          : _trackingState == _TrackingState.finished
-              // Plan-linked runs (sessionRunId present) skip this form
-              // entirely — _finishTracking() already kicked off the
-              // save/navigate flow automatically, so there's nothing for
-              // the user to fill in or tap here; just show a brief
-              // transition state while that finishes. Standalone runs
-              // (sessionRunId == null) are completely unchanged.
-              ? (_sessionRunId != null
-                  ? _buildFinishingUpIndicator()
-                  : _buildFinishedSummary())
-              // Expanded view fully replaces the map+compact-card Stack
-              // below (simplest of the two options the task offered —
-              // covering the map entirely rather than dimming it — and
-              // reads cleanly as "a different view" of the same session).
-              : _statsExpanded
-                  ? _buildExpandedStatsView()
-                  : Stack(
-                      children: [
-                        MapLibreMap(
-                          styleString: _kOpenFreeMapLibertyStyle,
-                          initialCameraPosition: const CameraPosition(
-                            target: LatLng(0, 0),
-                            zoom: 2,
-                          ),
-                          onMapCreated: _onMapCreated,
-                          // Only turn on the native location puck once
-                          // permission is actually confirmed granted.
-                          myLocationEnabled:
-                              _locationState == _LocationState.granted,
-                          myLocationTrackingMode: _myLocationTrackingMode,
-                        ),
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          child: _trackingState == _TrackingState.notStarted
-                              ? _buildStartOverlay()
-                              : _buildLiveStatsAndControls(),
-                        ),
-                      ],
+          : Stack(
+              children: [
+                if (showMap)
+                  MapLibreMap(
+                    styleString: _kOpenFreeMapLibertyStyle,
+                    initialCameraPosition: const CameraPosition(
+                      target: LatLng(0, 0),
+                      zoom: 2,
                     ),
+                    onMapCreated: _onMapCreated,
+                    // Only turn on the native location puck once
+                    // permission is actually confirmed granted.
+                    myLocationEnabled:
+                        _locationState == _LocationState.granted,
+                    myLocationTrackingMode: _myLocationTrackingMode,
+                  ),
+                if (isFinished)
+                  // Opaque full-size cover — the map may still be mounted
+                  // underneath (see showMap) while its background
+                  // snapshot capture finishes, so this must fully hide it
+                  // rather than relying on either finished-state widget
+                  // having its own background.
+                  Positioned.fill(
+                    child: Container(
+                      color: WW.bg,
+                      // Plan-linked runs (sessionRunId present) skip this
+                      // form entirely — _finishTracking() already kicked
+                      // off the save/navigate flow automatically, so
+                      // there's nothing for the user to fill in or tap
+                      // here; just show a brief transition state while
+                      // that finishes. Standalone runs (sessionRunId ==
+                      // null) are completely unchanged.
+                      child: _sessionRunId != null
+                          ? _buildFinishingUpIndicator()
+                          : _buildFinishedSummary(),
+                    ),
+                  )
+                else if (_statsExpanded)
+                  // Covers the still-mounted map entirely (simplest of
+                  // the two options the task offered — covering rather
+                  // than dimming — and reads cleanly as "a different
+                  // view" of the same session) without unmounting it,
+                  // unlike before this fix.
+                  Positioned.fill(child: _buildExpandedStatsView())
+                else
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: _trackingState == _TrackingState.notStarted
+                        ? _buildStartOverlay()
+                        : _buildLiveStatsAndControls(),
+                  ),
+              ],
+            ),
     );
   }
 
@@ -1117,6 +1247,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (_isWaitingForGpsFix) _buildGpsWaitingBanner(),
           _buildStatsCard(),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -1126,6 +1257,45 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
                 const SizedBox(width: 12),
                 Expanded(child: _buildHoldToFinishButton()),
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Shown only while tracking has started but no fix has yet passed the
+  // accuracy gate in _onPosition (see _isWaitingForGpsFix) — i.e. before
+  // the route has actually started drawing, so the user isn't left
+  // wondering why nothing's appearing on the map yet. Same flat
+  // icon+text pill style as cardio_setup_screen.dart's own "Suggested
+  // duration" info row (WW.chipBg background, WW.primary icon/text).
+  Widget _buildGpsWaitingBanner() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: WW.chipBg,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: const Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 14,
+            height: 14,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: WW.primary,
+            ),
+          ),
+          SizedBox(width: 10),
+          Text(
+            'Waiting for GPS signal…',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: WW.primary,
             ),
           ),
         ],
@@ -1216,11 +1386,12 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     );
   }
 
-  // Full-screen replacement for the map while expanded (see build()'s
-  // comment on why "cover" rather than "dim" was chosen): a small Time/
-  // Avg Pace/BPM row up top, a hero-sized Distance number in the middle,
-  // and the same Pause/Finish controls at the bottom. Pure rearrangement
-  // of the same live values — no new state, no new logic.
+  // Full-screen opaque cover over the still-mounted map while expanded
+  // (see build()'s comment on why "cover" rather than "dim" was chosen,
+  // and why this no longer unmounts the map): a small Time/Avg Pace/BPM
+  // row up top, a hero-sized Distance number in the middle, and the same
+  // Pause/Finish controls at the bottom. Pure rearrangement of the same
+  // live values — no new state, no new logic.
   Widget _buildExpandedStatsView() {
     return Container(
       color: WW.bg,
@@ -1622,11 +1793,18 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   // widget (and its tracking-mode setting) has already been unmounted by
   // build()'s ternary, so there's no active "follow user" behavior left
   // to fight with this one-off bounds-fit.
-  Future<void> _fitCameraToRoute(
+  // Returns the computed bounding box (null if there weren't enough points
+  // to bound) so _captureMapSnapshot() can reuse the exact same bounds as
+  // the reference frame for projecting the route onto the captured image
+  // — see _drawRouteOnSnapshot()'s doc comment for why this is a
+  // deliberate approximation rather than the live camera's actual
+  // rendered viewport.
+  Future<({double minLat, double maxLat, double minLng, double maxLng})?>
+      _fitCameraToRoute(
     MapLibreMapController controller,
     List<LatLng> allPoints,
   ) async {
-    if (allPoints.length < 2) return;
+    if (allPoints.length < 2) return null;
     var minLat = allPoints.first.latitude;
     var maxLat = allPoints.first.latitude;
     var minLng = allPoints.first.longitude;
@@ -1654,21 +1832,23 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     // taking a screenshot, so it's included for correctness if that ever
     // changes.
     await controller.waitUntilMapTilesAreLoaded();
+    return (minLat: minLat, maxLat: maxLat, minLng: minLng, maxLng: maxLng);
   }
 
-  // Captures a small PNG thumbnail of the completed route via maplibre_gl's
-  // MapLibreMapController.takeSnapshot(width:, height:) — confirmed present
-  // in the installed maplibre_gl 0.26.2 (controller.dart), works on
-  // Android/iOS/Web per its doc comment, and already returns PNG bytes
-  // rendered at the requested size, so no separate downscale pass is
-  // needed the way the photo picker needs one. Called from
-  // _finishTracking(), while the map widget is still mounted — see that
-  // method's doc comment. Fails soft: returns null on any error (no
-  // controller, missing platform support, a mid-capture exception) rather
-  // than blocking Finish. Also fails soft on an oversized result — see
-  // _kMaxImageBase64Bytes; takeSnapshot() only ever returns PNG bytes (no
-  // JPEG option exposed by maplibre_gl), so unlike the photo picker there
-  // isn't a format lever to pull here at all, just the size guard.
+  // Captures a small thumbnail of the completed route via maplibre_gl's
+  // MapLibreMapController.takeSnapshot(width:, height:) — confirmed
+  // present in the installed maplibre_gl 0.26.2 (controller.dart), works
+  // on Android/iOS/Web per its doc comment. That call only ever renders
+  // the bare base map (see _drawRouteOnSnapshot's doc comment for why),
+  // so this always decodes the result and composites the route line onto
+  // it before re-encoding as JPEG — unlike the very first version of this
+  // method, which could sometimes return takeSnapshot()'s raw PNG bytes
+  // unmodified; that fast path no longer applies now that every result
+  // needs the line drawn on first. Called from _finishTracking(), while
+  // the map widget is still mounted — see that method's doc comment.
+  // Fails soft throughout: returns null on any error (no controller,
+  // missing platform support, a mid-capture exception, or still oversized
+  // after every compression attempt) rather than blocking Finish.
   // debugPrint (not print) is used for visibility into which branch ran —
   // this project's analysis_options.yaml pulls in package:flutter_lints,
   // whose avoid_print rule flags print()/Print specifically; debugPrint is
@@ -1676,6 +1856,140 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   // that lint (confirmed: this file has no debugPrint usage flagged
   // anywhere in prior flutter analyze runs, unlike the literal print()
   // calls already present as baseline debt in firestore_service.dart).
+  // Defensively (re)draws the full accumulated route — spanning every
+  // segment, not just the currently-recording one — onto _currentLine
+  // right before the snapshot is fitted/captured. Normally already up to
+  // date via _drawCurrentSegment()'s per-fix calls, but this makes the
+  // snapshot immune to any leftover staleness (e.g. an in-flight
+  // _drawCurrentSegment() call that hadn't resolved yet at the exact
+  // moment Finish was tapped) rather than relying purely on incremental
+  // state. Best-effort: a snapshot missing the line is still better than
+  // no snapshot at all, which _captureMapSnapshot's own try/catch already
+  // covers.
+  Future<void> _ensureFullRouteDrawnForSnapshot(
+    MapLibreMapController controller,
+    List<LatLng> allPoints,
+  ) async {
+    if (allPoints.length < 2) return;
+    try {
+      if (_currentLine == null) {
+        _currentLine = await controller.addLine(
+          LineOptions(
+            geometry: allPoints,
+            lineColor: WW.primary.toHexStringRGB(),
+            lineWidth: 4,
+          ),
+        );
+      } else {
+        await controller.updateLine(
+          _currentLine!,
+          LineOptions(geometry: allPoints),
+        );
+      }
+    } catch (_) {
+      // Nothing more to do — see this method's own doc comment.
+    }
+  }
+
+  // Draws the route polyline directly onto the decoded snapshot image —
+  // confirmed via maplibre_gl's native source (both MLNMapSnapshotter on
+  // iOS and MapSnapshotter on Android) that controller.takeSnapshot()
+  // renders through a wholly separate off-screen snapshotter with no
+  // knowledge of the live map's addLine() annotations, so the purple
+  // route line can only ever end up in the saved image if drawn onto it
+  // ourselves — the same approach Strava-style apps use for route
+  // thumbnails.
+  //
+  // Projection: standard Web Mercator, exactly like every slippy map
+  // (including this one) renders with — linear in longitude, and the
+  // canonical ln(tan(pi/4 + lat/2)) transform for latitude. `bounds` is
+  // the same bounding box _fitCameraToRoute() already computed and asked
+  // the live camera to fit to.
+  //
+  // This is a practical approximation, not a pixel-perfect registration
+  // against the live map's own camera/zoom: the snapshotter renders at
+  // whatever center/zoom the live camera settled on for ITS OWN view size
+  // (_fitCameraToRoute's fit-to-bounds call is sized for the live
+  // on-screen map, not this 480x300 canvas), which isn't recoverable from
+  // the Dart side. Projecting against our own bounds (with matching edge
+  // padding) instead gives a route that's correctly shaped and
+  // proportioned within the frame — the actual goal of a route thumbnail
+  // — even if it isn't pixel-registered against the base map's roads
+  // underneath.
+  void _drawRouteOnSnapshot(
+    img.Image image,
+    List<LatLng> allPoints,
+    ({double minLat, double maxLat, double minLng, double maxLng}) bounds,
+  ) {
+    double mercatorY(double latDegrees) {
+      final latRad = latDegrees * (math.pi / 180);
+      return math.log(math.tan((math.pi / 4) + (latRad / 2)));
+    }
+
+    final mercMinY = mercatorY(bounds.minLat);
+    final mercMaxY = mercatorY(bounds.maxLat);
+    final lngSpan = bounds.maxLng - bounds.minLng;
+    final mercYSpan = mercMaxY - mercMinY;
+
+    // Guard against a degenerate (near-zero-area) bounding box — e.g. a
+    // route with barely any real movement — which would otherwise divide
+    // by ~0 below.
+    if (lngSpan.abs() < 1e-9 || mercYSpan.abs() < 1e-9) return;
+
+    // Same breathing room as the live camera's own newLatLngBounds
+    // padding (40px there), expressed as a fraction of this image's much
+    // smaller canvas so the route doesn't touch the frame edges.
+    const paddingFraction = 0.12;
+    final w = image.width.toDouble();
+    final h = image.height.toDouble();
+
+    ({double x, double y}) project(LatLng point) {
+      final xFrac = (point.longitude - bounds.minLng) / lngSpan;
+      // North (higher lat, larger mercatorY) maps to the TOP of the image
+      // (smaller y) — hence maxY-minus-current over the span, not the
+      // other way round.
+      final yFrac = (mercMaxY - mercatorY(point.latitude)) / mercYSpan;
+      final x = paddingFraction * w + xFrac * (1 - 2 * paddingFraction) * w;
+      final y = paddingFraction * h + yFrac * (1 - 2 * paddingFraction) * h;
+      return (x: x, y: y);
+    }
+
+    // Scaled relative to this image's own width rather than reusing the
+    // live map's LineOptions(lineWidth: 4) verbatim — that value is in
+    // the live MapLibre view's own rendering units, which don't
+    // correspond 1:1 to this canvas's pixel size. 1.2% of width, clamped
+    // to a sane range, reads clearly at both this method's ~480px base
+    // resolution and the smaller fallback widths used if the image is
+    // resized further for the size cap below.
+    final thickness = (w * 0.012).clamp(3.0, 6.0);
+
+    // Mirrors WW.primary exactly — the same source of truth already used
+    // for the live route line's color via WW.primary.toHexStringRGB() —
+    // rather than hardcoding a duplicate RGB literal that could drift out
+    // of sync with it.
+    final lineColor = img.ColorRgb8(
+      (WW.primary.r * 255).round(),
+      (WW.primary.g * 255).round(),
+      (WW.primary.b * 255).round(),
+    );
+
+    var previous = project(allPoints.first);
+    for (var i = 1; i < allPoints.length; i++) {
+      final current = project(allPoints[i]);
+      img.drawLine(
+        image,
+        x1: previous.x.round(),
+        y1: previous.y.round(),
+        x2: current.x.round(),
+        y2: current.y.round(),
+        color: lineColor,
+        thickness: thickness,
+        antialias: true,
+      );
+      previous = current;
+    }
+  }
+
   Future<String?> _captureMapSnapshot() async {
     final controller = _mapController;
     if (controller == null) {
@@ -1684,43 +1998,60 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     }
     try {
       final allPoints = _segments.expand((segment) => segment).toList();
-      await _fitCameraToRoute(controller, allPoints);
+      await _ensureFullRouteDrawnForSnapshot(controller, allPoints);
+      final bounds = await _fitCameraToRoute(controller, allPoints);
       final bytes = await controller.takeSnapshot(width: 480, height: 300);
-      var encoded = base64Encode(bytes);
-      if (encoded.length <= _kMaxImageBase64Bytes) {
-        debugPrint(
-          'Outdoor cardio: map snapshot captured (${bytes.length} bytes).',
-        );
-        return encoded;
-      }
 
-      // Oversized PNG (takeSnapshot exposes no JPEG/quality option itself)
-      // — re-encode via the same img.decodeImage/copyResize/encodeJpg
-      // pipeline _encodeImageForSession already uses for the regular
-      // photo, rather than dropping the snapshot outright. Up to 3 passes
-      // with progressively smaller dimensions/lower quality; only falls
-      // back to omitting the map entirely if it's still too big after
-      // that.
-      final decoded = img.decodeImage(bytes);
-      if (decoded == null) {
+      // takeSnapshot() only ever returns a bare base map (see
+      // _drawRouteOnSnapshot's doc comment) — decode it so the route line
+      // can be composited on before saving. A decode failure falls back
+      // to the plain undecorated bytes rather than losing the snapshot
+      // entirely (edge case #5: fewer than 2 points, or bounds missing,
+      // also just skips drawing and keeps the plain map — no error).
+      final composited = img.decodeImage(bytes);
+      if (composited == null) {
+        final encoded = base64Encode(bytes);
+        if (encoded.length <= _kMaxImageBase64Bytes) {
+          debugPrint(
+            'Outdoor cardio: map snapshot captured without route line — '
+            'image decode failed (${bytes.length} bytes).',
+          );
+          return encoded;
+        }
         debugPrint(
           'Outdoor cardio: map snapshot dropped — could not decode PNG '
-          'bytes for compression.',
+          'bytes and raw bytes exceed the safety threshold.',
         );
         return null;
       }
+
+      if (allPoints.length >= 2 && bounds != null) {
+        _drawRouteOnSnapshot(composited, allPoints, bounds);
+      }
+
+      // Re-encode as JPEG at progressively smaller sizes until the result
+      // fits the safety threshold — same compress-until-under-threshold
+      // approach as before this task, now applied unconditionally (rather
+      // than only on an oversized PNG) since baking the route line in
+      // means the original raw-PNG fast path no longer applies: every
+      // result now goes through this same img.copyResize/encodeJpg
+      // pipeline _encodeImageForSession already uses for the regular
+      // photo.
       const attempts = [
+        (width: 480, quality: 75),
         (width: 400, quality: 70),
         (width: 320, quality: 55),
         (width: 240, quality: 40),
       ];
+      var lastEncodedLength = 0;
       for (final attempt in attempts) {
-        final resized = img.copyResize(decoded, width: attempt.width);
+        final resized = img.copyResize(composited, width: attempt.width);
         final jpegBytes = img.encodeJpg(resized, quality: attempt.quality);
-        encoded = base64Encode(jpegBytes);
+        final encoded = base64Encode(jpegBytes);
+        lastEncodedLength = encoded.length;
         if (encoded.length <= _kMaxImageBase64Bytes) {
           debugPrint(
-            'Outdoor cardio: map snapshot compressed to '
+            'Outdoor cardio: map snapshot captured with route line, '
             '${jpegBytes.length} bytes (width=${attempt.width}, '
             'quality=${attempt.quality}).',
           );
@@ -1730,7 +2061,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
 
       debugPrint(
         'Outdoor cardio: map snapshot dropped — still exceeds the safety '
-        'threshold after compression (last attempt: ${encoded.length} '
+        'threshold after compression (last attempt: $lastEncodedLength '
         'bytes).',
       );
       return null;
@@ -1761,10 +2092,17 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
         photoBase64 = await _encodeImageForSession(photo);
       }
 
-      // Captured earlier, at Finish-time — see _finishTracking() and
-      // _capturedMapSnapshotBase64's field doc for why capturing here
-      // (after the map widget is already unmounted) never worked.
-      final mapSnapshotBase64 = _capturedMapSnapshotBase64;
+      // Awaits the same background capture _finishTracking() kicked off
+      // (fire-and-forget) right after Finish — this is what prevents the
+      // snapshot from being silently dropped if a save happens before the
+      // capture resolves, whether that's a plan-linked run's automatic
+      // save (called directly from _finishTracking()) or a standalone
+      // user tapping "Save Activity" quickly. Falls back to whatever's
+      // already in _capturedMapSnapshotBase64 in the (practically
+      // unreachable) case this runs with no pending future at all.
+      final mapSnapshotBase64 = _pendingSnapshotFuture != null
+          ? await _pendingSnapshotFuture!
+          : _capturedMapSnapshotBase64;
 
       final allPoints = _segments.expand((segment) => segment).toList();
       final route = _downsampleRoute(allPoints);
