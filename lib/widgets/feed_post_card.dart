@@ -270,37 +270,33 @@ class FeedPostCard extends StatelessWidget {
             ),
           const SizedBox(height: 12),
 
-          // Stat row — workout posts show duration/calories/sets-or-activity/
-          // volume instead of the meal calorie/macro pills.
+          // Stat row — minimal 2-color treatment (WW.primary icons, WW.text
+          // values, no background boxes) shared by meal and workout posts.
+          // Wrap (not Row) so a long cardio activity name or a narrow phone
+          // never overflows — it just wraps to a second line.
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14),
-            child: Row(
+            child: Wrap(
+              spacing: 14,
+              runSpacing: 6,
               children: isWorkout
                   ? (isCardio == true
                       ? [
-                          _StatPill(icon: Icons.timer_outlined, color: WW.primary, value: _fmtDuration(elapsedSeconds), label: 'Duration'),
-                          const SizedBox(width: 8),
-                          _StatPill(icon: Icons.local_fire_department_rounded, color: WW.gold, value: '$calories', label: 'Calories'),
-                          const SizedBox(width: 8),
-                          _StatPill(icon: Icons.directions_run_rounded, color: WW.teal, value: (cardioActivity?.isNotEmpty ?? false) ? cardioActivity! : 'Cardio', label: 'Activity'),
+                          _StatItem(icon: Icons.timer_outlined, text: _fmtDuration(elapsedSeconds)),
+                          _StatItem(icon: Icons.local_fire_department_rounded, text: '$calories cal'),
+                          _StatItem(icon: Icons.directions_run_rounded, text: (cardioActivity?.isNotEmpty ?? false) ? cardioActivity! : 'Cardio'),
                         ]
                       : [
-                          _StatPill(icon: Icons.timer_outlined, color: WW.primary, value: _fmtDuration(elapsedSeconds), label: 'Duration'),
-                          const SizedBox(width: 8),
-                          _StatPill(icon: Icons.local_fire_department_rounded, color: WW.gold, value: '$calories', label: 'Calories'),
-                          const SizedBox(width: 8),
-                          _StatPill(icon: Icons.fitness_center_rounded, color: WW.lavender, value: '${totalSets ?? 0}', label: 'Sets'),
-                          const SizedBox(width: 8),
-                          _StatPill(icon: Icons.bar_chart_rounded, color: WW.teal, value: '${_fmtVolume(volume)} kg', label: 'Volume'),
+                          _StatItem(icon: Icons.timer_outlined, text: _fmtDuration(elapsedSeconds)),
+                          _StatItem(icon: Icons.local_fire_department_rounded, text: '$calories cal'),
+                          _StatItem(icon: Icons.fitness_center_rounded, text: '${totalSets ?? 0} sets'),
+                          _StatItem(icon: Icons.bar_chart_rounded, text: '${_fmtVolume(volume)} kg'),
                         ])
                   : [
-                      _StatPill(icon: Icons.local_fire_department_rounded, color: WW.gold, value: '$calories', label: 'Calories'),
-                      const SizedBox(width: 8),
-                      _StatPill(icon: Icons.egg_alt_rounded, color: WW.lavender, value: '${proteinG ?? 0}g', label: 'Protein'),
-                      const SizedBox(width: 8),
-                      _StatPill(icon: Icons.grain_rounded, color: WW.teal, value: '${carbsG ?? 0}g', label: 'Carbs'),
-                      const SizedBox(width: 8),
-                      _StatPill(icon: Icons.water_drop_rounded, color: WW.primary, value: '${fatG ?? 0}g', label: 'Fats'),
+                      _StatItem(icon: Icons.local_fire_department_rounded, text: '$calories cal'),
+                      _StatItem(icon: Icons.egg_alt_rounded, text: '${proteinG ?? 0}g protein'),
+                      _StatItem(icon: Icons.grain_rounded, text: '${carbsG ?? 0}g carbs'),
+                      _StatItem(icon: Icons.water_drop_rounded, text: '${fatG ?? 0}g fat'),
                     ],
             ),
           ),
@@ -354,36 +350,32 @@ class FeedPostCard extends StatelessWidget {
   }
 }
 
-class _StatPill extends StatelessWidget {
+// Minimal 2-color stat treatment: WW.primary icon + WW.text value, no
+// background box — replaces the old 4-differently-colored _StatPill boxes.
+class _StatItem extends StatelessWidget {
   final IconData icon;
-  final Color color;
-  final String value;
-  final String label;
+  final String text;
 
-  const _StatPill({
+  const _StatItem({
     required this.icon,
-    required this.color,
-    required this.value,
-    required this.label,
+    required this.text,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(10),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: WW.primary),
+        const SizedBox(width: 4),
+        Text(
+          text,
+          style: WW.labelMed.copyWith(
+            color: WW.text,
+            fontWeight: FontWeight.w700,
+          ),
         ),
-        child: Column(
-          children: [
-            Icon(icon, size: 14, color: color),
-            const SizedBox(height: 2),
-            Text(value, style: WW.caption.copyWith(fontWeight: FontWeight.w800, color: color)),
-          ],
-        ),
-      ),
+      ],
     );
   }
 }

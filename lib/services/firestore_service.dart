@@ -1742,6 +1742,14 @@ class FirestoreService {
       final elevationGainMeters =
           (firstCardio?['elevationGainMeters'] as num?)?.toDouble();
       final route = firstCardio?['route'];
+      // These two were previously missing from this promotion list, unlike
+      // the 'combined' branch above (which copies every cardioFieldKeys
+      // entry, including these) — a pure-cardio plan-linked session lost
+      // its map snapshot/photo on finalize even though
+      // updateInProgressSessionBlock() had already saved them onto the
+      // block. Promoted the same way as route/distanceMeters below.
+      final photoBase64 = firstCardio?['photoBase64'] as String?;
+      final mapSnapshotBase64 = firstCardio?['mapSnapshotBase64'] as String?;
 
       if (cardioActivity != null) sessionDoc['activity'] = cardioActivity;
       if (cardioMode != null) sessionDoc['mode'] = cardioMode;
@@ -1754,6 +1762,10 @@ class FirestoreService {
         sessionDoc['elevationGainMeters'] = elevationGainMeters;
       }
       if (route != null) sessionDoc['route'] = route;
+      if (photoBase64 != null) sessionDoc['photoBase64'] = photoBase64;
+      if (mapSnapshotBase64 != null) {
+        sessionDoc['mapSnapshotBase64'] = mapSnapshotBase64;
+      }
     }
 
     final ref = await _db

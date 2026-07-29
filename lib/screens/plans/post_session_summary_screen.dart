@@ -5,7 +5,6 @@ import 'dart:ui' as ui;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
@@ -17,8 +16,12 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../utils/widget_capture.dart';
 import '../../widgets/caption_sheet.dart';
+import '../../widgets/photo_background_share_card.dart';
 import '../../widgets/quick_add_sheet.dart';
+import '../../widgets/route_map_share_card.dart';
+import '../../widgets/share_card_picker.dart';
 import '../../widgets/share_card_widget.dart';
 
 // Same OpenFreeMap style URL used in activity_detail_screen.dart/
@@ -311,24 +314,162 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         ),
       );
 
-  Future<void> _captureAndShare() async {
-    if (_isSharing) return;
-    setState(() => _isSharing = true);
-    try {
-      final sessionName = _session['sessionName'] as String? ?? 'Workout';
-      final elapsedSeconds =
-          (_session['durationSeconds'] as num?)?.toInt() ?? 0;
-      final date =
-          (_session['date'] as Timestamp?)?.toDate() ?? DateTime.now();
-      final totalSets = (_session['totalSets'] as num?)?.toInt() ?? 0;
-      final totalVolume =
-          (_session['totalVolume'] as num?)?.toDouble() ?? 0;
-      final caloriesBurned =
-          (_session['caloriesBurned'] as num?)?.toInt() ?? 0;
-      final cardioActivity = _session['activity'] as String? ?? '';
+  // ── Shareable card flow (shared by Share and Post to Feed) ──────────────
+  // Both entry points funnel through the same card-picker: resolve/prompt
+  // for a photo once, build whichever card designs are actually available
+  // for this session, let the user swipe/pick one (share_card_picker.dart),
+  // then either render+share it or render+post it.
 
-      // Build the widget
-      final cardWidget = ShareCardWidget(
+  String? get _reusablePhotoBase64 =>
+      PhotoBackgroundShareCard.reusablePhotoBase64(_session);
+
+  Future<void> _startCardFlow({required bool forPost}) async {
+    if (forPost ? _isPosting : _isSharing) return;
+
+    final existingPhoto = _reusablePhotoBase64;
+    if (existingPhoto != null) {
+      await _showCardPickerAndContinue(
+          photoBase64: existingPhoto, forPost: forPost);
+      return;
+    }
+
+    if (!mounted) return;
+    await showQuickAddSheet(context, [
+      QuickAddOption(
+        icon: Icons.camera_alt_rounded,
+        iconColor: WW.primary,
+        iconBg: WW.chipBg,
+        title: 'Take Photo',
+        subtitle: 'Use a photo in the Photo card design',
+        onTap: () => _pickPhotoThenContinue(ImageSource.camera, forPost: forPost),
+      ),
+      QuickAddOption(
+        icon: Icons.photo_library_rounded,
+        iconColor: WW.teal,
+        iconBg: WW.tealBg,
+        title: 'Choose from Gallery',
+        subtitle: 'Pick an existing photo',
+        onTap: () => _pickPhotoThenContinue(ImageSource.gallery, forPost: forPost),
+      ),
+      QuickAddOption(
+        icon: Icons.arrow_forward_rounded,
+        iconColor: WW.textSec,
+        iconBg: WW.elevated,
+        title: 'Skip Photo',
+        subtitle: 'Only offer the Map/Color card designs',
+        onTap: () => _showCardPickerAndContinue(photoBase64: null, forPost: forPost),
+      ),
+    ]);
+  }
+
+  Future<void> _pickPhotoThenContinue(ImageSource source, {required bool forPost}) async {
+    final picked = await ImagePicker().pickImage(
+      source: source,
+      maxWidth: 1024,
+      imageQuality: 80,
+    );
+    String? encoded;
+    if (picked != null) {
+      encoded = await _encodeImageForPost(File(picked.path));
+    }
+    await _showCardPickerAndContinue(photoBase64: encoded, forPost: forPost);
+  }
+
+  Future<void> _showCardPickerAndContinue({
+    required String? photoBase64,
+    required bool forPost,
+  }) async {
+    if (!mounted) return;
+    final cards = _buildCardOptions(photoBase64: photoBase64);
+    final chosenIndex = await showShareCardPicker(
+      context,
+      cards: cards,
+      confirmLabel: forPost ? 'Use This Design' : 'Share This Design',
+    );
+    if (chosenIndex == null || !mounted) return;
+    final chosen = cards[chosenIndex];
+    if (forPost) {
+      await _promptCaptionAndPostCard(chosen);
+    } else {
+      await _shareCard(chosen);
+    }
+  }
+
+  String _fmtStatDuration(int secs) {
+    final h = secs ~/ 3600;
+    final m = (secs % 3600) ~/ 60;
+    return h > 0 ? '${h}h ${m}m' : '${m}m';
+  }
+
+  // Builds whichever of the 3 card designs are actually available for
+  // this session — Map only for a pure-cardio session with a route or
+  // snapshot (RouteMapShareCard.isAvailable — always false for combined
+  // sessions, since _isCardio is false there and route/snapshot data
+  // lives nested per-block instead, out of this feature's scope per
+  // Part 1), Photo only if photoBase64 was resolved (reused or picked),
+  // Color always (the universal fallback).
+  List<ShareCardOption> _buildCardOptions({required String? photoBase64}) {
+    final sessionName = _session['sessionName'] as String? ?? 'Workout';
+    final elapsedSeconds = (_session['durationSeconds'] as num?)?.toInt() ?? 0;
+    final date = (_session['date'] as Timestamp?)?.toDate() ?? DateTime.now();
+    final totalSets = (_session['totalSets'] as num?)?.toInt() ?? 0;
+    final totalVolume = (_session['totalVolume'] as num?)?.toDouble() ?? 0;
+    final caloriesBurned = (_session['caloriesBurned'] as num?)?.toInt() ?? 0;
+    final cardioActivity = _session['activity'] as String? ?? '';
+    final activityLabel = cardioActivity.isNotEmpty ? cardioActivity : 'Cardio';
+    final distanceMeters = (_session['distanceMeters'] as num?)?.toDouble() ?? 0;
+    final mapSnapshotBase64 = _session['mapSnapshotBase64'] as String?;
+
+    final cards = <ShareCardOption>[];
+
+    if (_isCardio &&
+        RouteMapShareCard.isAvailable(
+          mapSnapshotBase64: mapSnapshotBase64,
+          routePoints: _routePoints,
+        )) {
+      cards.add(ShareCardOption(
+        label: 'Map',
+        builder: (_) => RouteMapShareCard(
+          mapSnapshotBase64: mapSnapshotBase64,
+          routePoints: _routePoints,
+          sessionName: sessionName,
+          activityLabel: activityLabel,
+          distanceMeters: distanceMeters,
+          durationSeconds: elapsedSeconds,
+          calories: caloriesBurned,
+          paceLabel: _avgPaceLabel(distanceMeters, elapsedSeconds),
+          date: date,
+        ),
+      ));
+    }
+
+    if (photoBase64 != null) {
+      final stats = _isCardio
+          ? [
+              (_fmtStatDuration(elapsedSeconds), 'Duration'),
+              ('$caloriesBurned', 'Calories'),
+              (_avgPaceLabel(distanceMeters, elapsedSeconds) ?? '--:--', 'Pace'),
+            ]
+          : [
+              (_fmtStatDuration(elapsedSeconds), 'Duration'),
+              ('$caloriesBurned', 'Calories'),
+              ('$totalSets', 'Sets'),
+            ];
+      cards.add(ShareCardOption(
+        label: 'Photo',
+        builder: (_) => PhotoBackgroundShareCard(
+          photoBase64: photoBase64,
+          title: sessionName,
+          badgeLabel: _isCardio ? activityLabel : 'Gym',
+          stats: stats,
+          date: date,
+        ),
+      ));
+    }
+
+    cards.add(ShareCardOption(
+      label: 'Color',
+      builder: (_) => ShareCardWidget(
         sessionName: sessionName,
         isCardio: _isCardio,
         cardioActivity: cardioActivity,
@@ -341,60 +482,26 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         // goal state) — 0 matches the "no goal set" display elsewhere.
         goalMinutes: 0,
         date: date,
+      ),
+    ));
+
+    return cards;
+  }
+
+  Future<void> _shareCard(ShareCardOption card) async {
+    if (_isSharing) return;
+    setState(() => _isSharing = true);
+    try {
+      if (!mounted) return;
+      final bytes = await captureWidgetAsPngBytes(
+        context,
+        card.builder(context),
+        size: const Size(360, 640),
       );
-
-      // Render off-tree at fixed size
-      const cardWidth = 360.0;
-      final repaintBoundary = RenderRepaintBoundary();
-      final renderView = RenderView(
-        view: View.of(context),
-        child: RenderPositionedBox(
-          alignment: Alignment.topLeft,
-          child: repaintBoundary,
-        ),
-        configuration: ViewConfiguration(
-          logicalConstraints: BoxConstraints.tight(
-            const Size(cardWidth, 800),
-          ),
-          devicePixelRatio: 3.0,
-        ),
-      );
-
-      final pipelineOwner = PipelineOwner();
-      final buildOwner = BuildOwner(focusManager: FocusManager());
-
-      pipelineOwner.rootNode = renderView;
-      renderView.prepareInitialFrame();
-
-      final rootElement = RenderObjectToWidgetAdapter<RenderBox>(
-        container: repaintBoundary,
-        child: Directionality(
-          textDirection: TextDirection.ltr,
-          child: MediaQuery(
-            data: MediaQueryData.fromView(View.of(context)),
-            child: cardWidget,
-          ),
-        ),
-      ).attachToRenderTree(buildOwner);
-
-      buildOwner.buildScope(rootElement);
-      buildOwner.finalizeTree();
-
-      pipelineOwner.flushLayout();
-      pipelineOwner.flushCompositingBits();
-      pipelineOwner.flushPaint();
-
-      final image = await repaintBoundary.toImage(pixelRatio: 3.0);
-      final byteData = await image.toByteData(
-          format: ui.ImageByteFormat.png);
-
-      if (byteData == null) {
+      if (bytes == null) {
         _snack('Could not generate share card.');
-        setState(() => _isSharing = false);
         return;
       }
-
-      final bytes = byteData.buffer.asUint8List();
       // Use dart:io Directory.systemTemp to avoid JNI issues
       // on Android emulator. Works on both real devices and
       // emulators without needing platform channels.
@@ -499,64 +606,17 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     }
   }
 
-  // Lets the user optionally attach a photo before posting — a workout post
-  // without one (stats only) is just as valid, so "Skip" posts immediately.
-  Future<void> _promptPostToFeed() async {
-    if (_isPosting) return;
-    await showQuickAddSheet(context, [
-      QuickAddOption(
-        icon: Icons.camera_alt_rounded,
-        iconColor: WW.primary,
-        iconBg: WW.chipBg,
-        title: 'Take Photo',
-        subtitle: 'Snap a photo to attach to your post',
-        onTap: () => _pickAndPostToFeed(ImageSource.camera),
-      ),
-      QuickAddOption(
-        icon: Icons.photo_library_rounded,
-        iconColor: WW.teal,
-        iconBg: WW.tealBg,
-        title: 'Choose from Gallery',
-        subtitle: 'Pick an existing photo',
-        onTap: () => _pickAndPostToFeed(ImageSource.gallery),
-      ),
-      QuickAddOption(
-        icon: Icons.arrow_forward_rounded,
-        iconColor: WW.textSec,
-        iconBg: WW.elevated,
-        title: 'Skip',
-        subtitle: 'Post without a photo',
-        onTap: () => _promptCaptionAndPost(imageFile: null),
-      ),
-    ]);
-  }
-
-  Future<void> _pickAndPostToFeed(ImageSource source) async {
-    final picked = await ImagePicker().pickImage(
-      source: source,
-      maxWidth: 1024,
-      imageQuality: 80,
-    );
-    debugPrint('[PostToFeed] pickImage($source) returned path: ${picked?.path}');
-    if (picked == null) return;
-    final file = File(picked.path);
-    final exists = await file.exists();
-    final size = exists ? await file.length() : -1;
-    debugPrint('[PostToFeed] picked file exists=$exists size=$size bytes');
-    await _promptCaptionAndPost(imageFile: file);
-  }
-
-  // Lets the user type an optional caption before the post is created.
-  // Dismissing without tapping "Post" cancels the whole post — it does not
-  // fall back to posting with no caption.
-  Future<void> _promptCaptionAndPost({File? imageFile}) async {
+  // Lets the user type an optional caption before the chosen card is
+  // posted. Dismissing without tapping "Post" cancels the whole post — it
+  // does not fall back to posting with no caption.
+  Future<void> _promptCaptionAndPostCard(ShareCardOption card) async {
     if (!mounted) return;
     final result = await showCaptionSheet(context, fallbackLabel: 'your session name');
     if (result == null) return;
-    await _postToFeed(imageFile: imageFile, caption: result.isEmpty ? null : result);
+    await _postCardToFeed(card, caption: result.isEmpty ? null : result);
   }
 
-  Future<void> _postToFeed({File? imageFile, String? caption}) async {
+  Future<void> _postCardToFeed(ShareCardOption card, {String? caption}) async {
     if (_isPosting) return;
     final uid = AuthService().getCurrentUser()?.uid;
     if (uid == null) return;
@@ -574,12 +634,13 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       final rawName = (profile?['displayName'] as String?)?.trim();
       final authorName = (rawName != null && rawName.isNotEmpty) ? rawName : 'Someone';
 
-      debugPrint('[PostToFeed] workout _postToFeed: imageFile param = ${imageFile?.path}');
-      String? imageBase64;
-      if (imageFile != null) {
-        imageBase64 = await _encodeImageForPost(imageFile);
-      }
-      debugPrint('[PostToFeed] workout _postToFeed: imageBase64 length = ${imageBase64?.length}');
+      if (!mounted) return;
+      final pngBytes = await captureWidgetAsPngBytes(
+        context,
+        card.builder(context),
+        size: const Size(360, 640),
+      );
+      final imageBase64 = pngBytes != null ? base64Encode(pngBytes) : null;
 
       await FirestoreService().createFeedPost(
         uid: uid,
@@ -1748,11 +1809,20 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         color: WW.card,
         border: Border(top: BorderSide(color: WW.elevated, width: 1)),
       ),
-      child: Row(
+      // Stacked rather than one 3-wide Row — "Post to Feed" doesn't fit in
+      // an equal-thirds Expanded slot on narrower phones (RenderFlex
+      // overflow). Done is the primary action (full-width, filled) below
+      // the two secondary actions (Share/Post to Feed, outlined, sharing
+      // the row evenly) — matches the visual-weight split already used
+      // elsewhere in this app's action bars.
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: GestureDetector(
-              onTap: _isSharing ? null : _captureAndShare,
+          Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: _isSharing ? null : () => _startCardFlow(forPost: false),
                   child: Container(
                     height: 48,
                     decoration: BoxDecoration(
@@ -1795,7 +1865,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
               const SizedBox(width: 10),
               Expanded(
                 child: GestureDetector(
-                  onTap: _isPosting ? null : _promptPostToFeed,
+                  onTap: _isPosting ? null : () => _startCardFlow(forPost: true),
                   child: Container(
                     height: 48,
                     decoration: BoxDecoration(
@@ -1835,46 +1905,46 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                flex: 2,
-                child: GestureDetector(
-                  onTap: () {
-                    if (_isGym || _isCombined) {
-                      final uid = AuthService().getCurrentUser()?.uid;
-                      final pid = _session['planId'] as String?;
-                      if (uid != null && pid != null && pid.isNotEmpty) {
-                        FirestoreService().markSessionComplete(uid, pid);
-                      }
-                    }
-                    context.go(Routes.home);
-                  },
-                  child: Container(
-                    height: 50,
-                    decoration: BoxDecoration(
-                      color: WW.primary,
-                      borderRadius: BorderRadius.circular(14),
-                      boxShadow: [
-                        BoxShadow(
-                          color: WW.primary.withValues(alpha: 0.35),
-                          blurRadius: 12,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: const Center(
-                      child: Text(
-                        'Done',
-                        style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          GestureDetector(
+            onTap: () {
+              if (_isGym || _isCombined) {
+                final uid = AuthService().getCurrentUser()?.uid;
+                final pid = _session['planId'] as String?;
+                if (uid != null && pid != null && pid.isNotEmpty) {
+                  FirestoreService().markSessionComplete(uid, pid);
+                }
+              }
+              context.go(Routes.home);
+            },
+            child: Container(
+              width: double.infinity,
+              height: 50,
+              decoration: BoxDecoration(
+                color: WW.primary,
+                borderRadius: BorderRadius.circular(14),
+                boxShadow: [
+                  BoxShadow(
+                    color: WW.primary.withValues(alpha: 0.35),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: const Center(
+                child: Text(
+                  'Done',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
                   ),
                 ),
               ),
+            ),
+          ),
         ],
       ),
     );

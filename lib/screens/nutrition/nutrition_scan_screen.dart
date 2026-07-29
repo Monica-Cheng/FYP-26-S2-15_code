@@ -10,7 +10,6 @@ import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -21,8 +20,12 @@ import '../../services/auth_service.dart';
 import '../../services/barcode_service.dart';
 import '../../services/firestore_service.dart';
 import '../../services/nutrition_service.dart';
+import '../../utils/widget_capture.dart';
 import '../../widgets/caption_sheet.dart';
 import '../../widgets/nutrition_share_card_widget.dart';
+import '../../widgets/photo_background_share_card.dart';
+import '../../widgets/quick_add_sheet.dart';
+import '../../widgets/share_card_picker.dart';
 
 enum _Mode { scan, describe, barcode }
 enum _Stage { input, loading, result, error, barcodeSummary }
@@ -194,20 +197,143 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Posts the current result to the real, shared Club "Feed" tab — separate
-  // from _logMeal (personal nutrition log) and _shareResult (native OS share
-  // sheet). A user can do any combination of the three.
+  // Shareable card flow (shared by Share and Post to Feed) — mirrors
+  // post_session_summary_screen.dart's own card flow. Reuses _pickedImage
+  // (the photo already used for AI recognition) for the Photo card design
+  // when available, rather than prompting for a photo a second time.
   // ---------------------------------------------------------------------------
+
+  Future<String?> _resolveExistingResultPhotoBase64() {
+    if (_mode == _Mode.scan && _pickedImage != null) {
+      return _encodeImageForPost(_pickedImage!);
+    }
+    return Future.value(null);
+  }
+
+  Future<void> _startResultCardFlow({required bool forPost}) async {
+    if (forPost ? _isPosting : _isSharing) return;
+    if (_result == null) return;
+
+    final existingPhoto = await _resolveExistingResultPhotoBase64();
+    if (existingPhoto != null) {
+      await _showResultCardPickerAndContinue(photoBase64: existingPhoto, forPost: forPost);
+      return;
+    }
+
+    if (!mounted) return;
+    await showQuickAddSheet(context, [
+      QuickAddOption(
+        icon: Icons.camera_alt_rounded,
+        iconColor: WW.primary,
+        iconBg: WW.chipBg,
+        title: 'Take Photo',
+        subtitle: 'Use a photo in the Photo card design',
+        onTap: () => _pickPhotoThenContinueResult(ImageSource.camera, forPost: forPost),
+      ),
+      QuickAddOption(
+        icon: Icons.photo_library_rounded,
+        iconColor: WW.teal,
+        iconBg: WW.tealBg,
+        title: 'Choose from Gallery',
+        subtitle: 'Pick an existing photo',
+        onTap: () => _pickPhotoThenContinueResult(ImageSource.gallery, forPost: forPost),
+      ),
+      QuickAddOption(
+        icon: Icons.arrow_forward_rounded,
+        iconColor: WW.textSec,
+        iconBg: WW.elevated,
+        title: 'Skip Photo',
+        subtitle: 'Only offer the Color card design',
+        onTap: () => _showResultCardPickerAndContinue(photoBase64: null, forPost: forPost),
+      ),
+    ]);
+  }
+
+  Future<void> _pickPhotoThenContinueResult(ImageSource source, {required bool forPost}) async {
+    final picked = await ImagePicker().pickImage(
+      source: source,
+      maxWidth: 1024,
+      imageQuality: 80,
+    );
+    String? encoded;
+    if (picked != null) {
+      encoded = await _encodeImageForPost(File(picked.path));
+    }
+    await _showResultCardPickerAndContinue(photoBase64: encoded, forPost: forPost);
+  }
+
+  Future<void> _showResultCardPickerAndContinue({
+    required String? photoBase64,
+    required bool forPost,
+  }) async {
+    if (!mounted) return;
+    final cards = _buildResultCardOptions(photoBase64: photoBase64);
+    final chosenIndex = await showShareCardPicker(
+      context,
+      cards: cards,
+      confirmLabel: forPost ? 'Use This Design' : 'Share This Design',
+    );
+    if (chosenIndex == null || !mounted) return;
+    final chosen = cards[chosenIndex];
+    if (forPost) {
+      await _promptCaptionAndPostResultCard(chosen);
+    } else {
+      await _shareResultCard(chosen);
+    }
+  }
+
+  // Photo card only if a photo was resolved (reused or picked); Color
+  // card always — the universal fallback. No Map card here — meals have
+  // no route/location data.
+  List<ShareCardOption> _buildResultCardOptions({required String? photoBase64}) {
+    final result = _result!;
+    final source = _mode == _Mode.scan ? 'scan' : 'manual';
+    final cards = <ShareCardOption>[];
+
+    if (photoBase64 != null) {
+      cards.add(ShareCardOption(
+        label: 'Photo',
+        builder: (_) => PhotoBackgroundShareCard(
+          photoBase64: photoBase64,
+          title: result.foodName,
+          badgeLabel: source == 'scan' ? 'AI Scanned' : 'Logged',
+          stats: [
+            ('${result.calories}', 'Calories'),
+            ('${result.proteinG ?? 0}g', 'Protein'),
+            ('${result.carbsG ?? 0}g', 'Carbs'),
+            ('${result.fatG ?? 0}g', 'Fat'),
+          ],
+          date: DateTime.now(),
+        ),
+      ));
+    }
+
+    cards.add(ShareCardOption(
+      label: 'Color',
+      builder: (_) => NutritionShareCardWidget(
+        foodName: result.foodName,
+        calories: result.calories,
+        proteinG: result.proteinG,
+        carbsG: result.carbsG,
+        fatG: result.fatG,
+        source: source,
+        date: DateTime.now(),
+      ),
+    ));
+
+    return cards;
+  }
+
   // Shows the optional-caption sheet, then posts. Dismissing the sheet
   // without tapping "Post" cancels the whole post.
-  Future<void> _promptCaptionAndPostToFeed() async {
+  Future<void> _promptCaptionAndPostResultCard(ShareCardOption card) async {
     if (!mounted) return;
     final result = await showCaptionSheet(context, fallbackLabel: 'the meal name');
     if (result == null) return;
-    await _postToFeed(caption: result.isEmpty ? null : result);
+    await _postResultCardToFeed(card, caption: result.isEmpty ? null : result);
   }
 
-  Future<void> _postToFeed({String? caption}) async {
+  Future<void> _postResultCardToFeed(ShareCardOption card, {String? caption}) async {
     final result = _result;
     if (result == null || _isPosting) return;
     final uid = _authService.getCurrentUser()?.uid;
@@ -219,11 +345,13 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
       final rawName = (profile?['displayName'] as String?)?.trim();
       final authorName = (rawName != null && rawName.isNotEmpty) ? rawName : 'Someone';
 
-      String? imageBase64;
-      if (_mode == _Mode.scan && _pickedImage != null) {
-        imageBase64 = await _encodeImageForPost(_pickedImage!);
-      }
-      debugPrint('[PostToFeed] nutrition _postToFeed: imageBase64 length = ${imageBase64?.length}');
+      if (!mounted) return;
+      final pngBytes = await captureWidgetAsPngBytes(
+        context,
+        card.builder(context),
+        size: const Size(360, 640),
+      );
+      final imageBase64 = pngBytes != null ? base64Encode(pngBytes) : null;
 
       await _firestoreService.createFeedPost(
         uid: uid,
@@ -251,71 +379,19 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Renders NutritionShareCardWidget off-tree to a PNG and opens the native
-  // share sheet — same technique used for workout sessions in
-  // post_session_summary_screen.dart, so behavior is consistent app-wide.
-  // ---------------------------------------------------------------------------
-  Future<void> _shareResult() async {
+  Future<void> _shareResultCard(ShareCardOption card) async {
     final result = _result;
     if (result == null || _isSharing) return;
 
     setState(() => _isSharing = true);
     try {
-      final cardWidget = NutritionShareCardWidget(
-        foodName: result.foodName,
-        calories: result.calories,
-        proteinG: result.proteinG,
-        carbsG: result.carbsG,
-        fatG: result.fatG,
-        source: _mode == _Mode.scan ? 'scan' : 'manual',
-        date: DateTime.now(),
+      if (!mounted) return;
+      final bytes = await captureWidgetAsPngBytes(
+        context,
+        card.builder(context),
+        size: const Size(360, 640),
       );
-
-      const cardWidth = 360.0;
-      final repaintBoundary = RenderRepaintBoundary();
-      final renderView = RenderView(
-        view: View.of(context),
-        child: RenderPositionedBox(
-          alignment: Alignment.topLeft,
-          child: repaintBoundary,
-        ),
-        configuration: ViewConfiguration(
-          logicalConstraints: BoxConstraints.tight(
-            const Size(cardWidth, 800),
-          ),
-          devicePixelRatio: 3.0,
-        ),
-      );
-
-      final pipelineOwner = PipelineOwner();
-      final buildOwner = BuildOwner(focusManager: FocusManager());
-
-      pipelineOwner.rootNode = renderView;
-      renderView.prepareInitialFrame();
-
-      final rootElement = RenderObjectToWidgetAdapter<RenderBox>(
-        container: repaintBoundary,
-        child: Directionality(
-          textDirection: TextDirection.ltr,
-          child: MediaQuery(
-            data: MediaQueryData.fromView(View.of(context)),
-            child: cardWidget,
-          ),
-        ),
-      ).attachToRenderTree(buildOwner);
-
-      buildOwner.buildScope(rootElement);
-      buildOwner.finalizeTree();
-
-      pipelineOwner.flushLayout();
-      pipelineOwner.flushCompositingBits();
-      pipelineOwner.flushPaint();
-
-      final image = await repaintBoundary.toImage(pixelRatio: 3.0);
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-
-      if (byteData == null) {
+      if (bytes == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Could not generate share card.')),
@@ -324,7 +400,6 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
         return;
       }
 
-      final bytes = byteData.buffer.asUint8List();
       final tempDir = Directory.systemTemp;
       final file = File(
           '${tempDir.path}/wiseworkout_meal_'
@@ -389,14 +464,126 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
     }
   }
 
-  Future<void> _promptCaptionAndPostBarcodeSummary() async {
+  ({String name, int calories, int protein, int carbs, int fat})
+      _barcodeSummaryTotals() {
+    final totalCalories =
+        _scannedProducts.fold<int>(0, (sum, p) => sum + p.calories);
+    final totalProtein =
+        _scannedProducts.fold<int>(0, (sum, p) => sum + (p.proteinG ?? 0));
+    final totalCarbs =
+        _scannedProducts.fold<int>(0, (sum, p) => sum + (p.carbsG ?? 0));
+    final totalFat =
+        _scannedProducts.fold<int>(0, (sum, p) => sum + (p.fatG ?? 0));
+    final summaryName = _scannedProducts.length == 1
+        ? _scannedProducts.first.name
+        : '${_scannedProducts.length} scanned products';
+    return (
+      name: summaryName,
+      calories: totalCalories,
+      protein: totalProtein,
+      carbs: totalCarbs,
+      fat: totalFat,
+    );
+  }
+
+  // No _pickedImage to reuse for a barcode summary (barcode scanning never
+  // captures a product photo) — always prompt, matching _startResultCardFlow's
+  // shape but without the "reuse an existing photo" branch.
+  Future<void> _startBarcodeSummaryCardFlow() async {
+    if (_isPosting || _scannedProducts.isEmpty) return;
+    if (!mounted) return;
+    await showQuickAddSheet(context, [
+      QuickAddOption(
+        icon: Icons.camera_alt_rounded,
+        iconColor: WW.primary,
+        iconBg: WW.chipBg,
+        title: 'Take Photo',
+        subtitle: 'Use a photo in the Photo card design',
+        onTap: () => _pickPhotoThenContinueBarcode(ImageSource.camera),
+      ),
+      QuickAddOption(
+        icon: Icons.photo_library_rounded,
+        iconColor: WW.teal,
+        iconBg: WW.tealBg,
+        title: 'Choose from Gallery',
+        subtitle: 'Pick an existing photo',
+        onTap: () => _pickPhotoThenContinueBarcode(ImageSource.gallery),
+      ),
+      QuickAddOption(
+        icon: Icons.arrow_forward_rounded,
+        iconColor: WW.textSec,
+        iconBg: WW.elevated,
+        title: 'Skip Photo',
+        subtitle: 'Only offer the Color card design',
+        onTap: () => _showBarcodeCardPickerAndContinue(photoBase64: null),
+      ),
+    ]);
+  }
+
+  Future<void> _pickPhotoThenContinueBarcode(ImageSource source) async {
+    final picked = await ImagePicker().pickImage(
+      source: source,
+      maxWidth: 1024,
+      imageQuality: 80,
+    );
+    String? encoded;
+    if (picked != null) {
+      encoded = await _encodeImageForPost(File(picked.path));
+    }
+    await _showBarcodeCardPickerAndContinue(photoBase64: encoded);
+  }
+
+  Future<void> _showBarcodeCardPickerAndContinue({required String? photoBase64}) async {
+    if (!mounted) return;
+    final totals = _barcodeSummaryTotals();
+    final cards = <ShareCardOption>[
+      if (photoBase64 != null)
+        ShareCardOption(
+          label: 'Photo',
+          builder: (_) => PhotoBackgroundShareCard(
+            photoBase64: photoBase64,
+            title: totals.name,
+            badgeLabel: 'Logged',
+            stats: [
+              ('${totals.calories}', 'Calories'),
+              ('${totals.protein}g', 'Protein'),
+              ('${totals.carbs}g', 'Carbs'),
+              ('${totals.fat}g', 'Fat'),
+            ],
+            date: DateTime.now(),
+          ),
+        ),
+      ShareCardOption(
+        label: 'Color',
+        builder: (_) => NutritionShareCardWidget(
+          foodName: totals.name,
+          calories: totals.calories,
+          proteinG: totals.protein,
+          carbsG: totals.carbs,
+          fatG: totals.fat,
+          source: 'manual',
+          date: DateTime.now(),
+        ),
+      ),
+    ];
+
+    final chosenIndex = await showShareCardPicker(
+      context,
+      cards: cards,
+      confirmLabel: 'Use This Design',
+    );
+    if (chosenIndex == null || !mounted) return;
+    await _promptCaptionAndPostBarcodeCard(cards[chosenIndex]);
+  }
+
+  Future<void> _promptCaptionAndPostBarcodeCard(ShareCardOption card) async {
     if (!mounted) return;
     final result = await showCaptionSheet(context, fallbackLabel: 'the scanned items');
     if (result == null) return;
-    await _postBarcodeSummaryToFeed(caption: result.isEmpty ? null : result);
+    await _postBarcodeCardToFeed(card, caption: result.isEmpty ? null : result);
   }
 
-  Future<void> _postBarcodeSummaryToFeed({String? caption}) async {
+  Future<void> _postBarcodeCardToFeed(ShareCardOption card, {String? caption}) async {
     if (_scannedProducts.isEmpty || _isPosting) return;
     final uid = _authService.getCurrentUser()?.uid;
     if (uid == null) return;
@@ -406,27 +593,25 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
       final profile = await _firestoreService.getUserProfile(uid);
       final rawName = (profile?['displayName'] as String?)?.trim();
       final authorName = (rawName != null && rawName.isNotEmpty) ? rawName : 'Someone';
+      final totals = _barcodeSummaryTotals();
 
-      final totalCalories =
-          _scannedProducts.fold<int>(0, (sum, p) => sum + p.calories);
-      final totalProtein =
-          _scannedProducts.fold<int>(0, (sum, p) => sum + (p.proteinG ?? 0));
-      final totalCarbs =
-          _scannedProducts.fold<int>(0, (sum, p) => sum + (p.carbsG ?? 0));
-      final totalFat =
-          _scannedProducts.fold<int>(0, (sum, p) => sum + (p.fatG ?? 0));
-      final summaryName = _scannedProducts.length == 1
-          ? _scannedProducts.first.name
-          : '${_scannedProducts.length} scanned products';
+      if (!mounted) return;
+      final pngBytes = await captureWidgetAsPngBytes(
+        context,
+        card.builder(context),
+        size: const Size(360, 640),
+      );
+      final imageBase64 = pngBytes != null ? base64Encode(pngBytes) : null;
 
       await _firestoreService.createFeedPost(
         uid: uid,
         authorName: authorName,
-        foodName: summaryName,
-        calories: totalCalories,
-        proteinG: totalProtein,
-        carbsG: totalCarbs,
-        fatG: totalFat,
+        foodName: totals.name,
+        calories: totals.calories,
+        proteinG: totals.protein,
+        carbsG: totals.carbs,
+        fatG: totals.fat,
+        imageBase64: imageBase64,
         caption: caption,
       );
 
@@ -495,8 +680,8 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
         isSharing: _isSharing,
         isPosting: _isPosting,
         onLog: _logMeal,
-        onShare: _shareResult,
-        onPost: _promptCaptionAndPostToFeed,
+        onShare: () => _startResultCardFlow(forPost: false),
+        onPost: () => _startResultCardFlow(forPost: true),
         onDiscard: _reset,
       );
     }
@@ -507,7 +692,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
         isSaving: _isSaving,
         isPosting: _isPosting,
         onLogAll: _logAllBarcodeItems,
-        onPost: _promptCaptionAndPostBarcodeSummary,
+        onPost: _startBarcodeSummaryCardFlow,
         onAddMore: () => setState(() => _stage = _Stage.input),
         onDiscard: _resetBarcode,
       );

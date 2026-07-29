@@ -160,15 +160,24 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               ),
             ),
           ),
-          Text(
-            _nameDisplay,
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-              color: WW.primaryDark,
+          // Horizontal padding reserves space so a long display name
+          // ellipsizes before it can render underneath the back button —
+          // maxLines/overflow alone don't guarantee that inside a Stack,
+          // since centering is based on the Stack's full width, not the
+          // space actually free of the back button.
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 44),
+            child: Text(
+              _nameDisplay,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: WW.primaryDark,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
           ),
         ],
       ),

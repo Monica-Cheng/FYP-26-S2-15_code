@@ -313,18 +313,29 @@ class _ClubScreenState extends State<ClubScreen> {
         children: List.generate(_subtabLabels.length, (i) {
           final active = i == _subtab;
           return Expanded(
-            child: GestureDetector(
-              onTap: () => setState(() => _subtab = i),
-              behavior: HitTestBehavior.opaque,
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Center(
-                  child: Text(
-                    _subtabLabels[i],
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-                      color: active ? WW.primary : WW.textSec,
+            child: Padding(
+              padding: EdgeInsets.only(right: i < _subtabLabels.length - 1 ? 8 : 0),
+              child: GestureDetector(
+                onTap: () => setState(() => _subtab = i),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: active ? WW.primary : Colors.transparent,
+                    borderRadius: BorderRadius.circular(17),
+                    border: Border.all(
+                      color: active ? WW.primary : WW.border,
+                      width: 1,
+                    ),
+                  ),
+                  child: Center(
+                    child: Text(
+                      _subtabLabels[i],
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: active ? Colors.white : WW.textSec,
+                      ),
                     ),
                   ),
                 ),

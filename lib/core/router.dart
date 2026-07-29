@@ -35,6 +35,7 @@ import '../screens/plans/explore_screen.dart';
 import '../screens/plans/plan_schedule_screen.dart';
 import '../screens/plans/mid_plan_cardio_complete_screen.dart';
 import '../screens/progress/activity_detail_screen.dart';
+import '../screens/progress/nutrition_log_detail_screen.dart';
 import '../screens/cardio/cardio_setup_screen.dart';
 import '../screens/cardio/cardio_session_screen.dart';
 import '../screens/cardio/outdoor_cardio_screen.dart';
@@ -71,6 +72,7 @@ class Routes {
   static const String planDetail = '/plan-detail';
   static const String exerciseDetail = '/exercise-detail';
   static const String activityDetail = '/activity-detail';
+  static const String nutritionLogDetail = '/nutrition-log-detail';
   static const String findProfessional = '/find-professional';
   static const String planMatch = '/plan-match';
   static const String planSchedule = '/plan-schedule';
@@ -250,6 +252,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.activityDetail,
         builder: (context, state) => const ActivityDetailScreen(),
+      ),
+      GoRoute(
+        path: Routes.nutritionLogDetail,
+        builder: (context, state) => const NutritionLogDetailScreen(),
       ),
       GoRoute(
         path: Routes.findProfessional,
