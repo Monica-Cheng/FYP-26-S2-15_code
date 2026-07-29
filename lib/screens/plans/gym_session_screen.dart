@@ -393,6 +393,22 @@ class _GymSessionState extends State<GymSessionScreen> {
         effectiveDayIndex = overrideDay;
         _planId = planId;
         // No compression check for free sessions
+
+        // Defense-in-depth: the schedule screens already hide/disable the
+        // tap target for a completed day (isCompleted/_statusOf checks in
+        // plan_detail_screen.dart / plan_schedule_screen.dart), but that's
+        // UI-layer only — nothing below re-checked it before this point.
+        // Re-verify against the authoritative lifetime completedDayIndices
+        // ledger here so a stale/racy UI gate can't still start a session
+        // for an already-completed day (see _extractCompletedDayIndices).
+        final overrideProgress =
+            await FirestoreService().getPlanProgress(uid, planId);
+        if (_extractCompletedDayIndices(overrideProgress)
+            .contains(effectiveDayIndex)) {
+          if (mounted) setState(() => _isLoadingSession = false);
+          await _blockAlreadyCompletedDay();
+          return;
+        }
       } else {
         // TRACKED SESSION: existing logic
         plan = await FirestoreService().getTrackedPlan(uid);
@@ -409,6 +425,17 @@ class _GymSessionState extends State<GymSessionScreen> {
         final currentDayIndex =
             (progress?['currentDayIndex'] as num?)?.toInt() ?? 1;
         effectiveDayIndex = currentDayIndex;
+
+        // Defense-in-depth — same authoritative ledger re-check as the
+        // override branch above, for the Home/Plans-tab tracked-card entry
+        // point (see that branch's doc comment for why this exists).
+        // `progress` is already fetched above, so no extra read needed.
+        if (_extractCompletedDayIndices(progress)
+            .contains(effectiveDayIndex)) {
+          if (mounted) setState(() => _isLoadingSession = false);
+          await _blockAlreadyCompletedDay();
+          return;
+        }
 
         final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
         final total = sessions.length;
@@ -545,6 +572,92 @@ class _GymSessionState extends State<GymSessionScreen> {
       print('_loadPlanSession error: $e');
       if (mounted) setState(() => _isLoadingSession = false);
     }
+  }
+
+  // Shared by both defense-in-depth checks in _loadPlanSession() above.
+  Set<int> _extractCompletedDayIndices(Map<String, dynamic>? progress) {
+    final raw = progress?['completedDayIndices'];
+    if (raw is! List) return {};
+    return raw.map((d) => (d as num).toInt()).toSet();
+  }
+
+  // Shown when _loadPlanSession()'s data-layer completion guard catches an
+  // already-completed day slipping past the UI-layer gate. Navigates to
+  // Routes.home rather than context.pop() for the same reason
+  // _handleLeaveSession() does (see its own doc comment above) — this
+  // screen can be reached via context.push() or context.go() depending on
+  // entry point, and Routes.home is reachable either way.
+  Future<void> _blockAlreadyCompletedDay() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogCtx) => Dialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: WW.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const Text(
+                'Day already completed',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  color: WW.text,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'This day is already completed. Use Restart Program if you want to redo it.',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: WW.textSec,
+                  height: 1.5,
+                ),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(dialogCtx),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: WW.primary,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    elevation: 0,
+                  ),
+                  child: const Text(
+                    'OK',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted) return;
+    context.go(Routes.home);
   }
 
   // Attempts to hydrate _exercises/_sessionRunId/tick-state directly from

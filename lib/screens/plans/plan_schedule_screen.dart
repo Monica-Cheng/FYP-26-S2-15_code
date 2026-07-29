@@ -28,14 +28,12 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
   bool _breakModeActive = false;
   String? _breakEndDate;
   int _breakDays = 3;
-  // Same completion signal home_screen.dart's own _todayCompleted uses —
-  // captured from the same getPlanProgress() call _init() already makes
-  // for _currentDayIndex, just reading two more fields off the same
-  // result. Used by _statusOf() to correct the 'today' status once
-  // today's session has actually been completed (see that method's own
-  // comment for why _currentDayIndex alone isn't enough for this).
-  String? _lastCompletedDate;
-  int? _lastCompletedDayIndex;
+  // Lifetime per-day completion ledger — captured from the same
+  // getPlanProgress() call _init() already makes for _currentDayIndex,
+  // just reading one more field off the same result. Used by _statusOf()
+  // for a real, persistent completed check instead of inferring it from
+  // index position (see that method's own comment).
+  Set<int> _completedDayIndices = {};
 
   int _selectedWeekIdx = 0;
   bool _isLoading = true;
@@ -123,14 +121,19 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
               rawCompressedDays.map((d) => (d as num).toInt()).toSet();
         }
 
+        final rawCompletedDayIndices = progress?['completedDayIndices'];
+        Set<int> loadedCompletedDayIndices = {};
+        if (rawCompletedDayIndices is List) {
+          loadedCompletedDayIndices =
+              rawCompletedDayIndices.map((d) => (d as num).toInt()).toSet();
+        }
+
         setState(() {
           _currentDayIndex = currentDay;
           _breakModeActive = breakActive;
           _breakEndDate = rawBreakEnd;
           _compressedDays = loadedCompressedDays;
-          _lastCompletedDate = progress?['lastCompletedDate'] as String?;
-          _lastCompletedDayIndex =
-              (progress?['lastCompletedDayIndex'] as num?)?.toInt();
+          _completedDayIndices = loadedCompletedDayIndices;
           _isLoading = false;
           if (_sessions.isNotEmpty) {
             _selectedWeekIdx = ((currentDay - 1) ~/ 7).clamp(0, _totalWeeks - 1);
@@ -155,27 +158,23 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
 
   int _dayIndexOf(int weekIdx, int posInWeek) => weekIdx * 7 + posInWeek + 1;
 
-  // dayIndex < _currentDayIndex alone used to be the only way this reported
-  // 'completed' — but markSessionComplete() (firestore_service.dart)
-  // deliberately doesn't advance currentDayIndex itself ("the advance
-  // happens on the next app open via checkAndAdvanceDay"), so right after
-  // finishing today's session this index comparison still can't see it:
-  // dayIndex == _currentDayIndex, so it'd report 'today' — same status as
-  // before starting — leaving the Start Session button visibly tappable
-  // for an already-completed day until the next app open. Checking
-  // lastCompletedDate/lastCompletedDayIndex (the same signal
-  // home_screen.dart's own _todayCompleted uses) for the specific
-  // dayIndex == _currentDayIndex case closes that gap; every other case is
-  // unchanged.
+  // dayIndex < _currentDayIndex used to be the only way this reported
+  // 'completed' — a pure index-position inference, wrong whenever a day
+  // was skipped rather than genuinely done (it would still show
+  // "completed" for anything before the current day). Now checks the real
+  // lifetime completedDayIndices ledger (see markSessionComplete()) instead
+  // — this also naturally covers the "today, already done" case a separate
+  // lastCompletedDate check used to be needed for: markSessionComplete()
+  // adds to the ledger in the same write it sets lastCompletedDate, so a
+  // day that's genuinely just been completed today is already in
+  // _completedDayIndices by the time this runs, with no extra check
+  // required. The ledger check runs first, ahead of the 'today' check, so
+  // an already-completed "today" still correctly resolves to 'completed'
+  // rather than 'today'.
   String _statusOf(int dayIndex, bool isRest) {
     if (isRest) return 'rest';
-    if (dayIndex < _currentDayIndex) return 'completed';
-    if (dayIndex == _currentDayIndex) {
-      final today = DateTime.now().toString().substring(0, 10);
-      final completedToday = _lastCompletedDayIndex == dayIndex &&
-          _lastCompletedDate == today;
-      return completedToday ? 'completed' : 'today';
-    }
+    if (_completedDayIndices.contains(dayIndex)) return 'completed';
+    if (dayIndex == _currentDayIndex) return 'today';
     return 'upcoming';
   }
 
@@ -365,18 +364,18 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
     }
   }
 
+  // Delegates the actual field reset to FirestoreService().resetPlanProgress()
+  // — shared with plan_detail_screen.dart's own Restart Program action —
+  // rather than listing the fields here, so the two screens can't drift
+  // out of sync on what "restart" actually resets.
   Future<void> _restartPlan() async {
     if (_uid == null || _planId == null) return;
-    await _fs.updatePlanProgress(_uid!, _planId!, {
-      'currentDayIndex': 1,
-      'lastCompletedDate': '',
-      'lastCompletedDayIndex': 0,
-      'compressedDays': [],
-    });
+    await _fs.resetPlanProgress(_uid!, _planId!);
     if (!mounted) return;
     setState(() {
       _currentDayIndex = 1;
       _compressedDays = {};
+      _completedDayIndices = {};
       _selectedWeekIdx = 0;
     });
     _snack('Plan restarted from Day 1.');

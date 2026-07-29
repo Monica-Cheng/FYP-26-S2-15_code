@@ -284,9 +284,17 @@ class _HomeTabState extends State<_HomeTab> {
       if (progress == null || !mounted) return;
       final newDayIndex =
           (progress['currentDayIndex'] as num?)?.toInt() ?? 1;
-      final lastCompletedDate =
-          progress['lastCompletedDate'] as String?;
-      final today = DateTime.now().toString().substring(0, 10);
+      // Matches plan_detail_screen.dart/plan_schedule_screen.dart's
+      // _isDayCompleted()/_statusOf() convention — the lifetime
+      // completedDayIndices ledger, not the old lastCompletedDate == today
+      // comparison, which this screen used to use on its own. That field
+      // only ever remembered the single most recently completed day and
+      // could disagree with the other two screens; completedDayIndices is
+      // the one authoritative signal now shared by all three.
+      final rawCompletedDayIndices = progress['completedDayIndices'];
+      final completedDayIndices = rawCompletedDayIndices is List
+          ? rawCompletedDayIndices.map((d) => (d as num).toInt()).toSet()
+          : <int>{};
       final rawCompressedDays = progress['compressedDays'];
       bool newIsCompressed = false;
       if (rawCompressedDays is List) {
@@ -297,7 +305,7 @@ class _HomeTabState extends State<_HomeTab> {
       final dayChanged = newDayIndex != _currentDayIndex;
       setState(() {
         _currentDayIndex = newDayIndex;
-        _todayCompleted = lastCompletedDate == today;
+        _todayCompleted = completedDayIndices.contains(newDayIndex);
         _isSessionCompressed = newIsCompressed;
       });
       if (dayChanged && _trackedPlanId.isNotEmpty) {
