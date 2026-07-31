@@ -2164,6 +2164,14 @@ class FirestoreService {
       final elevationGainMeters =
           (firstCardio?['elevationGainMeters'] as num?)?.toDouble();
       final route = firstCardio?['route'];
+      // These two were previously missing from this promotion list, unlike
+      // the 'combined' branch above (which copies every cardioFieldKeys
+      // entry, including these) — a pure-cardio plan-linked session lost
+      // its map snapshot/photo on finalize even though
+      // updateInProgressSessionBlock() had already saved them onto the
+      // block. Promoted the same way as route/distanceMeters below.
+      final photoBase64 = firstCardio?['photoBase64'] as String?;
+      final mapSnapshotBase64 = firstCardio?['mapSnapshotBase64'] as String?;
 
       if (cardioActivity != null) sessionDoc['activity'] = cardioActivity;
       if (cardioMode != null) sessionDoc['mode'] = cardioMode;
@@ -2176,6 +2184,10 @@ class FirestoreService {
         sessionDoc['elevationGainMeters'] = elevationGainMeters;
       }
       if (route != null) sessionDoc['route'] = route;
+      if (photoBase64 != null) sessionDoc['photoBase64'] = photoBase64;
+      if (mapSnapshotBase64 != null) {
+        sessionDoc['mapSnapshotBase64'] = mapSnapshotBase64;
+      }
     }
 
     final ref = await _db
@@ -2356,6 +2368,11 @@ class FirestoreService {
     int? fatG,
     String? confidence, // 'high' | 'medium' | 'low'
     String? notes,
+    // Only ever present for a photo-scanned meal (nutrition_scan_screen
+    // .dart's _logMeal() only resolves one when _mode == _Mode.scan) —
+    // text-described meals simply omit it, same optional-field pattern as
+    // notes/confidence above.
+    String? imageBase64,
   }) async {
     await _db
         .collection(Collections.users)
@@ -2370,6 +2387,8 @@ class FirestoreService {
       'fatG': fatG,
       'confidence': confidence,
       'notes': notes,
+      if (imageBase64 != null && imageBase64.isNotEmpty)
+        'imageBase64': imageBase64,
       'date': FieldValue.serverTimestamp(),
       'createdAt': FieldValue.serverTimestamp(),
     });
@@ -2407,6 +2426,27 @@ class FirestoreService {
       total += (log['calories'] as num?)?.toInt() ?? 0;
     }
     return total;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sums protein/carbs/fat across all meals logged today (since local
+  // midnight) for users/{uid} — same source data/pattern as
+  // getTodaysNutritionCalories, just three fields instead of one.
+  // Informational only (Home's macro display has no goal to compare
+  // against), so this returns raw totals with no percentage/goal math.
+  // ---------------------------------------------------------------------------
+  Future<({int proteinG, int carbsG, int fatG})> getTodaysNutritionMacros(
+      String uid) async {
+    final logs = await getTodaysNutritionLogs(uid);
+    int protein = 0;
+    int carbs = 0;
+    int fat = 0;
+    for (final log in logs) {
+      protein += (log['proteinG'] as num?)?.toInt() ?? 0;
+      carbs += (log['carbsG'] as num?)?.toInt() ?? 0;
+      fat += (log['fatG'] as num?)?.toInt() ?? 0;
+    }
+    return (proteinG: protein, carbsG: carbs, fatG: fat);
   }
 
   // ---------------------------------------------------------------------------
@@ -2471,6 +2511,13 @@ class FirestoreService {
     int? elapsedSeconds,
     int? totalSets,
     double? volume,
+    // Denormalized the same way authorName/authorInitial already are, so
+    // FeedPostCard can render the poster's real photo without an extra
+    // per-post profile read. Sourced from the poster's own users/{uid}
+    // .photoBase64 at post-creation time by each call site — this method
+    // itself doesn't look it up, matching how authorName is already
+    // passed in rather than fetched here.
+    String? authorPhotoBase64,
   }) async {
     final initial =
         authorName.trim().isNotEmpty ? authorName.trim()[0].toUpperCase() : '?';
@@ -2479,6 +2526,8 @@ class FirestoreService {
       'uid': uid,
       'authorName': authorName,
       'authorInitial': initial,
+      if (authorPhotoBase64 != null && authorPhotoBase64.isNotEmpty)
+        'authorPhotoBase64': authorPhotoBase64,
       'type': type,
       'foodName': foodName,
       'calories': calories,

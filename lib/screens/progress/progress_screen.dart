@@ -593,28 +593,49 @@ class _ProgressScreenState extends State<ProgressScreen> {
   // "Activities", "XP History"), equal-quarter Expanded segments risk
   // wrapping those onto two lines on narrow phones. spaceEvenly keeps
   // each label at its natural width and just spaces them evenly instead.
+  // Horizontally scrollable rather than spaceEvenly — with 5 labels
+  // (including "XP History"/"Check-ins"), an unconstrained Row here
+  // overflows on narrow phones since none of these labels are wrapped in
+  // Expanded/Flexible. Scrolling degrades gracefully instead.
   Widget _buildSubtabs() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: List.generate(_subtabLabels.length, (i) {
-          final active = i == _subtab;
-          return GestureDetector(
-            onTap: () => setState(() => _subtab = i),
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(
-                _subtabLabels[i],
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-                  color: active ? WW.primary : WW.textSec,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: List.generate(_subtabLabels.length, (i) {
+            final active = i == _subtab;
+            return Padding(
+              padding: EdgeInsets.only(right: i < _subtabLabels.length - 1 ? 8 : 0),
+              child: GestureDetector(
+                onTap: () => setState(() => _subtab = i),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  height: 34,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  decoration: BoxDecoration(
+                    color: active ? WW.primary : Colors.transparent,
+                    borderRadius: BorderRadius.circular(17),
+                    border: Border.all(
+                      color: active ? WW.primary : WW.border,
+                      width: 1,
+                    ),
+                  ),
+                  child: Center(
+                    child: Text(
+                      _subtabLabels[i],
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: active ? Colors.white : WW.textSec,
+                      ),
+                    ),
+                  ),
                 ),
               ),
-            ),
-          );
-        }),
+            );
+          }),
+        ),
       ),
     );
   }
@@ -2119,6 +2140,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
           calories: (log['calories'] as num?)?.toInt() ?? 0,
           dateLabel: _formatDate(log['date'] as Timestamp?),
           source: log['source'] as String? ?? 'manual',
+          onTap: () => context.push(Routes.nutritionLogDetail, extra: log),
         );
       },
     );
@@ -2332,12 +2354,14 @@ class _NutritionLogCard extends StatelessWidget {
   final int calories;
   final String dateLabel;
   final String source; // 'scan' | 'barcode' | 'manual'
+  final VoidCallback? onTap;
 
   const _NutritionLogCard({
     required this.foodName,
     required this.calories,
     required this.dateLabel,
     required this.source,
+    this.onTap,
   });
 
   @override
@@ -2363,71 +2387,74 @@ class _NutritionLogCard extends StatelessWidget {
         sourceLabel = 'Manual';
     }
 
-    return Container(
-      decoration: WW.cardDecoration,
-      clipBehavior: Clip.hardEdge,
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Left color bar
-            Container(width: 4, color: barColor),
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        decoration: WW.cardDecoration,
+        clipBehavior: Clip.hardEdge,
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Left color bar
+              Container(width: 4, color: barColor),
 
-            // Icon
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 14, 4, 14),
-              child: Icon(iconData, color: barColor, size: 22),
-            ),
-
-            // Content
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(6, 12, 10, 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      foodName,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
-                        color: WW.text,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      '$dateLabel · $sourceLabel',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        color: WW.textSec,
-                      ),
-                    ),
-                  ],
-                ),
+              // Icon
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 14, 4, 14),
+                child: Icon(iconData, color: barColor, size: 22),
               ),
-            ),
 
-            // Badge: calories
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: WW.tealBg,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  '$calories kcal',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: WW.teal,
+              // Content
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 12, 10, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        foodName,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: WW.text,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '$dateLabel · $sourceLabel',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: WW.textSec,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
-            ),
-          ],
+
+              // Badge: calories
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: WW.tealBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '$calories kcal',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: WW.teal,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
