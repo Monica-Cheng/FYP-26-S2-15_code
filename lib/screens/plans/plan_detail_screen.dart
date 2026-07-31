@@ -28,14 +28,13 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
   bool _fromExplore = false;
   Map<String, dynamic>? _planData;
   StreamSubscription<Map<String, dynamic>?>? _planStreamSub;
-  // Same completion signal home_screen.dart's own _todayCompleted already
-  // uses (lastCompletedDate/lastCompletedDayIndex on the plan-progress
-  // doc) — see _checkCompletionState()/_isDayCompletedToday(). Null until
-  // that fetch resolves, which _isDayCompletedToday() treats as "not
-  // completed" (fails soft, matching _checkTrackedState()'s own
-  // try/catch-and-do-nothing convention).
-  String? _lastCompletedDate;
-  int? _lastCompletedDayIndex;
+  // Lifetime per-day completion ledger + current day, both fetched in
+  // _checkCompletionState() from the same planProgress doc. Empty/1 until
+  // that fetch resolves (fails soft, matching _checkTrackedState()'s own
+  // try/catch-and-do-nothing convention) — _isDayCompleted() and
+  // _hasAnyProgress correctly read as "nothing yet" in that window.
+  Set<int> _completedDayIndices = {};
+  int _currentDayIndex = 1;
 
   @override
   void initState() {
@@ -89,25 +88,33 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     try {
       final progress = await FirestoreService().getPlanProgress(uid, planId);
       if (!mounted) return;
+      final rawCompletedDayIndices = progress?['completedDayIndices'];
+      final loadedCompletedDayIndices = rawCompletedDayIndices is List
+          ? rawCompletedDayIndices.map((d) => (d as num).toInt()).toSet()
+          : <int>{};
       setState(() {
-        _lastCompletedDate = progress?['lastCompletedDate'] as String?;
-        _lastCompletedDayIndex =
-            (progress?['lastCompletedDayIndex'] as num?)?.toInt();
+        _completedDayIndices = loadedCompletedDayIndices;
+        _currentDayIndex =
+            (progress?['currentDayIndex'] as num?)?.toInt() ?? 1;
       });
     } catch (_) {}
   }
 
-  // Matches home_screen.dart's own _todayCompleted check exactly
-  // (lastCompletedDate == today) — this narrowly means "the day that was
-  // just completed today", not a full historical per-day completion
-  // ledger (this app doesn't track one), so only whichever single day
-  // matches lastCompletedDayIndex ever shows as completed here, same as
-  // Home only ever shows one completed day at a time.
-  bool _isDayCompletedToday(int dayIndex) {
-    if (_lastCompletedDayIndex != dayIndex) return false;
-    final today = DateTime.now().toString().substring(0, 10);
-    return _lastCompletedDate == today;
-  }
+  // Real, persistent check against the lifetime completedDayIndices ledger
+  // (see markSessionComplete()) — replaces the old "only the single most
+  // recently completed day, and only if that happened today" check, which
+  // meant every OTHER genuinely-completed day showed no completion state
+  // at all. Every day ever completed for this plan now shows as completed,
+  // regardless of when.
+  bool _isDayCompleted(int dayIndex) => _completedDayIndices.contains(dayIndex);
+
+  // Whether this plan has any progress worth offering to reset — shown
+  // regardless of current tracked/saved/custom status (see
+  // _buildSessionSchedule's Restart Program link), since the whole point
+  // is covering the case where a plan still has stale completed-day state
+  // visible even after the user has moved on to tracking a different plan.
+  bool get _hasAnyProgress =>
+      _currentDayIndex > 1 || _completedDayIndices.isNotEmpty;
 
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -387,9 +394,9 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     // in-progress session for this exact planId+dayIndex offers Resume/
     // Start Over instead of silently being orphaned by a brand-new one.
     // _DayCard already hides this tap entirely for a day
-    // _isDayCompletedToday() reports as completed (see
-    // _buildSessionSchedule), so no separate completed check is needed
-    // here. The fresh-start path itself (setOverrideDayIndex + push) is
+    // _isDayCompleted() reports as completed (see _buildSessionSchedule),
+    // so no separate completed check is needed here. The fresh-start path
+    // itself (setOverrideDayIndex + push) is
     // unchanged from before this feature.
     await startOrResumeTrackedSession(
       context: context,
@@ -402,6 +409,59 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
         context.push(Routes.gymSession, extra: {'readOnly': true});
       },
     );
+  }
+
+  // Same confirmation copy/style as plan_schedule_screen.dart's own
+  // existing Restart Plan action, and delegates to the same shared
+  // FirestoreService().resetPlanProgress() that action now also uses — see
+  // that method's own doc comment for why the field list lives there
+  // instead of being duplicated per-screen. Available regardless of
+  // tracked/saved/custom state (see _hasAnyProgress).
+  Future<void> _handleRestartProgram() async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    final planId = _planData?['id'] as String?;
+    if (uid == null || planId == null || planId.isEmpty) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Restart Plan?',
+          style: TextStyle(
+              fontSize: 17, fontWeight: FontWeight.w700, color: WW.text),
+        ),
+        content: const Text(
+          'This will reset your progress back to Day 1. Your session history will not be deleted.',
+          style: TextStyle(fontSize: 14, color: WW.textSec),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child:
+                const Text('Cancel', style: TextStyle(color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Restart',
+              style: TextStyle(
+                  color: Color(0xFFEF4444), fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    await FirestoreService().resetPlanProgress(uid, planId);
+    if (!mounted) return;
+    setState(() {
+      _currentDayIndex = 1;
+      _completedDayIndices = {};
+    });
+    _snack('Plan restarted from Day 1.');
   }
 
   @override
@@ -942,14 +1002,34 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Plan Schedule',
-          style: TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w800,
-            color: WW.primaryDark,
-            letterSpacing: -0.2,
-          ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              'Plan Schedule',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w800,
+                color: WW.primaryDark,
+                letterSpacing: -0.2,
+              ),
+            ),
+            // Shown regardless of tracked/saved/custom state — see
+            // _hasAnyProgress's own doc comment for why this can't live in
+            // _buildStickyBar's tracked/saved/custom branches instead.
+            if (_hasAnyProgress)
+              GestureDetector(
+                onTap: _handleRestartProgram,
+                child: const Text(
+                  'Restart Program',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFFEF4444),
+                  ),
+                ),
+              ),
+          ],
         ),
         const SizedBox(height: 10),
         ...sessions.asMap().entries.map((entry) {
@@ -957,7 +1037,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
           final s = entry.value;
           final dayNumber =
               (s['dayNumber'] as num?)?.toInt() ?? (idx + 1);
-          final isCompleted = _isDayCompletedToday(dayNumber);
+          final isCompleted = _isDayCompleted(dayNumber);
           return _DayCard(
             sessionData: s,
             isCompleted: isCompleted,
@@ -1391,8 +1471,9 @@ class _DayCard extends StatefulWidget {
   final bool showStartButton;
   final VoidCallback? onStart;
   final VoidCallback? onPreview;
-  // True when this day matches _isDayCompletedToday() — shows a small
-  // teal "Completed" pill (same color/icon convention as home_screen.dart's
+  // True when this day is in the lifetime completedDayIndices ledger (see
+  // _isDayCompleted()) — shows a small teal "Completed" pill (same
+  // color/icon convention as home_screen.dart's
   // own completed state, and identical to plan_schedule_screen.dart's own
   // _StatusBadge 'completed' case, just sized for this compact list-row
   // context) instead of a tappable preview row. Callers are expected to

@@ -14,6 +14,32 @@ class FirestoreService {
   static const _inProgressSessions = 'inProgressSessions';
 
   // ---------------------------------------------------------------------------
+  // Timing-plausibility constants for the per-set anti-gaming check (see
+  // _computeTimingFlaggedIndices(), used by saveGymSession()/
+  // finalizeInProgressSession()). restTime is deliberately NOT used for
+  // this: it's a live, freely user-editable in-session setting (see
+  // gym_session_screen.dart's _RestTimerPicker) with no record kept of
+  // what the plan originally specified, so a user could set it to "Off"
+  // specifically to defeat a rest-time-based check. completedAt gaps are a
+  // real, client-captured wall-clock signal instead, judged against a
+  // minimum plausible duration derived purely from that set's own rep
+  // count — independent of whatever restTime happens to be configured.
+  //
+  // _kMinSetTransitionSeconds: a fixed floor per set-to-set transition,
+  // independent of rep count — covers unavoidable overhead between two
+  // consecutive completions on the same exercise (re-racking/re-gripping
+  // the weight, resetting stance, physically registering the tick) that
+  // exists even for a single-rep set.
+  // _kMinSecondsPerRep: an additional floor per rep performed —
+  // deliberately conservative (low) so genuinely fast, well-conditioned
+  // training is never flagged; it exists only to catch a rep count that's
+  // physically impossible in the time actually available, not to judge
+  // tempo or form.
+  // ---------------------------------------------------------------------------
+  static const double _kMinSetTransitionSeconds = 5.0;
+  static const double _kMinSecondsPerRep = 1.5;
+
+  // ---------------------------------------------------------------------------
   // Creates or merges a user document at users/{uid}.
   // Safe to call on first sign-up and on subsequent updates — merge:true
   // ensures existing fields are not overwritten by omission.
@@ -123,46 +149,49 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
-  // Estimates gym calories from actual work done, not just elapsed time —
-  // replaces the old flat `5.0 * weightKg * durationHours` formula (sets/
-  // reps/weight lifted had zero effect on it, so a session with zero
-  // completed sets earned the same calories as a genuinely hard one of the
-  // same duration). Three components, each with its own reasoning:
-  //  - durationComponent: 1.0 kcal/kg/hour — deliberately close to resting
-  //    metabolic rate (not a light-activity MET like ~3-4), so duration
-  //    alone no longer meaningfully rewards an empty/idle session; it's
-  //    still present because a real gym session involves more than the
-  //    barbell moving (setup, walking between stations, holding
-  //    positions).
-  //  - volumeComponent: 0.05 kcal per kg of totalVolume (kg x reps summed
-  //    across every done set — the same "volume load" metric this app
-  //    already surfaces via _formatVolume elsewhere), scaled by the
-  //    user's own body weight relative to a 70kg reference — a rough,
+  // Estimates gym calories from actual legitimate work done — no duration/
+  // elapsed-time term at all (removed; see below), purely totalVolume and
+  // totalSets, both of which already exclude flagged sets (timing-
+  // implausible or out-of-bounds — see _computeTimingFlaggedIndices()/
+  // _isBoundsFlagged()) upstream in saveGymSession()/
+  // finalizeInProgressSession(). Two components:
+  //  - volumeComponent: 0.06 kcal per kg of totalVolume (kg x reps summed
+  //    across every legitimate done set — the same "volume load" metric
+  //    this app already surfaces via _formatVolume elsewhere), scaled by
+  //    the user's own body weight relative to a 70kg reference — a rough,
   //    deliberately conservative approximation for resistance-training
   //    energy expenditure scaling with both moved load and lifter mass.
-  //  - setsComponent: 0.15 kcal/kg per completed set — a small flat
-  //    per-set overhead (bracing, rest, setup) that volume alone
+  //  - setsComponent: 0.18 kcal/kg per legitimate completed set — a small
+  //    flat per-set overhead (bracing, rest, setup) that volume alone
   //    under-counts for lighter-load/bodyweight exercises.
-  // Zero sets and zero volume correctly collapses to just the (now much
-  // smaller) duration component, so an empty session barely registers
-  // instead of accruing meaningful calories purely from elapsed time.
-  // Floor lowered from the old formula's 50 to 10 (still non-zero for
-  // display sanity, but no longer a reward floor that would undermine the
-  // point of this change for a genuinely trivial/empty session); ceiling
-  // kept at 2000 as a sane per-session sanity cap.
+  // A previous duration-based term (1.0 kcal/kg/hour, meant to be a
+  // near-resting-rate baseline for the non-barbell parts of a session:
+  // setup, walking between stations, holding positions) was removed
+  // entirely by product decision: it was driven purely by elapsed time,
+  // completely independent of which sets were flagged, so a session made
+  // entirely of flagged/fake sets still earned meaningful calories from
+  // duration alone even after volume/sets correctly zeroed out. The 0.06/
+  // 0.18 coefficients above are scaled up from the prior 0.05/0.15 (same
+  // ~60/40 volume/sets split as before) to absorb roughly what the removed
+  // duration term used to contribute for a typical session, so a real
+  // session's total calorie estimate stays in a comparable real-world
+  // range to before this change — see this function's own sanity-check
+  // numbers reported alongside this change. Floor dropped from the old
+  // formula's 10 to 0: with no duration baseline left to prop up an empty
+  // session, a genuinely zero-legitimate-work session (everything flagged,
+  // or nothing done at all) should now correctly earn exactly zero,
+  // not some artificial display minimum. Ceiling kept at 2000 as a sane
+  // per-session sanity cap.
   // ---------------------------------------------------------------------------
   int _estimateGymCalories({
     required double weightKg,
-    required int durationSeconds,
     required int totalSets,
     required double totalVolume,
   }) {
-    final durationHours = durationSeconds / 3600;
-    final durationComponent = 1.0 * weightKg * durationHours;
-    final volumeComponent = 0.05 * totalVolume * (weightKg / 70.0);
-    final setsComponent = 0.15 * weightKg * totalSets;
-    final total = durationComponent + volumeComponent + setsComponent;
-    return total.round().clamp(10, 2000);
+    final volumeComponent = 0.06 * totalVolume * (weightKg / 70.0);
+    final setsComponent = 0.18 * weightKg * totalSets;
+    final total = volumeComponent + setsComponent;
+    return total.round().clamp(0, 2000);
   }
 
   // ---------------------------------------------------------------------------
@@ -186,6 +215,114 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Returns, indexed to match `exercises` (e.g. rawExercises/gymBlocks —
+  // result[i] holds the flagged set-indices for exercises[i]'s own `sets`
+  // list), the done sets across the WHOLE SESSION whose completedAt gap
+  // since the immediately preceding done set — by actual completion time,
+  // never by array/exercise position — is below what that set's own rep
+  // count could plausibly take (see _kMinSetTransitionSeconds/
+  // _kMinSecondsPerRep's own doc comment). Replaces an earlier per-exercise
+  // version of this check: comparing only within the same exercise meant
+  // every exercise's own first set was exempt, so a session with N
+  // exercises had N free unflagged sets no matter how implausible. Every
+  // done set from every exercise (including a mid-session-added one — its
+  // real completedAt values interleave correctly here regardless of where
+  // its block happens to sit in the array, since appendInProgressSessionBlock
+  // always appends at the end of blocks[] with no chronological meaning —
+  // see that method's own doc comment) is gathered into one flat list and
+  // sorted by real completedAt before any gap is computed, so only the
+  // true first set of the entire session has no preceding set to compare
+  // against.
+  //
+  // sessionStartAnchor covers that one true-first-set case:
+  //  - plan-linked sessions: pass the inProgressSessions doc's own
+  //    createdAt (a server timestamp captured when the session was first
+  //    loaded — finalizeInProgressSession() already has this doc in scope)
+  //    so even the very first set is checked against a real reference
+  //    point.
+  //  - standalone sessions: pass null — no inProgressSessions doc was ever
+  //    created for one, and _elapsed (gym_session_screen.dart) is a
+  //    pause-aware counter, not a wall-clock value, so it can't be trusted
+  //    to reconstruct a start moment. With no anchor, the whole session's
+  //    first set is simply never flagged for lack of anything trustworthy
+  //    to compare it against — same as every first set always was before
+  //    this fix, just now scoped to once per session instead of once per
+  //    exercise.
+  // A set with no completedAt (legacy data predating this feature) or no
+  // parseable positive rep count is skipped for this check (nothing
+  // plausible to judge it against), not flagged by default — unchanged
+  // from before.
+  // ---------------------------------------------------------------------------
+  List<Set<int>> _computeSessionTimingFlags(
+    List<dynamic> exercises,
+    DateTime? sessionStartAnchor,
+  ) {
+    // (exerciseIndex, setIndex, the set map itself, its completedAt) for
+    // every done set with a parseable completedAt, across every exercise.
+    final allDoneSets = <(int, int, Map, DateTime)>[];
+    for (var ei = 0; ei < exercises.length; ei++) {
+      final e = exercises[ei];
+      if (e is! Map) continue;
+      final sets = e['sets'];
+      if (sets is! List) continue;
+      for (var si = 0; si < sets.length; si++) {
+        final s = sets[si];
+        if (s is! Map || s['done'] != true) continue;
+        final ts = _normalizeSetCompletedAt(s['completedAt']);
+        if (ts == null) continue;
+        allDoneSets.add((ei, si, s, ts.toDate()));
+      }
+    }
+    allDoneSets.sort((a, b) => a.$4.compareTo(b.$4));
+
+    final result = List.generate(exercises.length, (_) => <int>{});
+    for (var i = 0; i < allDoneSets.length; i++) {
+      final (ei, si, curSet, completedAt) = allDoneSets[i];
+      final reps = int.tryParse(curSet['reps']?.toString() ?? '');
+      if (reps == null || reps <= 0) continue;
+
+      final prevTime = i > 0 ? allDoneSets[i - 1].$4 : sessionStartAnchor;
+      if (prevTime == null) continue; // true first set, no anchor available
+
+      final gapSeconds =
+          completedAt.difference(prevTime).inMilliseconds / 1000.0;
+      final minPlausibleSeconds =
+          _kMinSetTransitionSeconds + reps * _kMinSecondsPerRep;
+      if (gapSeconds < minPlausibleSeconds) {
+        result[ei].add(si);
+      }
+    }
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Whether a single set's kg/reps falls outside its exercise's admin-set
+  // bounds (see getExerciseBoundsForExercises() — a null/absent bounds map
+  // always means "not configured for this exercise", never treated as a
+  // 0/0 bound). Only flags a value that's actually present and parseable
+  // and genuinely out of range — a null kg/reps (shouldn't normally
+  // happen; _markSetDone() in gym_session_screen.dart requires both
+  // non-empty before a set can be marked done) is never flagged by this
+  // check on its own.
+  // ---------------------------------------------------------------------------
+  bool _isBoundsFlagged(double? kg, int? reps, Map<String, num>? bounds) {
+    if (bounds == null) return false;
+    final minKg = bounds['minKg'];
+    final maxKg = bounds['maxKg'];
+    final minReps = bounds['minReps'];
+    final maxReps = bounds['maxReps'];
+    if (kg != null) {
+      if (minKg != null && kg < minKg) return true;
+      if (maxKg != null && kg > maxKg) return true;
+    }
+    if (reps != null) {
+      if (minReps != null && reps < minReps) return true;
+      if (maxReps != null && reps > maxReps) return true;
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
   // Saves a completed gym session to users/{uid}/sessions/{auto-id}.
   // Calculates totalSets, totalVolume, caloriesBurned, and xpEarned from the
   // exercises list. Uses add() so each call creates a unique document.
@@ -197,28 +334,68 @@ class FirestoreService {
     final rawExercises = sessionData['exercises'];
     int totalSets = 0;
     double totalVolume = 0.0;
+    int flaggedSetCount = 0;
 
     // Build a cleaned exercises list: only completed sets, numeric kg/reps.
     final List<Map<String, dynamic>> cleanedExercises = [];
 
     if (rawExercises is List) {
-      for (final e in rawExercises) {
+      // One bulk lookup for every exercise in this session, rather than a
+      // separate getExerciseDetail() collection scan per exercise — see
+      // getExerciseBoundsForExercises()'s own doc comment.
+      final exerciseNames = rawExercises
+          .whereType<Map>()
+          .map((e) => e['name'] as String? ?? '')
+          .where((n) => n.isNotEmpty)
+          .toList();
+      final exerciseBounds = await getExerciseBoundsForExercises(exerciseNames);
+      // Standalone session — saveGymSession() is only ever reached here for
+      // a genuinely standalone session, or as a fallback when the
+      // plan-linked finalizeInProgressSession() path throws (see this
+      // method's own doc comment) — sessionData never carries a
+      // sessionRunId either way, so there's no inProgressSessions doc to
+      // read a createdAt anchor from. Passing null means the whole
+      // session's true first set is simply never flagged for lack of a
+      // trustworthy reference point — see _computeSessionTimingFlags()'s
+      // own doc comment for why this is deliberate, not an oversight.
+      final timingFlagsByExercise =
+          _computeSessionTimingFlags(rawExercises, null);
+
+      for (var ei = 0; ei < rawExercises.length; ei++) {
+        final e = rawExercises[ei];
         if (e is! Map) continue;
         final sets = e['sets'];
         if (sets is! List) continue;
+        final bounds = exerciseBounds[e['name'] as String? ?? ''];
+        final flaggedTimingIndices = timingFlagsByExercise[ei];
 
         final List<Map<String, dynamic>> doneSets = [];
-        for (final s in sets) {
+        for (var i = 0; i < sets.length; i++) {
+          final s = sets[i];
           if (s is! Map || s['done'] != true) continue;
           final kg = double.tryParse(s['kg']?.toString() ?? '');
           final reps = int.tryParse(s['reps']?.toString() ?? '');
-          totalSets++;
-          totalVolume += (kg ?? 0) * (reps ?? 0);
+
+          // A flagged set is still recorded exactly as the user entered it
+          // (real kg/reps/completedAt, plus its flag) — it just doesn't
+          // contribute to totalSets/totalVolume (and therefore xpEarned/
+          // caloriesBurned below), rather than being hidden or altered.
+          final flaggedTiming = flaggedTimingIndices.contains(i);
+          final flaggedBounds = _isBoundsFlagged(kg, reps, bounds);
+          if (flaggedTiming || flaggedBounds) {
+            flaggedSetCount++;
+          } else {
+            totalSets++;
+            totalVolume += (kg ?? 0) * (reps ?? 0);
+          }
+
           doneSets.add({
             'kg': kg,
             'reps': reps,
             'done': true,
             'completedAt': _normalizeSetCompletedAt(s['completedAt']),
+            if (flaggedTiming) 'flaggedTiming': true,
+            if (flaggedBounds) 'flaggedBounds': true,
           });
         }
 
@@ -237,7 +414,6 @@ class FirestoreService {
         double.tryParse(profile?['weight']?.toString() ?? '70') ?? 70.0;
     final caloriesBurned = _estimateGymCalories(
       weightKg: weightKg,
-      durationSeconds: sessionData['elapsedSeconds'] as int,
       totalSets: totalSets,
       totalVolume: totalVolume,
     );
@@ -283,6 +459,7 @@ class FirestoreService {
         'exercises': cleanedExercises,
         'totalSets': totalSets,
         'totalVolume': totalVolume,
+        'flaggedSetCount': flaggedSetCount,
         'caloriesBurned': caloriesBurned,
         'xpEarned': totalSets * 15,
         'isManuallyLogged': false,
@@ -479,6 +656,45 @@ class FirestoreService {
         if (match.isNotEmpty) {
           result[match] = injuryRisk;
         }
+      }
+      return result;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Fetches weight/rep bounds — 'minKg'/'maxKg'/'minReps'/'maxReps', all
+  /// optional and admin-set via Firebase Console (no write path exists in
+  /// the app, matching this collection's existing read-only convention —
+  /// see getExerciseDetail()/getInjuryRisksForExercises() above) — for a
+  /// list of exercise names from the exercises collection. Mirrors
+  /// getInjuryRisksForExercises()'s bulk-lookup shape (one collection read
+  /// total) rather than calling getExerciseDetail() once per exercise,
+  /// which would otherwise re-scan the entire collection per exercise in a
+  /// session. An exercise with none of the four fields set is simply
+  /// absent from the result — callers must treat a missing entry as "no
+  /// bounds configured, skip the check", never invent a 0/0 bound.
+  Future<Map<String, Map<String, num>>> getExerciseBoundsForExercises(
+    List<String> exerciseNames,
+  ) async {
+    if (exerciseNames.isEmpty) return {};
+    try {
+      final snapshot = await _db.collection(Collections.exercises).get();
+      final result = <String, Map<String, num>>{};
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final name = data['name'] as String? ?? '';
+        final match = exerciseNames.firstWhere(
+          (n) => n.toLowerCase() == name.toLowerCase(),
+          orElse: () => '',
+        );
+        if (match.isEmpty) continue;
+        final bounds = <String, num>{};
+        if (data['minKg'] is num) bounds['minKg'] = data['minKg'] as num;
+        if (data['maxKg'] is num) bounds['maxKg'] = data['maxKg'] as num;
+        if (data['minReps'] is num) bounds['minReps'] = data['minReps'] as num;
+        if (data['maxReps'] is num) bounds['maxReps'] = data['maxReps'] as num;
+        if (bounds.isNotEmpty) result[match] = bounds;
       }
       return result;
     } catch (_) {
@@ -934,18 +1150,43 @@ class FirestoreService {
   // planProgress subcollection helpers — per-plan progress isolation.
   // ---------------------------------------------------------------------------
 
+  // Seeds a brand-new planProgress/{planId} doc with defaults. Guarded by
+  // an existence check so this is genuinely idempotent to call more than
+  // once for the same uid+planId (e.g. trackPlan() re-tracking a plan
+  // that was already tracked before, then untracked, then tracked again —
+  // untracking never touches this doc, so it can still hold real progress
+  // by the time trackPlan() calls this again). SetOptions(merge:true)
+  // alone does NOT provide that safety: every field below is explicitly
+  // named in the payload, and merge only protects fields NOT listed in a
+  // write — every one of these would still be silently overwritten back
+  // to its default on a second call without this guard. Deliberately
+  // resetting a plan's progress is a separate, explicit action — see
+  // resetPlanProgress(), wired to the "Restart Program" buttons in
+  // plan_detail_screen.dart/plan_schedule_screen.dart — tracking must
+  // never implicitly do that.
   Future<void> initPlanProgress(String uid, String planId) async {
-    await _db
+    final docRef = _db
         .collection(Collections.users)
         .doc(uid)
         .collection(_planProgress)
-        .doc(planId)
-        .set({
+        .doc(planId);
+    final existing = await docRef.get();
+    if (existing.exists) return;
+    await docRef.set({
       'planId': planId,
       'currentDayIndex': 1,
       'lastCompletedDate': '',
       'lastCompletedDayIndex': 0,
       'compressedDays': [],
+      // Lifetime per-day completion ledger — every dayIndex ever marked
+      // done via markSessionComplete(), persisting across app sessions
+      // until an explicit resetPlanProgress() (or the automatic
+      // full-program-wrap clear in checkAndAdvanceDay()). Distinct from
+      // lastCompletedDate/lastCompletedDayIndex above, which only ever
+      // remember the single most recently completed day — this is what
+      // lets plan_detail_screen.dart/plan_schedule_screen.dart correctly
+      // show every genuinely-completed day, not just the latest one.
+      'completedDayIndices': [],
       'breakModeActive': false,
       'breakStartDate': null,
       'breakEndDate': null,
@@ -969,6 +1210,7 @@ class FirestoreService {
       'currentDayIndex': 1,
       'lastCompletedDate': '',
       'compressedDays': [],
+      'completedDayIndices': [],
       'breakModeActive': false,
       'trackingStartDate': null,
     };
@@ -1031,7 +1273,10 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
   // Records completion of today's session. Saves lastCompletedDate (yyyy-MM-dd)
   // and lastCompletedDayIndex without changing currentDayIndex — the advance
-  // happens on the next app open via checkAndAdvanceDay.
+  // happens on the next app open via checkAndAdvanceDay. Also adds
+  // currentDayIndex to the lifetime completedDayIndices ledger via
+  // arrayUnion, so a repeat completion of the same day (e.g. redoing Day 1
+  // before advancing) doesn't create a duplicate entry.
   // ---------------------------------------------------------------------------
   Future<void> markSessionComplete(String uid, String planId) async {
     final progress = await getPlanProgress(uid, planId);
@@ -1041,6 +1286,7 @@ class FirestoreService {
     await updatePlanProgress(uid, planId, {
       'lastCompletedDate': today,
       'lastCompletedDayIndex': currentDayIndex,
+      'completedDayIndices': FieldValue.arrayUnion([currentDayIndex]),
     });
   }
 
@@ -1048,6 +1294,19 @@ class FirestoreService {
   // Advances currentDayIndex if the last completed session was on a previous
   // calendar day and the index has not been advanced yet.
   // Returns the effective currentDayIndex (new value or unchanged).
+  //
+  // newIndex == 1 here specifically means currentDayIndex == totalSessions —
+  // i.e. the plan's entire defined day count was just exhausted and this
+  // wrapped back to the start of a fresh cycle through the whole program
+  // (this is the ONLY place in the codebase currentDayIndex is computed via
+  // a wrapping formula — every other write either seeds it to 1 for a new
+  // plan or is the explicit resetPlanProgress() restart, neither of which
+  // is this kind of automatic wrap). Treated as an implicit "start over"
+  // exactly like the explicit Restart Program action, so the lifetime
+  // completedDayIndices ledger is cleared here too — otherwise a user who
+  // simply keeps going after finishing the whole program (never tapping
+  // Restart) would see every day of the new cycle pre-marked complete from
+  // the previous one.
   // ---------------------------------------------------------------------------
   Future<int> checkAndAdvanceDay(
       String uid, int totalSessions, String planId) async {
@@ -1065,10 +1324,30 @@ class FirestoreService {
         lastCompletedDate != today &&
         lastCompletedDayIndex == currentDayIndex) {
       final newIndex = (currentDayIndex % totalSessions) + 1;
-      await updatePlanProgress(uid, planId, {'currentDayIndex': newIndex});
+      final updates = <String, dynamic>{'currentDayIndex': newIndex};
+      if (newIndex == 1) updates['completedDayIndices'] = [];
+      await updatePlanProgress(uid, planId, updates);
       return newIndex;
     }
     return currentDayIndex;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Resets a plan's progress back to Day 1 — the shared reset used by both
+  // plan_schedule_screen.dart's Restart Plan action and
+  // plan_detail_screen.dart's Restart Program action, so the exact set of
+  // fields reset can never drift out of sync between the two screens again.
+  // Session history (sessions/{id} docs) is untouched — this only resets
+  // the planProgress/{planId} tracking doc.
+  // ---------------------------------------------------------------------------
+  Future<void> resetPlanProgress(String uid, String planId) async {
+    await updatePlanProgress(uid, planId, {
+      'currentDayIndex': 1,
+      'lastCompletedDate': '',
+      'lastCompletedDayIndex': 0,
+      'compressedDays': [],
+      'completedDayIndices': [],
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1681,21 +1960,62 @@ class FirestoreService {
     final List<Map<String, dynamic>> cleanedExercises = [];
     int totalSets = 0;
     double totalVolume = 0.0;
-    for (final e in gymBlocks) {
+    int flaggedSetCount = 0;
+    // One bulk lookup for every gym exercise in this session, rather than a
+    // separate getExerciseDetail() collection scan per exercise — see
+    // getExerciseBoundsForExercises()'s own doc comment.
+    final gymExerciseNames = gymBlocks
+        .map((b) => b['name'] as String? ?? '')
+        .where((n) => n.isNotEmpty)
+        .toList();
+    final exerciseBounds = await getExerciseBoundsForExercises(gymExerciseNames);
+    // Plan-linked session — this doc's own createdAt (a server timestamp
+    // written by createInProgressSession() when the session was first
+    // loaded) is a real, trustworthy reference point for even the whole
+    // session's true first set — see _computeSessionTimingFlags()'s own
+    // doc comment. Already deserializes as a Timestamp on read-back
+    // (unlike saveGymSession()'s in-memory sessionData, which is never
+    // round-tripped through Firestore first).
+    final rawCreatedAt = data['createdAt'];
+    final sessionStartAnchor =
+        rawCreatedAt is Timestamp ? rawCreatedAt.toDate() : null;
+    final timingFlagsByExercise =
+        _computeSessionTimingFlags(gymBlocks, sessionStartAnchor);
+
+    for (var ei = 0; ei < gymBlocks.length; ei++) {
+      final e = gymBlocks[ei];
       final sets = e['sets'];
       if (sets is! List) continue;
+      final bounds = exerciseBounds[e['name'] as String? ?? ''];
+      final flaggedTimingIndices = timingFlagsByExercise[ei];
+
       final List<Map<String, dynamic>> doneSets = [];
-      for (final s in sets) {
+      for (var i = 0; i < sets.length; i++) {
+        final s = sets[i];
         if (s is! Map || s['done'] != true) continue;
         final kg = double.tryParse(s['kg']?.toString() ?? '');
         final reps = int.tryParse(s['reps']?.toString() ?? '');
-        totalSets++;
-        totalVolume += (kg ?? 0) * (reps ?? 0);
+
+        // Same treatment as saveGymSession()'s identical loop — a flagged
+        // set is still recorded exactly as entered (real kg/reps/
+        // completedAt, plus its flag) but excluded from totalSets/
+        // totalVolume (and therefore xpEarned/caloriesBurned below).
+        final flaggedTiming = flaggedTimingIndices.contains(i);
+        final flaggedBounds = _isBoundsFlagged(kg, reps, bounds);
+        if (flaggedTiming || flaggedBounds) {
+          flaggedSetCount++;
+        } else {
+          totalSets++;
+          totalVolume += (kg ?? 0) * (reps ?? 0);
+        }
+
         doneSets.add({
           'kg': kg,
           'reps': reps,
           'done': true,
           'completedAt': _normalizeSetCompletedAt(s['completedAt']),
+          if (flaggedTiming) 'flaggedTiming': true,
+          if (flaggedBounds) 'flaggedBounds': true,
         });
       }
       if (doneSets.isNotEmpty) {
@@ -1731,9 +2051,9 @@ class FirestoreService {
     // b['caloriesBurned']` loop above always added 0 for every gym block —
     // a combined session's total silently excluded the gym portion
     // entirely. Estimated here instead via the same _estimateGymCalories()
-    // formula saveGymSession() uses, with durationSeconds: 0 since there's
-    // no reliable per-gym-block duration signal to pass (the volume/sets
-    // components still correctly reward real work done without it).
+    // formula saveGymSession() uses — that formula no longer takes a
+    // duration signal at all (see its own doc comment), so the lack of a
+    // reliable per-gym-block duration here no longer matters either way.
     // Cardio blocks DO carry their own caloriesBurned (computed
     // client-side by the outdoor/indoor cardio screens before being synced
     // here) — summed as before, unchanged.
@@ -1743,7 +2063,6 @@ class FirestoreService {
     final gymCaloriesBurned = hasGym
         ? _estimateGymCalories(
             weightKg: weightKg,
-            durationSeconds: 0,
             totalSets: totalSets,
             totalVolume: totalVolume,
           )
@@ -1796,6 +2115,7 @@ class FirestoreService {
       'exercises': cleanedExercises,
       'totalSets': totalSets,
       'totalVolume': totalVolume,
+      'flaggedSetCount': flaggedSetCount,
     };
 
     if (type == 'combined') {

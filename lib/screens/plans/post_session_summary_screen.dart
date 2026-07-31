@@ -780,6 +780,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                         const SizedBox(height: 12),
                       ],
                       if (_isGym || _isCombined) ...[
+                        _buildFlaggedSetsBanner(),
                         _buildExercisesSection(),
                         const SizedBox(height: 12),
                       ],
@@ -1412,6 +1413,57 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     }
   }
 
+  // ── Flagged-sets banner ────────────────────────────────────────────────────
+  // Shown when saveGymSession()/finalizeInProgressSession() excluded one or
+  // more sets from totalSets/totalVolume/xpEarned via the completedAt-gap
+  // timing check or the exercise-bounds check (see firestore_service.dart's
+  // _computeTimingFlaggedIndices()/_isBoundsFlagged()) — those sets are
+  // still recorded and shown exactly as entered in the exercises list below
+  // (see the flaggedTiming/flaggedBounds marker in _buildExercisesSection),
+  // they just didn't count toward credit. Purely explanatory: non-blocking,
+  // no dismiss action, nothing to tap. Same amber warning pill style as
+  // outdoor_cardio_screen.dart's _buildAccrualPausedBanner() (identical
+  // color pair) rather than inventing a new warning style for this screen.
+  Widget _buildFlaggedSetsBanner() {
+    final flaggedCount = (_session['flaggedSetCount'] as num?)?.toInt() ?? 0;
+    if (flaggedCount <= 0) return const SizedBox.shrink();
+    final message = flaggedCount == 1
+        ? "1 set wasn't counted toward XP/calories due to a reliability "
+            'check — you can see which one below.'
+        : "$flaggedCount sets weren't counted toward XP/calories due to a "
+            'reliability check — you can see which ones below.';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFEF3C7),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.warning_amber_rounded,
+              size: 16,
+              color: Color(0xFFD97706),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFFD97706),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ── Exercises section (gym or combined) — ported verbatim from
   // activity_detail_screen.dart's _buildExercisesSection(). ────────────────
 
@@ -1550,6 +1602,12 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                             s['w'] ??
                             0;
                         final reps = s['reps'] ?? s['r'] ?? 0;
+                        // Real kg/reps the user entered are shown exactly as
+                        // recorded either way (see firestore_service.dart's
+                        // cleaning loops) — this only adds a visual marker,
+                        // it never hides or changes a flagged set's numbers.
+                        final isFlagged = s['flaggedTiming'] == true ||
+                            s['flaggedBounds'] == true;
                         return Container(
                           padding: const EdgeInsets.symmetric(vertical: 3),
                           decoration: const BoxDecoration(
@@ -1574,11 +1632,23 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                                           color: WW.text))),
                               Expanded(
                                   flex: 2,
-                                  child: Text('$reps',
-                                      style: const TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w700,
-                                          color: WW.text))),
+                                  child: Row(
+                                    children: [
+                                      Text('$reps',
+                                          style: const TextStyle(
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w700,
+                                              color: WW.text)),
+                                      if (isFlagged) ...[
+                                        const SizedBox(width: 4),
+                                        const Icon(
+                                          Icons.warning_amber_rounded,
+                                          size: 12,
+                                          color: Color(0xFFD97706),
+                                        ),
+                                      ],
+                                    ],
+                                  )),
                             ],
                           ),
                         );
