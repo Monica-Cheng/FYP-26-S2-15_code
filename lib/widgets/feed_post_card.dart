@@ -53,6 +53,39 @@ class FeedPostCard extends StatelessWidget {
     return '$n';
   }
 
+  // Real photo when the poster has one (authorPhotoBase64, denormalized
+  // onto the post the same way authorName/authorInitial already are —
+  // see createFeedPost()), falling back to the initials circle
+  // otherwise. Scoped to just this header for now — comment avatars and
+  // every other initials-circle elsewhere in the app (leaderboard,
+  // friend rows, etc.) still use initials only; updating those is a
+  // separate, larger follow-up, not part of this pass.
+  Widget _buildAvatar(String? photoBase64, String initial) {
+    if (photoBase64 != null && photoBase64.isNotEmpty) {
+      try {
+        return CircleAvatar(
+          radius: 18,
+          backgroundColor: WW.primary,
+          backgroundImage: MemoryImage(base64Decode(photoBase64)),
+        );
+      } catch (_) {
+        // Falls through to the initials circle below.
+      }
+    }
+    return CircleAvatar(
+      radius: 18,
+      backgroundColor: WW.primary,
+      child: Text(
+        initial,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w700,
+          fontSize: 14,
+        ),
+      ),
+    );
+  }
+
   void _openProfile(BuildContext context) {
     final uid = post['uid'] as String?;
     if (uid == null || uid.isEmpty) return;
@@ -159,6 +192,7 @@ class FeedPostCard extends StatelessWidget {
     final postId = post['id'] as String;
     final authorName = (post['authorName'] as String?) ?? 'Someone';
     final authorInitial = (post['authorInitial'] as String?) ?? '?';
+    final authorPhotoBase64 = post['authorPhotoBase64'] as String?;
     final isWorkout = (post['type'] as String?) == 'workout';
     final foodName = (post['foodName'] as String?) ?? 'A meal';
     final calories = (post['calories'] as num?)?.toInt() ?? 0;
@@ -201,18 +235,7 @@ class FeedPostCard extends StatelessWidget {
                     onTap: () => _openProfile(context),
                     child: Row(
                       children: [
-                        CircleAvatar(
-                          radius: 18,
-                          backgroundColor: WW.primary,
-                          child: Text(
-                            authorInitial,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w700,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ),
+                        _buildAvatar(authorPhotoBase64, authorInitial),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Column(
@@ -258,49 +281,56 @@ class FeedPostCard extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 14),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(14),
-                child: AspectRatio(
-                  aspectRatio: 4 / 3,
-                  child: Image.memory(
-                    base64Decode(imageBase64),
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => Container(color: WW.elevated),
+                // No hardcoded AspectRatio — post images come from two
+                // sources with genuinely different shapes: share cards
+                // are a fixed 9:16 (1080x1920 Story ratio), while a
+                // scanned-food photo is whatever ratio the camera/
+                // gallery photo actually was (_encodeImageForPost only
+                // constrains width, not height, so it's never guaranteed
+                // 4:3 either). A single fixed ratio can only ever be
+                // right for one of these — sizing to width:infinity with
+                // no explicit height lets Image size itself to the
+                // decoded image's own natural aspect ratio instead.
+                child: Image.memory(
+                  base64Decode(imageBase64),
+                  width: double.infinity,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Container(
+                    height: 200,
+                    color: WW.elevated,
                   ),
                 ),
               ),
             ),
           const SizedBox(height: 12),
 
-          // Stat row — workout posts show duration/calories/sets-or-activity/
-          // volume instead of the meal calorie/macro pills.
+          // Stat row — minimal 2-color treatment (WW.primary icons, WW.text
+          // values, no background boxes) shared by meal and workout posts.
+          // Wrap (not Row) so a long cardio activity name or a narrow phone
+          // never overflows — it just wraps to a second line.
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14),
-            child: Row(
+            child: Wrap(
+              spacing: 14,
+              runSpacing: 6,
               children: isWorkout
                   ? (isCardio == true
                       ? [
-                          _StatPill(icon: Icons.timer_outlined, color: WW.primary, value: _fmtDuration(elapsedSeconds), label: 'Duration'),
-                          const SizedBox(width: 8),
-                          _StatPill(icon: Icons.local_fire_department_rounded, color: WW.gold, value: '$calories', label: 'Calories'),
-                          const SizedBox(width: 8),
-                          _StatPill(icon: Icons.directions_run_rounded, color: WW.teal, value: (cardioActivity?.isNotEmpty ?? false) ? cardioActivity! : 'Cardio', label: 'Activity'),
+                          _StatItem(icon: Icons.timer_outlined, text: _fmtDuration(elapsedSeconds)),
+                          _StatItem(icon: Icons.local_fire_department_rounded, text: '$calories cal'),
+                          _StatItem(icon: Icons.directions_run_rounded, text: (cardioActivity?.isNotEmpty ?? false) ? cardioActivity! : 'Cardio'),
                         ]
                       : [
-                          _StatPill(icon: Icons.timer_outlined, color: WW.primary, value: _fmtDuration(elapsedSeconds), label: 'Duration'),
-                          const SizedBox(width: 8),
-                          _StatPill(icon: Icons.local_fire_department_rounded, color: WW.gold, value: '$calories', label: 'Calories'),
-                          const SizedBox(width: 8),
-                          _StatPill(icon: Icons.fitness_center_rounded, color: WW.lavender, value: '${totalSets ?? 0}', label: 'Sets'),
-                          const SizedBox(width: 8),
-                          _StatPill(icon: Icons.bar_chart_rounded, color: WW.teal, value: '${_fmtVolume(volume)} kg', label: 'Volume'),
+                          _StatItem(icon: Icons.timer_outlined, text: _fmtDuration(elapsedSeconds)),
+                          _StatItem(icon: Icons.local_fire_department_rounded, text: '$calories cal'),
+                          _StatItem(icon: Icons.fitness_center_rounded, text: '${totalSets ?? 0} sets'),
+                          _StatItem(icon: Icons.bar_chart_rounded, text: '${_fmtVolume(volume)} kg'),
                         ])
                   : [
-                      _StatPill(icon: Icons.local_fire_department_rounded, color: WW.gold, value: '$calories', label: 'Calories'),
-                      const SizedBox(width: 8),
-                      _StatPill(icon: Icons.egg_alt_rounded, color: WW.lavender, value: '${proteinG ?? 0}g', label: 'Protein'),
-                      const SizedBox(width: 8),
-                      _StatPill(icon: Icons.grain_rounded, color: WW.teal, value: '${carbsG ?? 0}g', label: 'Carbs'),
-                      const SizedBox(width: 8),
-                      _StatPill(icon: Icons.water_drop_rounded, color: WW.primary, value: '${fatG ?? 0}g', label: 'Fats'),
+                      _StatItem(icon: Icons.local_fire_department_rounded, text: '$calories cal'),
+                      _StatItem(icon: Icons.egg_alt_rounded, text: '${proteinG ?? 0}g protein'),
+                      _StatItem(icon: Icons.grain_rounded, text: '${carbsG ?? 0}g carbs'),
+                      _StatItem(icon: Icons.water_drop_rounded, text: '${fatG ?? 0}g fat'),
                     ],
             ),
           ),
@@ -354,36 +384,32 @@ class FeedPostCard extends StatelessWidget {
   }
 }
 
-class _StatPill extends StatelessWidget {
+// Minimal 2-color stat treatment: WW.primary icon + WW.text value, no
+// background box — replaces the old 4-differently-colored _StatPill boxes.
+class _StatItem extends StatelessWidget {
   final IconData icon;
-  final Color color;
-  final String value;
-  final String label;
+  final String text;
 
-  const _StatPill({
+  const _StatItem({
     required this.icon,
-    required this.color,
-    required this.value,
-    required this.label,
+    required this.text,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(10),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: WW.primary),
+        const SizedBox(width: 4),
+        Text(
+          text,
+          style: WW.labelMed.copyWith(
+            color: WW.text,
+            fontWeight: FontWeight.w700,
+          ),
         ),
-        child: Column(
-          children: [
-            Icon(icon, size: 14, color: color),
-            const SizedBox(height: 2),
-            Text(value, style: WW.caption.copyWith(fontWeight: FontWeight.w800, color: color)),
-          ],
-        ),
-      ),
+      ],
     );
   }
 }

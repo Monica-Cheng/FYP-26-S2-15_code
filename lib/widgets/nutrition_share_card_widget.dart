@@ -14,6 +14,7 @@ class NutritionShareCardWidget extends StatelessWidget {
   final int? fatG;
   final String source; // 'scan' or 'manual'
   final DateTime date;
+  final List<Color> gradientColors;
 
   const NutritionShareCardWidget({
     super.key,
@@ -24,6 +25,7 @@ class NutritionShareCardWidget extends StatelessWidget {
     this.carbsG,
     this.fatG,
     this.source = 'scan',
+    this.gradientColors = const [WW.primaryDark, Color(0xFF4a4ea8)],
   });
 
   String _fmtDate(DateTime dt) {
@@ -40,22 +42,24 @@ class NutritionShareCardWidget extends StatelessWidget {
   Widget build(BuildContext context) {
     final dateStr = _fmtDate(date);
 
+    // Fixed Story-ratio canvas — same resize approach/reasoning as
+    // ShareCardWidget (see that file), same content just redistributed
+    // across the full height instead of shrink-wrapping it.
     return Container(
       width: 360,
+      height: 640,
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [WW.primaryDark, Color(0xFF4a4ea8)],
+          colors: gradientColors,
         ),
-        borderRadius: BorderRadius.circular(24),
       ),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
         children: [
           // Top header
           Padding(
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
+            padding: const EdgeInsets.fromLTRB(24, 32, 24, 20),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -65,7 +69,7 @@ class NutritionShareCardWidget extends StatelessWidget {
                       width: 32,
                       height: 32,
                       decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
+                        color: Colors.white.withValues(alpha: 0.2),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: const Center(
@@ -92,7 +96,7 @@ class NutritionShareCardWidget extends StatelessWidget {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.2),
+                    color: Colors.white.withValues(alpha: 0.2),
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
@@ -108,59 +112,59 @@ class NutritionShareCardWidget extends StatelessWidget {
             ),
           ),
 
-          // Food name
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Text(
-              foodName,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
-                color: Colors.white,
-                letterSpacing: -0.5,
-                height: 1.2,
+          // Food name / date / stats — centered in the space between the
+          // header and the footer strip.
+          Expanded(
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      foodName,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                        letterSpacing: -0.5,
+                        height: 1.2,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      dateStr,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.white.withValues(alpha: 0.6),
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 28),
+                    Row(
+                      children: [
+                        _StatBox(value: '$calories kcal', label: 'Calories'),
+                        const SizedBox(width: 10),
+                        _StatBox(value: '${proteinG ?? 0}g', label: 'Protein'),
+                        const SizedBox(width: 10),
+                        _StatBox(value: '${carbsG ?? 0}g', label: 'Carbs'),
+                        const SizedBox(width: 10),
+                        _StatBox(value: '${fatG ?? 0}g', label: 'Fat'),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
-          const SizedBox(height: 4),
-          Text(
-            dateStr,
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.white.withOpacity(0.6),
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          const SizedBox(height: 24),
-
-          // Stats grid — calories + macros
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Row(
-              children: [
-                _StatBox(value: '$calories kcal', label: 'Calories'),
-                const SizedBox(width: 10),
-                _StatBox(value: '${proteinG ?? 0}g', label: 'Protein'),
-                const SizedBox(width: 10),
-                _StatBox(value: '${carbsG ?? 0}g', label: 'Carbs'),
-                const SizedBox(width: 10),
-                _StatBox(value: '${fatG ?? 0}g', label: 'Fat'),
-              ],
-            ),
-          ),
-          const SizedBox(height: 24),
 
           // Bottom hashtag strip
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 14),
+            padding: const EdgeInsets.symmetric(vertical: 16),
             decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.2),
-              borderRadius: const BorderRadius.only(
-                bottomLeft: Radius.circular(24),
-                bottomRight: Radius.circular(24),
-              ),
+              color: Colors.black.withValues(alpha: 0.2),
             ),
             child: const Text(
               '#WiseWorkout  #EatSmart',

@@ -10,7 +10,6 @@ import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -22,10 +21,14 @@ import '../../services/barcode_service.dart';
 import '../../services/firestore_service.dart';
 import '../../services/nutrition_service.dart';
 import '../../widgets/caption_sheet.dart';
-import '../../widgets/nutrition_share_card_widget.dart';
 
 enum _Mode { scan, describe, barcode }
-enum _Stage { input, loading, result, error, barcodeSummary }
+// correcting: shown when the user flags a photo-scan result as wrong (see
+// _ResultView's confirm prompt) — a text-description re-estimate step,
+// styled like _Mode.describe's own input but with correction-specific
+// copy. Only ever entered from a scan-mode result; describe/barcode
+// results never show the "is this right?" prompt that leads here.
+enum _Stage { input, loading, result, error, barcodeSummary, correcting }
 
 class NutritionScanScreen extends StatefulWidget {
   final bool startInDescribeMode;
@@ -136,6 +139,48 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
     }
   }
 
+  // Entered from _ResultView's "No, let me fix it" confirm prompt (scan-
+  // mode results only). Same re-estimate call as _submitDescription()
+  // (analyzeFoodDescription) — on success, replaces _result in place and
+  // returns to the same result screen with corrected data; _mode/
+  // _pickedImage are left untouched, so the original photo still shows
+  // and is still reusable for the share-card Photo option, exactly as
+  // before the correction.
+  Future<void> _submitCorrection() async {
+    final text = _descriptionController.text.trim();
+    if (text.isEmpty) return;
+
+    setState(() {
+      _stage = _Stage.loading;
+      _errorMessage = null;
+    });
+
+    try {
+      final result = await _nutritionService.analyzeFoodDescription(text);
+      if (!mounted) return;
+
+      if (!result.recognized) {
+        setState(() {
+          _stage = _Stage.error;
+          _errorMessage = result.message ??
+              "Still couldn't estimate that — try adding more detail (e.g. portion size).";
+        });
+        return;
+      }
+
+      setState(() {
+        _result = result;
+        _stage = _Stage.result;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _stage = _Stage.error;
+        _errorMessage = e.toString();
+      });
+    }
+  }
+
   Future<void> _logMeal() async {
     final result = _result;
     if (result == null || _isSaving) return;
@@ -144,6 +189,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
 
     setState(() => _isSaving = true);
     try {
+      final imageBase64 = await _resolveExistingResultPhotoBase64();
       await _firestoreService.saveNutritionLog(
         uid,
         foodName: result.foodName,
@@ -153,6 +199,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
         carbsG: result.carbsG,
         fatG: result.fatG,
         confidence: result.confidence,
+        imageBase64: imageBase64,
       );
       if (!mounted) return;
       context.pop();
@@ -169,8 +216,11 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
   // Downscales a photo to a small PNG (no extra image-compression package
   // needed — uses Flutter's built-in ui.instantiateImageCodec) so it stays
   // well under Firestore's 1MB document size limit once base64-encoded.
-  // Returns null (post goes out without a photo) rather than failing the
-  // whole post if anything goes wrong.
+  // Returns null (post/log goes out without a photo) rather than failing
+  // the whole save if anything goes wrong. Used by _logMeal() below to
+  // attach the scan photo to the saved nutritionLogs entry — unrelated to
+  // the share-card flow further down (that one never attaches a photo,
+  // see the comment there).
   // ---------------------------------------------------------------------------
   Future<String?> _encodeImageForPost(File file) async {
     try {
@@ -193,21 +243,44 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
     }
   }
 
+  Future<String?> _resolveExistingResultPhotoBase64() {
+    if (_mode == _Mode.scan && _pickedImage != null) {
+      return _encodeImageForPost(_pickedImage!);
+    }
+    return Future.value(null);
+  }
+
   // ---------------------------------------------------------------------------
-  // Posts the current result to the real, shared Club "Feed" tab — separate
-  // from _logMeal (personal nutrition log) and _shareResult (native OS share
-  // sheet). A user can do any combination of the three.
+  // Share / Post to Feed — no card generation at all. Uses the meal's
+  // actual scanned/picked photo (already encoded by
+  // _resolveExistingResultPhotoBase64, same helper _logMeal() uses) as
+  // the post/share image directly, exactly like older meal posts — no
+  // NutritionShareCardWidget, no RenderRepaintBoundary capture step. If
+  // the meal has no photo at all (describe-mode, no image ever picked),
+  // posts/shares without an image — FeedPostCard already renders a
+  // photo-less post fine, and native share falls back to text-only.
   // ---------------------------------------------------------------------------
+
+  Future<void> _startResultCardFlow({required bool forPost}) async {
+    if (forPost ? _isPosting : _isSharing) return;
+    if (_result == null) return;
+    if (forPost) {
+      await _promptCaptionAndPostResultCard();
+    } else {
+      await _shareResultCard();
+    }
+  }
+
   // Shows the optional-caption sheet, then posts. Dismissing the sheet
   // without tapping "Post" cancels the whole post.
-  Future<void> _promptCaptionAndPostToFeed() async {
+  Future<void> _promptCaptionAndPostResultCard() async {
     if (!mounted) return;
     final result = await showCaptionSheet(context, fallbackLabel: 'the meal name');
     if (result == null) return;
-    await _postToFeed(caption: result.isEmpty ? null : result);
+    await _postResultCardToFeed(caption: result.isEmpty ? null : result);
   }
 
-  Future<void> _postToFeed({String? caption}) async {
+  Future<void> _postResultCardToFeed({String? caption}) async {
     final result = _result;
     if (result == null || _isPosting) return;
     final uid = _authService.getCurrentUser()?.uid;
@@ -218,16 +291,13 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
       final profile = await _firestoreService.getUserProfile(uid);
       final rawName = (profile?['displayName'] as String?)?.trim();
       final authorName = (rawName != null && rawName.isNotEmpty) ? rawName : 'Someone';
-
-      String? imageBase64;
-      if (_mode == _Mode.scan && _pickedImage != null) {
-        imageBase64 = await _encodeImageForPost(_pickedImage!);
-      }
-      debugPrint('[PostToFeed] nutrition _postToFeed: imageBase64 length = ${imageBase64?.length}');
+      final authorPhotoBase64 = profile?['photoBase64'] as String?;
+      final imageBase64 = await _resolveExistingResultPhotoBase64();
 
       await _firestoreService.createFeedPost(
         uid: uid,
         authorName: authorName,
+        authorPhotoBase64: authorPhotoBase64,
         foodName: result.foodName,
         calories: result.calories,
         proteinG: result.proteinG,
@@ -251,90 +321,19 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Renders NutritionShareCardWidget off-tree to a PNG and opens the native
-  // share sheet — same technique used for workout sessions in
-  // post_session_summary_screen.dart, so behavior is consistent app-wide.
-  // ---------------------------------------------------------------------------
-  Future<void> _shareResult() async {
+  Future<void> _shareResultCard() async {
     final result = _result;
     if (result == null || _isSharing) return;
 
     setState(() => _isSharing = true);
     try {
-      final cardWidget = NutritionShareCardWidget(
-        foodName: result.foodName,
-        calories: result.calories,
-        proteinG: result.proteinG,
-        carbsG: result.carbsG,
-        fatG: result.fatG,
-        source: _mode == _Mode.scan ? 'scan' : 'manual',
-        date: DateTime.now(),
-      );
-
-      const cardWidth = 360.0;
-      final repaintBoundary = RenderRepaintBoundary();
-      final renderView = RenderView(
-        view: View.of(context),
-        child: RenderPositionedBox(
-          alignment: Alignment.topLeft,
-          child: repaintBoundary,
-        ),
-        configuration: ViewConfiguration(
-          logicalConstraints: BoxConstraints.tight(
-            const Size(cardWidth, 800),
-          ),
-          devicePixelRatio: 3.0,
-        ),
-      );
-
-      final pipelineOwner = PipelineOwner();
-      final buildOwner = BuildOwner(focusManager: FocusManager());
-
-      pipelineOwner.rootNode = renderView;
-      renderView.prepareInitialFrame();
-
-      final rootElement = RenderObjectToWidgetAdapter<RenderBox>(
-        container: repaintBoundary,
-        child: Directionality(
-          textDirection: TextDirection.ltr,
-          child: MediaQuery(
-            data: MediaQueryData.fromView(View.of(context)),
-            child: cardWidget,
-          ),
-        ),
-      ).attachToRenderTree(buildOwner);
-
-      buildOwner.buildScope(rootElement);
-      buildOwner.finalizeTree();
-
-      pipelineOwner.flushLayout();
-      pipelineOwner.flushCompositingBits();
-      pipelineOwner.flushPaint();
-
-      final image = await repaintBoundary.toImage(pixelRatio: 3.0);
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-
-      if (byteData == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not generate share card.')),
-          );
-        }
-        return;
+      final image = _mode == _Mode.scan ? _pickedImage : null;
+      final text = 'Just logged ${result.foodName} on WiseWorkout! 🍽️';
+      if (image != null) {
+        await Share.shareXFiles([XFile(image.path)], text: text);
+      } else {
+        await Share.share(text);
       }
-
-      final bytes = byteData.buffer.asUint8List();
-      final tempDir = Directory.systemTemp;
-      final file = File(
-          '${tempDir.path}/wiseworkout_meal_'
-          '${DateTime.now().millisecondsSinceEpoch}.png');
-      await file.writeAsBytes(bytes);
-
-      await Share.shareXFiles(
-        [XFile(file.path)],
-        text: 'Just logged ${result.foodName} on WiseWorkout! 🍽️',
-      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -389,14 +388,41 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
     }
   }
 
-  Future<void> _promptCaptionAndPostBarcodeSummary() async {
+  ({String name, int calories, int protein, int carbs, int fat})
+      _barcodeSummaryTotals() {
+    final totalCalories =
+        _scannedProducts.fold<int>(0, (sum, p) => sum + p.calories);
+    final totalProtein =
+        _scannedProducts.fold<int>(0, (sum, p) => sum + (p.proteinG ?? 0));
+    final totalCarbs =
+        _scannedProducts.fold<int>(0, (sum, p) => sum + (p.carbsG ?? 0));
+    final totalFat =
+        _scannedProducts.fold<int>(0, (sum, p) => sum + (p.fatG ?? 0));
+    final summaryName = _scannedProducts.length == 1
+        ? _scannedProducts.first.name
+        : '${_scannedProducts.length} scanned products';
+    return (
+      name: summaryName,
+      calories: totalCalories,
+      protein: totalProtein,
+      carbs: totalCarbs,
+      fat: totalFat,
+    );
+  }
+
+  Future<void> _startBarcodeSummaryCardFlow() async {
+    if (_isPosting || _scannedProducts.isEmpty) return;
+    await _promptCaptionAndPostBarcodeCard();
+  }
+
+  Future<void> _promptCaptionAndPostBarcodeCard() async {
     if (!mounted) return;
     final result = await showCaptionSheet(context, fallbackLabel: 'the scanned items');
     if (result == null) return;
-    await _postBarcodeSummaryToFeed(caption: result.isEmpty ? null : result);
+    await _postBarcodeCardToFeed(caption: result.isEmpty ? null : result);
   }
 
-  Future<void> _postBarcodeSummaryToFeed({String? caption}) async {
+  Future<void> _postBarcodeCardToFeed({String? caption}) async {
     if (_scannedProducts.isEmpty || _isPosting) return;
     final uid = _authService.getCurrentUser()?.uid;
     if (uid == null) return;
@@ -406,27 +432,22 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
       final profile = await _firestoreService.getUserProfile(uid);
       final rawName = (profile?['displayName'] as String?)?.trim();
       final authorName = (rawName != null && rawName.isNotEmpty) ? rawName : 'Someone';
+      final authorPhotoBase64 = profile?['photoBase64'] as String?;
+      final totals = _barcodeSummaryTotals();
 
-      final totalCalories =
-          _scannedProducts.fold<int>(0, (sum, p) => sum + p.calories);
-      final totalProtein =
-          _scannedProducts.fold<int>(0, (sum, p) => sum + (p.proteinG ?? 0));
-      final totalCarbs =
-          _scannedProducts.fold<int>(0, (sum, p) => sum + (p.carbsG ?? 0));
-      final totalFat =
-          _scannedProducts.fold<int>(0, (sum, p) => sum + (p.fatG ?? 0));
-      final summaryName = _scannedProducts.length == 1
-          ? _scannedProducts.first.name
-          : '${_scannedProducts.length} scanned products';
-
+      // Barcode-scanned products never have an attached photo (no camera
+      // step in that flow) — posts without an image, same as a
+      // describe-mode meal with none.
       await _firestoreService.createFeedPost(
         uid: uid,
         authorName: authorName,
-        foodName: summaryName,
-        calories: totalCalories,
-        proteinG: totalProtein,
-        carbsG: totalCarbs,
-        fatG: totalFat,
+        authorPhotoBase64: authorPhotoBase64,
+        foodName: totals.name,
+        calories: totals.calories,
+        proteinG: totals.protein,
+        carbsG: totals.carbs,
+        fatG: totals.fat,
+        imageBase64: null,
         caption: caption,
       );
 
@@ -494,10 +515,40 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
         isSaving: _isSaving,
         isSharing: _isSharing,
         isPosting: _isPosting,
+        isScanMode: _mode == _Mode.scan,
         onLog: _logMeal,
-        onShare: _shareResult,
-        onPost: _promptCaptionAndPostToFeed,
+        onShare: () => _startResultCardFlow(forPost: false),
+        onPost: () => _startResultCardFlow(forPost: true),
         onDiscard: _reset,
+        onIncorrect: () => setState(() {
+          _descriptionController.clear();
+          _stage = _Stage.correcting;
+        }),
+      );
+    }
+
+    if (_stage == _Stage.correcting) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: _DescribeInputView(
+              controller: _descriptionController,
+              onSubmit: _submitCorrection,
+              title: 'What is it actually?',
+              subtitle: 'Describe the food so we can get a corrected estimate.',
+              hintText: 'e.g. "Fish burger with fries"',
+              buttonLabel: 'Get Corrected Estimate',
+              autofocus: true,
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: () => setState(() => _stage = _Stage.result),
+            child: const Text('Cancel — keep original result',
+                style: TextStyle(color: WW.textSec)),
+          ),
+        ],
       );
     }
 
@@ -507,7 +558,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
         isSaving: _isSaving,
         isPosting: _isPosting,
         onLogAll: _logAllBarcodeItems,
-        onPost: _promptCaptionAndPostBarcodeSummary,
+        onPost: _startBarcodeSummaryCardFlow,
         onAddMore: () => setState(() => _stage = _Stage.input),
         onDiscard: _resetBarcode,
       );
@@ -907,49 +958,72 @@ class _CircleIconButton extends StatelessWidget {
 class _DescribeInputView extends StatelessWidget {
   final TextEditingController controller;
   final VoidCallback onSubmit;
-  const _DescribeInputView({required this.controller, required this.onSubmit});
+  // Parametrized (with defaults matching the original describe-mode copy)
+  // so the correction flow (_Stage.correcting) can reuse this exact
+  // widget/styling with its own copy instead of a near-duplicate.
+  final String title;
+  final String subtitle;
+  final String hintText;
+  final String buttonLabel;
+  final bool autofocus;
+
+  const _DescribeInputView({
+    required this.controller,
+    required this.onSubmit,
+    this.title = 'Describe your meal',
+    this.subtitle = 'e.g. "Grilled chicken breast with rice and broccoli"',
+    this.hintText = 'What did you eat?',
+    this.buttonLabel = 'Estimate Calories',
+    this.autofocus = false,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const Text('Describe your meal', style: WW.titleMed),
-        const SizedBox(height: 6),
-        const Text(
-          'e.g. "Grilled chicken breast with rice and broccoli"',
-          style: WW.labelMed,
-        ),
-        const SizedBox(height: 16),
-        Container(
-          decoration: WW.cardDecoration,
-          padding: const EdgeInsets.all(4),
-          child: TextField(
-            controller: controller,
-            maxLines: 4,
-            style: WW.bodyMed,
-            decoration: const InputDecoration(
-              border: InputBorder.none,
-              contentPadding: EdgeInsets.all(14),
-              hintText: 'What did you eat?',
-              hintStyle: WW.labelMed,
+    // Scrollable — this widget is placed inside an Expanded by both of its
+    // callers (describe mode and the correction flow), which gives it a
+    // bounded but potentially short height (e.g. small screens, or the
+    // keyboard eating vertical space once the field is focused). Its
+    // content has no flexible children of its own, so wrapping it here is
+    // enough to let it scroll instead of overflow.
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(title, style: WW.titleMed),
+          const SizedBox(height: 6),
+          Text(subtitle, style: WW.labelMed),
+          const SizedBox(height: 16),
+          Container(
+            decoration: WW.cardDecoration,
+            padding: const EdgeInsets.all(4),
+            child: TextField(
+              controller: controller,
+              maxLines: 4,
+              autofocus: autofocus,
+              style: WW.bodyMed,
+              decoration: InputDecoration(
+                border: InputBorder.none,
+                contentPadding: const EdgeInsets.all(14),
+                hintText: hintText,
+                hintStyle: WW.labelMed,
+              ),
             ),
           ),
-        ),
-        const SizedBox(height: 20),
-        ElevatedButton.icon(
-          onPressed: onSubmit,
-          icon: const Icon(Icons.auto_awesome_rounded),
-          label: const Text('Estimate Calories'),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: WW.primary,
-            foregroundColor: Colors.white,
-            minimumSize: const Size.fromHeight(52),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+          const SizedBox(height: 20),
+          ElevatedButton.icon(
+            onPressed: onSubmit,
+            icon: const Icon(Icons.auto_awesome_rounded),
+            label: Text(buttonLabel),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: WW.primary,
+              foregroundColor: Colors.white,
+              minimumSize: const Size.fromHeight(52),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -1010,10 +1084,16 @@ class _ResultView extends StatelessWidget {
   final bool isSaving;
   final bool isSharing;
   final bool isPosting;
+  // Gates the "Is this right?" confirm prompt — only a photo scan can be
+  // misidentified by AI vision; a describe-mode result is already
+  // whatever the user typed, and barcode results (a different screen
+  // entirely, _BarcodeSummaryView) come from a real product database.
+  final bool isScanMode;
   final VoidCallback onLog;
   final VoidCallback onShare;
   final VoidCallback onPost;
   final VoidCallback onDiscard;
+  final VoidCallback onIncorrect;
 
   const _ResultView({
     required this.result,
@@ -1021,67 +1101,89 @@ class _ResultView extends StatelessWidget {
     required this.isSaving,
     required this.isSharing,
     required this.isPosting,
+    required this.isScanMode,
     required this.onLog,
     required this.onShare,
     required this.onPost,
     required this.onDiscard,
+    required this.onIncorrect,
   });
 
   @override
   Widget build(BuildContext context) {
+    // Scrollable content above a fixed footer (Log/Post/Share/Try Again),
+    // rather than a single non-scrolling Column with a Spacer — on short
+    // screens (e.g. the Small_Phone emulator profile) the stats card plus
+    // the "Is this right?" confirm section no longer fit above the
+    // buttons, so this needs to scroll instead of overflow. Spacer()
+    // can't be used here at all since it requires bounded/flex space,
+    // which conflicts with a scrollable region.
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (image != null) ...[
-          ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: Image.file(image!, height: 180, width: double.infinity, fit: BoxFit.cover),
-          ),
-          const SizedBox(height: 16),
-        ],
-        Container(
-          padding: const EdgeInsets.all(18),
-          decoration: WW.cardDecoration,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(result.foodName, style: WW.titleLarge),
+        Expanded(
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (image != null) ...[
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: Image.file(image!, height: 180, width: double.infinity, fit: BoxFit.cover),
                   ),
-                  _ConfidenceChip(confidence: result.confidence),
+                  const SizedBox(height: 16),
                 ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  const Icon(Icons.local_fire_department_rounded, color: WW.gold, size: 22),
-                  const SizedBox(width: 6),
-                  Text(
-                    '${result.calories} cal',
-                    style: WW.titleMed.copyWith(fontSize: 22, color: WW.gold),
+                Container(
+                  padding: const EdgeInsets.all(18),
+                  decoration: WW.cardDecoration,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(result.foodName, style: WW.titleLarge),
+                          ),
+                          _ConfidenceChip(confidence: result.confidence),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          const Icon(Icons.local_fire_department_rounded, color: WW.gold, size: 22),
+                          const SizedBox(width: 6),
+                          Text(
+                            '${result.calories} cal',
+                            style: WW.titleMed.copyWith(fontSize: 22, color: WW.gold),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          _MacroPill(label: 'Protein', value: result.proteinG, color: WW.lavender),
+                          const SizedBox(width: 10),
+                          _MacroPill(label: 'Carbs', value: result.carbsG, color: WW.teal),
+                          const SizedBox(width: 10),
+                          _MacroPill(label: 'Fat', value: result.fatG, color: WW.gold),
+                        ],
+                      ),
+                      if (result.message != null && result.message!.isNotEmpty) ...[
+                        const SizedBox(height: 14),
+                        Text(result.message!, style: WW.labelMed),
+                      ],
+                    ],
                   ),
+                ),
+                if (isScanMode) ...[
+                  const SizedBox(height: 14),
+                  _ConfirmAccuracyPrompt(onIncorrect: onIncorrect),
                 ],
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  _MacroPill(label: 'Protein', value: result.proteinG, color: WW.lavender),
-                  const SizedBox(width: 10),
-                  _MacroPill(label: 'Carbs', value: result.carbsG, color: WW.teal),
-                  const SizedBox(width: 10),
-                  _MacroPill(label: 'Fat', value: result.fatG, color: WW.gold),
-                ],
-              ),
-              if (result.message != null && result.message!.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                Text(result.message!, style: WW.labelMed),
               ],
-            ],
+            ),
           ),
         ),
-        const Spacer(),
+        const SizedBox(height: 14),
         ElevatedButton.icon(
           onPressed: isSaving ? null : onLog,
           icon: isSaving
@@ -1149,6 +1251,90 @@ class _ResultView extends StatelessWidget {
           child: const Text('Try Again', style: TextStyle(color: WW.textSec)),
         ),
       ],
+    );
+  }
+}
+
+// "Is this right?" confirm prompt — scan-mode results only (see
+// _ResultView.isScanMode). "Yes" just acknowledges locally (no data
+// change, matches "proceeds exactly as today"); "No" hands off to the
+// parent's onIncorrect, which switches to the correction stage. Its own
+// tiny bit of local state (whether it's been confirmed) is kept here
+// rather than lifted to the parent screen — nothing outside this widget
+// needs to know about it.
+class _ConfirmAccuracyPrompt extends StatefulWidget {
+  final VoidCallback onIncorrect;
+  const _ConfirmAccuracyPrompt({required this.onIncorrect});
+
+  @override
+  State<_ConfirmAccuracyPrompt> createState() => _ConfirmAccuracyPromptState();
+}
+
+class _ConfirmAccuracyPromptState extends State<_ConfirmAccuracyPrompt> {
+  bool _confirmed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (_confirmed) {
+      return Row(
+        children: const [
+          Icon(Icons.check_circle_rounded, color: WW.teal, size: 16),
+          SizedBox(width: 6),
+          Text('Marked as correct', style: WW.labelMed),
+        ],
+      );
+    }
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: WW.chipBg,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Is this right?',
+            style: WW.labelMed.copyWith(fontWeight: FontWeight.w700, color: WW.text),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => setState(() => _confirmed = true),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: WW.teal,
+                    side: const BorderSide(color: WW.teal),
+                    minimumSize: const Size.fromHeight(38),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                  child: const Text(
+                    "Yes, that's correct",
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: widget.onIncorrect,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: WW.textSec,
+                    side: const BorderSide(color: WW.border),
+                    minimumSize: const Size.fromHeight(38),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                  child: const Text(
+                    'No, let me fix it',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

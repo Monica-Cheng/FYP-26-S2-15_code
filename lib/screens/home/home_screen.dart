@@ -211,6 +211,9 @@ class _HomeTabState extends State<_HomeTab> {
   int _caloriesEaten = 0;
   int _dailyCalorieGoal = 500;
   bool _calorieGoalActive = false;
+  int _proteinG = 0;
+  int _carbsG = 0;
+  int _fatG = 0;
   int _streakDays = 0;
   Set<String> _sessionDates = {};
   String _trackedPlanName = '';
@@ -506,6 +509,7 @@ class _HomeTabState extends State<_HomeTab> {
         _firestoreService.getTodaysNutritionCalories(uid),
         _firestoreService.calculateStreak(uid),
         _firestoreService.getSessionDates(uid, days: 30),
+        _firestoreService.getTodaysNutritionMacros(uid),
       ]);
       if (!mounted) return;
       final profile = results[0] as Map<String, dynamic>?;
@@ -514,6 +518,7 @@ class _HomeTabState extends State<_HomeTab> {
       final caloriesEaten = results[3] as int;
       final streak = results[4] as int;
       final sessionDates = results[5] as Set<String>;
+      final macros = results[6] as ({int proteinG, int carbsG, int fatG});
       final trackedPlanId = profile?['trackedPlanId'] as String? ?? '';
 
       setState(() {
@@ -523,6 +528,9 @@ class _HomeTabState extends State<_HomeTab> {
         _dailyCalorieGoal = calGoal['dailyCalorieGoal'] as int? ?? 500;
         _todaysCalories = todaysCal;
         _caloriesEaten = caloriesEaten;
+        _proteinG = macros.proteinG;
+        _carbsG = macros.carbsG;
+        _fatG = macros.fatG;
         _streakDays = streak;
         _sessionDates = sessionDates;
         _trackedPlanId = trackedPlanId;
@@ -833,6 +841,9 @@ class _HomeTabState extends State<_HomeTab> {
                 caloriesEaten: _caloriesEaten,
                 goal: _dailyCalorieGoal,
                 goalActive: _calorieGoalActive,
+                proteinG: _proteinG,
+                carbsG: _carbsG,
+                fatG: _fatG,
               ),
             ),
           ),
@@ -1241,12 +1252,18 @@ class _CalorieRingCard extends StatelessWidget {
   final int caloriesEaten;
   final int goal;
   final bool goalActive;
+  final int proteinG;
+  final int carbsG;
+  final int fatG;
 
   const _CalorieRingCard({
     required this.calories,
     required this.caloriesEaten,
     required this.goal,
     required this.goalActive,
+    required this.proteinG,
+    required this.carbsG,
+    required this.fatG,
   });
 
   @override
@@ -1262,34 +1279,101 @@ class _CalorieRingCard extends StatelessWidget {
     return Container(
       decoration: WW.cardDecoration,
       padding: const EdgeInsets.all(16),
-      child: goalActive
-          ? _buildGoalMode(caloriesEaten, calories, goal, left, intakeFraction,
-              burnedFraction, leftFraction)
-          : _buildSimpleMode(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          goalActive
+              ? _buildGoalMode(caloriesEaten, calories, goal, left,
+                  intakeFraction, burnedFraction, leftFraction)
+              : _buildSimpleMode(),
+          const SizedBox(height: 12),
+          Container(height: 0.5, color: WW.border),
+          const SizedBox(height: 12),
+          _buildMacrosRow(),
+        ],
+      ),
     );
   }
 
+  // Always visible regardless of goalActive — the whole card is now shown
+  // unconditionally (see home_screen.dart's build(), which no longer
+  // gates this widget out). When calorie tracking hasn't been turned on,
+  // there's no goal to build a ring/"left" figure against, so this shows
+  // just the plain eaten-today number instead, with a pointer to Settings
+  // rather than pretending a goal exists.
   Widget _buildSimpleMode() {
     return Row(
       children: [
         const Icon(Icons.local_fire_department_rounded, color: WW.teal, size: 24),
         const SizedBox(width: 10),
-        const Expanded(
-          child: Text(
-            "Today's Energy",
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: WW.textSec,
-            ),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                "Today's Energy",
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: WW.textSec,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                '$caloriesEaten kcal eaten today',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                  color: WW.primaryDark,
+                ),
+              ),
+              const SizedBox(height: 2),
+              const Text(
+                'Turn on calorie tracking in Settings to set a goal',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: WW.textSec,
+                ),
+              ),
+            ],
           ),
         ),
+      ],
+    );
+  }
+
+  // Informational only — no goal denominator exists for macros specifically
+  // (per direct instruction), so this is plain totals, no rings/percentages.
+  Widget _buildMacrosRow() {
+    return Row(
+      children: [
+        Expanded(child: _macroChip('${proteinG}g', 'Protein')),
+        Expanded(child: _macroChip('${carbsG}g', 'Carbs')),
+        Expanded(child: _macroChip('${fatG}g', 'Fat')),
+      ],
+    );
+  }
+
+  Widget _macroChip(String value, String label) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
         Text(
-          '$calories kcal',
+          value,
           style: const TextStyle(
-            fontSize: 16,
+            fontSize: 14,
             fontWeight: FontWeight.w800,
-            color: WW.primaryDark,
+            color: WW.text,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w500,
+            color: WW.textSec,
           ),
         ),
       ],
