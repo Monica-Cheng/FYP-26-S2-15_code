@@ -1,11 +1,17 @@
 // lib/screens/profile/profile_screen.dart
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../utils/image_encode.dart';
+import '../../widgets/quick_add_sheet.dart';
 
 // ── Data classes ──────────────────────────────────────────────────────────────
 
@@ -79,7 +85,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String? _storedUsername;
   String? _hometown;
   String? _bio;
+  String? _photoBase64;
   bool _isLoading = true;
+  bool _isUploadingPhoto = false;
   int _totalXp = 0;
   int _level = 1;
 
@@ -128,6 +136,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           _storedUsername = profile?['username'] as String?;
           _hometown = profile?['hometown'] as String?;
           _bio = profile?['bio'] as String?;
+          _photoBase64 = profile?['photoBase64'] as String?;
           _totalXp = (profile?['totalXp'] as num?)?.toInt() ?? 0;
           _level = (profile?['level'] as num?)?.toInt() ?? 1;
           _isLoading = false;
@@ -158,6 +167,105 @@ class _ProfileScreenState extends State<ProfileScreen> {
     } catch (_) {
       if (mounted) setState(() => _statsLoading = false);
     }
+  }
+
+  // ── Profile photo upload ──────────────────────────────────────────────────
+  // Take Photo / Choose from Gallery — same showQuickAddSheet chooser
+  // pattern already used elsewhere in the app (e.g.
+  // post_session_summary_screen.dart's card-flow photo step), just with
+  // no "Skip" option here since tapping the avatar is already an
+  // explicit "change my photo" action, not an optional attach-during-flow.
+
+  Future<void> _promptChangePhoto() async {
+    if (_isUploadingPhoto) return;
+    await showQuickAddSheet(context, [
+      QuickAddOption(
+        icon: Icons.camera_alt_rounded,
+        iconColor: WW.primary,
+        iconBg: WW.chipBg,
+        title: 'Take Photo',
+        subtitle: 'Use your camera',
+        onTap: () => _pickAndUploadPhoto(ImageSource.camera),
+      ),
+      QuickAddOption(
+        icon: Icons.photo_library_rounded,
+        iconColor: WW.teal,
+        iconBg: WW.tealBg,
+        title: 'Choose from Gallery',
+        subtitle: 'Pick an existing photo',
+        onTap: () => _pickAndUploadPhoto(ImageSource.gallery),
+      ),
+    ]);
+  }
+
+  Future<void> _pickAndUploadPhoto(ImageSource source) async {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    final picked = await ImagePicker().pickImage(
+      source: source,
+      maxWidth: 1024,
+      imageQuality: 80,
+    );
+    if (picked == null) return;
+
+    setState(() => _isUploadingPhoto = true);
+    try {
+      // Downscaled well below feed-photo size (480px) — this is read on
+      // every avatar render across the app, not a one-off post image, so
+      // it's kept as small as still looks sharp in a ~80px circle.
+      final encoded = await encodeImageBase64(File(picked.path), targetWidth: 200);
+      if (encoded == null) {
+        if (mounted) _snack('Could not process that photo. Try another.');
+        return;
+      }
+      await _firestore.updateUserProfile(uid, {'photoBase64': encoded});
+      if (!mounted) return;
+      setState(() => _photoBase64 = encoded);
+    } catch (e) {
+      if (mounted) _snack('Could not save photo: $e');
+    } finally {
+      if (mounted) setState(() => _isUploadingPhoto = false);
+    }
+  }
+
+  Widget _buildAvatarContent() {
+    if (_isLoading) {
+      return const Center(
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+        ),
+      );
+    }
+    final photo = _photoBase64;
+    if (photo != null && photo.isNotEmpty) {
+      try {
+        return Image.memory(
+          base64Decode(photo),
+          width: 80,
+          height: 80,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _buildInitialAvatar(),
+        );
+      } catch (_) {
+        return _buildInitialAvatar();
+      }
+    }
+    return _buildInitialAvatar();
+  }
+
+  Widget _buildInitialAvatar() {
+    return Center(
+      child: Text(
+        _initial,
+        style: const TextStyle(
+          fontSize: 28,
+          fontWeight: FontWeight.w700,
+          color: Colors.white,
+        ),
+      ),
+    );
   }
 
   void _snack(String msg) {
@@ -294,7 +402,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
       decoration: WW.cardDecoration,
       child: Column(
         children: [
-          // Avatar with camera overlay
+          // Avatar with camera overlay — shows the real uploaded photo
+          // when present, falling back to the initials circle otherwise.
           Stack(
             clipBehavior: Clip.none,
             children: [
@@ -305,31 +414,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   color: WW.primary,
                   shape: BoxShape.circle,
                 ),
-                child: Center(
-                  child: _isLoading
-                      ? const SizedBox(
-                          width: 28,
-                          height: 28,
-                          child: CircularProgressIndicator(
-                            color: Colors.white,
-                            strokeWidth: 2.5,
-                          ),
-                        )
-                      : Text(
-                          _initial,
-                          style: const TextStyle(
-                            fontSize: 28,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.white,
-                          ),
-                        ),
-                ),
+                child: ClipOval(child: _buildAvatarContent()),
               ),
               Positioned(
                 bottom: 0,
                 right: 0,
                 child: GestureDetector(
-                  onTap: () => _snack('Photo upload coming soon'),
+                  onTap: _isUploadingPhoto ? null : _promptChangePhoto,
                   child: Container(
                     width: 24,
                     height: 24,
@@ -338,12 +429,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       shape: BoxShape.circle,
                       border: Border.all(color: WW.primary, width: 1.5),
                     ),
-                    child: const Center(
-                      child: Icon(
-                        Icons.camera_alt_rounded,
-                        size: 12,
-                        color: WW.primary,
-                      ),
+                    child: Center(
+                      child: _isUploadingPhoto
+                          ? const SizedBox(
+                              width: 10,
+                              height: 10,
+                              child: CircularProgressIndicator(
+                                color: WW.primary,
+                                strokeWidth: 1.5,
+                              ),
+                            )
+                          : const Icon(
+                              Icons.camera_alt_rounded,
+                              size: 12,
+                              color: WW.primary,
+                            ),
                     ),
                   ),
                 ),

@@ -4,10 +4,13 @@
 // activity_detail_screen.dart's structural pattern (top bar, header
 // card, stats row, notes) scoped to what a nutrition log actually has.
 // No map/WiseCoach/XP sections here — those are workout-session concepts
-// that don't apply to a logged meal. No photo section either: confirmed
-// nutritionLogs docs have no imageBase64 field (saveNutritionLog in
-// firestore_service.dart never writes one) — omitted rather than
-// inventing a field that doesn't exist.
+// that don't apply to a logged meal. Photo section only shows for
+// photo-scanned meals (saveNutritionLog only writes imageBase64 when
+// nutrition_scan_screen.dart's _logMeal() resolved one) — described/
+// manual entries and anything logged before this field existed simply
+// have none, so the section is omitted rather than showing a placeholder.
+
+import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
@@ -63,6 +66,7 @@ class NutritionLogDetailScreen extends StatelessWidget {
     final hasNotes = notes != null && notes.isNotEmpty;
     final sourceMeta = _sourceMeta(source);
     final dateLabel = _formatDate(log['date']);
+    final photoWidget = _buildPhotoWidget(log['imageBase64'] as String?);
 
     return Scaffold(
       backgroundColor: WW.bg,
@@ -76,6 +80,10 @@ class NutritionLogDetailScreen extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   _buildHeaderCard(foodName, dateLabel, sourceMeta),
+                  if (photoWidget != null) ...[
+                    const SizedBox(height: 16),
+                    photoWidget,
+                  ],
                   const SizedBox(height: 16),
                   _buildStatsRow(calories, proteinG, carbsG, fatG),
                   if (hasNotes) ...[
@@ -89,6 +97,32 @@ class NutritionLogDetailScreen extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  // ── Photo (scanned meals only) ───────────────────────────────────────────
+  // Same base64Decode + Image.memory pattern already used for stored
+  // photos elsewhere (FeedPostCard, activity_detail_screen.dart) — a
+  // decode failure falls back to no photo section rather than breaking
+  // the page.
+
+  Widget? _buildPhotoWidget(String? raw) {
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final bytes = base64Decode(raw);
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: AspectRatio(
+          aspectRatio: 4 / 3,
+          child: Image.memory(
+            bytes,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+          ),
+        ),
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   // ── Top bar ───────────────────────────────────────────────────────────────

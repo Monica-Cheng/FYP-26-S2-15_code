@@ -53,6 +53,39 @@ class FeedPostCard extends StatelessWidget {
     return '$n';
   }
 
+  // Real photo when the poster has one (authorPhotoBase64, denormalized
+  // onto the post the same way authorName/authorInitial already are —
+  // see createFeedPost()), falling back to the initials circle
+  // otherwise. Scoped to just this header for now — comment avatars and
+  // every other initials-circle elsewhere in the app (leaderboard,
+  // friend rows, etc.) still use initials only; updating those is a
+  // separate, larger follow-up, not part of this pass.
+  Widget _buildAvatar(String? photoBase64, String initial) {
+    if (photoBase64 != null && photoBase64.isNotEmpty) {
+      try {
+        return CircleAvatar(
+          radius: 18,
+          backgroundColor: WW.primary,
+          backgroundImage: MemoryImage(base64Decode(photoBase64)),
+        );
+      } catch (_) {
+        // Falls through to the initials circle below.
+      }
+    }
+    return CircleAvatar(
+      radius: 18,
+      backgroundColor: WW.primary,
+      child: Text(
+        initial,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w700,
+          fontSize: 14,
+        ),
+      ),
+    );
+  }
+
   void _openProfile(BuildContext context) {
     final uid = post['uid'] as String?;
     if (uid == null || uid.isEmpty) return;
@@ -159,6 +192,7 @@ class FeedPostCard extends StatelessWidget {
     final postId = post['id'] as String;
     final authorName = (post['authorName'] as String?) ?? 'Someone';
     final authorInitial = (post['authorInitial'] as String?) ?? '?';
+    final authorPhotoBase64 = post['authorPhotoBase64'] as String?;
     final isWorkout = (post['type'] as String?) == 'workout';
     final foodName = (post['foodName'] as String?) ?? 'A meal';
     final calories = (post['calories'] as num?)?.toInt() ?? 0;
@@ -201,18 +235,7 @@ class FeedPostCard extends StatelessWidget {
                     onTap: () => _openProfile(context),
                     child: Row(
                       children: [
-                        CircleAvatar(
-                          radius: 18,
-                          backgroundColor: WW.primary,
-                          child: Text(
-                            authorInitial,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w700,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ),
+                        _buildAvatar(authorPhotoBase64, authorInitial),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Column(
@@ -258,12 +281,23 @@ class FeedPostCard extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 14),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(14),
-                child: AspectRatio(
-                  aspectRatio: 4 / 3,
-                  child: Image.memory(
-                    base64Decode(imageBase64),
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => Container(color: WW.elevated),
+                // No hardcoded AspectRatio — post images come from two
+                // sources with genuinely different shapes: share cards
+                // are a fixed 9:16 (1080x1920 Story ratio), while a
+                // scanned-food photo is whatever ratio the camera/
+                // gallery photo actually was (_encodeImageForPost only
+                // constrains width, not height, so it's never guaranteed
+                // 4:3 either). A single fixed ratio can only ever be
+                // right for one of these — sizing to width:infinity with
+                // no explicit height lets Image size itself to the
+                // decoded image's own natural aspect ratio instead.
+                child: Image.memory(
+                  base64Decode(imageBase64),
+                  width: double.infinity,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Container(
+                    height: 200,
+                    color: WW.elevated,
                   ),
                 ),
               ),

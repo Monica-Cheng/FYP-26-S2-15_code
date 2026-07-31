@@ -11,6 +11,7 @@ class ShareCardWidget extends StatelessWidget {
   final double volume;
   final int goalMinutes;
   final DateTime date;
+  final List<Color> gradientColors;
 
   const ShareCardWidget({
     super.key,
@@ -23,6 +24,7 @@ class ShareCardWidget extends StatelessWidget {
     required this.volume,
     required this.goalMinutes,
     required this.date,
+    this.gradientColors = const [WW.primaryDark, Color(0xFF4a4ea8)],
   });
 
   String _fmtDuration(int secs) {
@@ -60,10 +62,10 @@ class ShareCardWidget extends StatelessWidget {
       width: 360,
       height: 640,
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [WW.primaryDark, Color(0xFF4a4ea8)],
+          colors: gradientColors,
         ),
       ),
       child: Column(

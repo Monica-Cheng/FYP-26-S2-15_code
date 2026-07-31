@@ -10,37 +10,59 @@
 import 'package:flutter/material.dart';
 
 import '../core/app_theme.dart';
+import '../core/share_card_gradients.dart';
 
 class ShareCardOption {
   final String label;
   final WidgetBuilder builder;
+  // True only for the colored-background card — gates the gradient swatch
+  // row below the preview so it only shows up on the page it applies to.
+  final bool supportsColorPicker;
 
-  const ShareCardOption({required this.label, required this.builder});
+  const ShareCardOption({
+    required this.label,
+    required this.builder,
+    this.supportsColorPicker = false,
+  });
 }
 
 // Shows the picker sheet and resolves to the chosen option's index once
 // the user taps the confirm button, or null if dismissed without
 // choosing (back button / tap outside) — callers should treat null as
-// "cancel", same convention as caption_sheet.dart.
+// "cancel", same convention as caption_sheet.dart. onGradientChanged fires
+// every time the user taps a swatch on the colored card's page — callers
+// should store the picked colors and read them back when building the
+// final card for capture (see post_session_summary_screen.dart /
+// nutrition_scan_screen.dart's _selectedGradientColors field).
 Future<int?> showShareCardPicker(
   BuildContext context, {
   required List<ShareCardOption> cards,
   String confirmLabel = 'Use This Design',
+  ValueChanged<List<Color>>? onGradientChanged,
 }) {
   assert(cards.isNotEmpty, 'showShareCardPicker requires at least one card');
   return showModalBottomSheet<int>(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    builder: (_) => _ShareCardPickerSheet(cards: cards, confirmLabel: confirmLabel),
+    builder: (_) => _ShareCardPickerSheet(
+      cards: cards,
+      confirmLabel: confirmLabel,
+      onGradientChanged: onGradientChanged,
+    ),
   );
 }
 
 class _ShareCardPickerSheet extends StatefulWidget {
   final List<ShareCardOption> cards;
   final String confirmLabel;
+  final ValueChanged<List<Color>>? onGradientChanged;
 
-  const _ShareCardPickerSheet({required this.cards, required this.confirmLabel});
+  const _ShareCardPickerSheet({
+    required this.cards,
+    required this.confirmLabel,
+    this.onGradientChanged,
+  });
 
   @override
   State<_ShareCardPickerSheet> createState() => _ShareCardPickerSheetState();
@@ -49,6 +71,7 @@ class _ShareCardPickerSheet extends StatefulWidget {
 class _ShareCardPickerSheetState extends State<_ShareCardPickerSheet> {
   final _pageController = PageController();
   int _index = 0;
+  int _gradientIndex = 0;
 
   @override
   void dispose() {
@@ -116,6 +139,10 @@ class _ShareCardPickerSheetState extends State<_ShareCardPickerSheet> {
                 ),
               ),
             ),
+            if (widget.cards[_index].supportsColorPicker) ...[
+              const SizedBox(height: 12),
+              _buildGradientSwatches(),
+            ],
             if (widget.cards.length > 1) ...[
               const SizedBox(height: 12),
               Row(
@@ -164,6 +191,39 @@ class _ShareCardPickerSheetState extends State<_ShareCardPickerSheet> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildGradientSwatches() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: List.generate(ShareCardGradients.presets.length, (i) {
+        final preset = ShareCardGradients.presets[i];
+        final selected = i == _gradientIndex;
+        return GestureDetector(
+          onTap: () {
+            widget.onGradientChanged?.call(preset.colors);
+            setState(() => _gradientIndex = i);
+          },
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 5),
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: preset.colors,
+              ),
+              border: Border.all(
+                color: selected ? WW.text : Colors.transparent,
+                width: 2.5,
+              ),
+            ),
+          ),
+        );
+      }),
     );
   }
 }

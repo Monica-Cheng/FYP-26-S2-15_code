@@ -14,6 +14,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
+import '../../core/share_card_gradients.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 import '../../utils/widget_capture.dart';
@@ -21,6 +22,7 @@ import '../../widgets/caption_sheet.dart';
 import '../../widgets/photo_background_share_card.dart';
 import '../../widgets/quick_add_sheet.dart';
 import '../../widgets/route_map_share_card.dart';
+import '../../widgets/route_overlay.dart';
 import '../../widgets/share_card_picker.dart';
 import '../../widgets/share_card_widget.dart';
 
@@ -86,7 +88,18 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
   // `late final` initializer here the way activity_detail_screen.dart's is,
   // since _session is only available asynchronously on this screen.
   List<LatLng> _routePoints = [];
-  bool get _hasRoute => _routePoints.isNotEmpty;
+  // >= 2, not isNotEmpty — RouteOverlay itself needs at least 2 points to
+  // draw a line (a single point can't form a path; see route_overlay.dart's
+  // own `routePoints.length < 2` guard) and silently renders nothing if
+  // given fewer. Matching the threshold here means the overlay is never
+  // added to the Stack for a session where it would just render blank.
+  bool get _hasRoute => _routePoints.length >= 2;
+
+  // Reset per card-picker flow (see _showCardPickerAndContinue) so a
+  // previous flow's choice doesn't leak into the next one; read back when
+  // building the Color card's builder and updated live via the picker's
+  // onGradientChanged as the user taps swatches.
+  List<Color> _selectedGradientColors = ShareCardGradients.presets.first.colors;
 
   @override
   void initState() {
@@ -380,11 +393,13 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     required bool forPost,
   }) async {
     if (!mounted) return;
+    _selectedGradientColors = ShareCardGradients.presets.first.colors;
     final cards = _buildCardOptions(photoBase64: photoBase64);
     final chosenIndex = await showShareCardPicker(
       context,
       cards: cards,
       confirmLabel: forPost ? 'Use This Design' : 'Share This Design',
+      onGradientChanged: (colors) => _selectedGradientColors = colors,
     );
     if (chosenIndex == null || !mounted) return;
     final chosen = cards[chosenIndex];
@@ -457,31 +472,55 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
             ];
       cards.add(ShareCardOption(
         label: 'Photo',
-        builder: (_) => PhotoBackgroundShareCard(
-          photoBase64: photoBase64,
-          title: sessionName,
-          badgeLabel: _isCardio ? activityLabel : 'Gym',
-          stats: stats,
-          date: date,
+        builder: (_) => SizedBox(
+          width: RouteMapShareCard.width,
+          height: RouteMapShareCard.height,
+          child: Stack(
+            children: [
+              PhotoBackgroundShareCard(
+                photoBase64: photoBase64,
+                title: sessionName,
+                badgeLabel: _isCardio ? activityLabel : 'Gym',
+                stats: stats,
+                date: date,
+              ),
+              if (_hasRoute)
+                Positioned.fill(child: RouteOverlay(routePoints: _routePoints)),
+            ],
+          ),
         ),
       ));
     }
 
+    debugPrint('color card route points: ${_routePoints.length}');
     cards.add(ShareCardOption(
       label: 'Color',
-      builder: (_) => ShareCardWidget(
-        sessionName: sessionName,
-        isCardio: _isCardio,
-        cardioActivity: cardioActivity,
-        elapsedSeconds: elapsedSeconds,
-        calories: caloriesBurned,
-        totalSets: totalSets,
-        volume: totalVolume,
-        // Not stored on the finalized session doc anywhere (it was always
-        // just cardio_session_screen.dart's own local, ephemeral "+5 min"
-        // goal state) — 0 matches the "no goal set" display elsewhere.
-        goalMinutes: 0,
-        date: date,
+      supportsColorPicker: true,
+      builder: (_) => SizedBox(
+        width: RouteMapShareCard.width,
+        height: RouteMapShareCard.height,
+        child: Stack(
+          children: [
+            ShareCardWidget(
+              sessionName: sessionName,
+              isCardio: _isCardio,
+              cardioActivity: cardioActivity,
+              elapsedSeconds: elapsedSeconds,
+              calories: caloriesBurned,
+              totalSets: totalSets,
+              volume: totalVolume,
+              // Not stored on the finalized session doc anywhere (it was
+              // always just cardio_session_screen.dart's own local,
+              // ephemeral "+5 min" goal state) — 0 matches the "no goal
+              // set" display elsewhere.
+              goalMinutes: 0,
+              date: date,
+              gradientColors: _selectedGradientColors,
+            ),
+            if (_hasRoute)
+              Positioned.fill(child: RouteOverlay(routePoints: _routePoints)),
+          ],
+        ),
       ),
     ));
 
@@ -633,6 +672,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       final profile = await FirestoreService().getUserProfile(uid);
       final rawName = (profile?['displayName'] as String?)?.trim();
       final authorName = (rawName != null && rawName.isNotEmpty) ? rawName : 'Someone';
+      final authorPhotoBase64 = profile?['photoBase64'] as String?;
 
       if (!mounted) return;
       final pngBytes = await captureWidgetAsPngBytes(
@@ -645,6 +685,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       await FirestoreService().createFeedPost(
         uid: uid,
         authorName: authorName,
+        authorPhotoBase64: authorPhotoBase64,
         type: 'workout',
         calories: caloriesBurned,
         sessionName: sessionName,

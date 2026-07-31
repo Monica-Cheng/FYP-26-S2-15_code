@@ -14,6 +14,7 @@ class NutritionShareCardWidget extends StatelessWidget {
   final int? fatG;
   final String source; // 'scan' or 'manual'
   final DateTime date;
+  final List<Color> gradientColors;
 
   const NutritionShareCardWidget({
     super.key,
@@ -24,6 +25,7 @@ class NutritionShareCardWidget extends StatelessWidget {
     this.carbsG,
     this.fatG,
     this.source = 'scan',
+    this.gradientColors = const [WW.primaryDark, Color(0xFF4a4ea8)],
   });
 
   String _fmtDate(DateTime dt) {
@@ -46,11 +48,11 @@ class NutritionShareCardWidget extends StatelessWidget {
     return Container(
       width: 360,
       height: 640,
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [WW.primaryDark, Color(0xFF4a4ea8)],
+          colors: gradientColors,
         ),
       ),
       child: Column(
