@@ -557,105 +557,231 @@ class _HomeTabState extends State<_HomeTab> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (ctx) {
+        // Tracks challenge_invite notificationIds with an in-flight
+        // accept/decline call, so the buttons can disable/spinner the
+        // instant they're tapped (before the Firestore round-trip
+        // resolves) and rapid repeated taps can't fire multiple calls.
+        // Declared here (once, when the sheet is first built) rather than
+        // inside StatefulBuilder's own builder callback, so it survives
+        // the setSheetState rebuilds below instead of resetting each time.
+        final processingIds = <String>{};
+
+        Future<void> respond(
+          BuildContext sheetContext,
+          StateSetter setSheetState,
+          Map<String, dynamic> n,
+          String notificationId, {
+          required bool accept,
+        }) async {
+          if (processingIds.contains(notificationId)) return;
+          final challengeId = n['challengeId'] as String?;
+          if (challengeId == null) return;
+          setSheetState(() => processingIds.add(notificationId));
+          try {
+            await _firestoreService.respondToChallengeInvite(
+              uid,
+              challengeId,
+              notificationId,
+              accept: accept,
+            );
+            if (sheetContext.mounted) {
+              final challengeName =
+                  n['challengeName'] as String? ?? 'the challenge';
+              ScaffoldMessenger.of(sheetContext).showSnackBar(
+                SnackBar(
+                  content: Text(accept ? 'Joined $challengeName!' : 'Declined'),
+                  backgroundColor: WW.primaryDark,
+                  behavior: SnackBarBehavior.floating,
+                  shape:
+                      RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            }
+          } catch (_) {
+            if (sheetContext.mounted) {
+              ScaffoldMessenger.of(sheetContext).showSnackBar(
+                const SnackBar(
+                  content: Text('Something went wrong. Please try again.'),
+                  backgroundColor: WW.primaryDark,
+                  behavior: SnackBarBehavior.floating,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(10))),
+                  duration: Duration(seconds: 2),
+                ),
+              );
+            }
+          } finally {
+            if (sheetContext.mounted) {
+              setSheetState(() => processingIds.remove(notificationId));
+            }
+          }
+        }
+
         return SizedBox(
           height: MediaQuery.of(ctx).size.height * 0.7,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  margin: const EdgeInsets.only(top: 10, bottom: 14),
-                  decoration: BoxDecoration(
-                    color: WW.border,
-                    borderRadius: BorderRadius.circular(2),
+          // A nested Scaffold gives this sheet its own local
+          // ScaffoldMessenger. Without it, showing a SnackBar via the
+          // underlying screen's ScaffoldMessenger still "works" in that it
+          // gets queued, but that Scaffold sits BELOW this modal bottom
+          // sheet's route in the Navigator's overlay z-order — so the
+          // SnackBar is rendered behind the sheet and only becomes visible
+          // (or has already finished its timer) once the sheet is
+          // dismissed, which is exactly the "delayed/after the sheet
+          // closes" symptom. Transparent background so it doesn't cover
+          // the outer showModalBottomSheet's own WW.card/rounded-corner
+          // styling.
+          child: Scaffold(
+            backgroundColor: Colors.transparent,
+            body: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    margin: const EdgeInsets.only(top: 10, bottom: 14),
+                    decoration: BoxDecoration(
+                      color: WW.border,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
                 ),
-              ),
-              const Padding(
-                padding: EdgeInsets.fromLTRB(18, 0, 18, 12),
-                child: Text(
-                  'Notifications',
-                  style: TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w800,
-                    color: WW.primaryDark,
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(18, 0, 18, 12),
+                  child: Text(
+                    'Notifications',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800,
+                      color: WW.primaryDark,
+                    ),
                   ),
                 ),
-              ),
-              Expanded(
-                child: StreamBuilder<List<Map<String, dynamic>>>(
-                  stream: _firestoreService.getNotificationsStream(uid),
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.waiting) {
-                      return const Center(
-                        child: CircularProgressIndicator(color: WW.primary),
-                      );
-                    }
-                    final notifications = snapshot.data ?? [];
-                    if (notifications.isEmpty) {
-                      return const Center(
-                        child: Text(
-                          'No notifications yet',
-                          style: TextStyle(fontSize: 13, color: WW.textSec),
-                        ),
-                      );
-                    }
-                    return ListView.separated(
-                      padding: const EdgeInsets.fromLTRB(18, 0, 18, 24),
-                      itemCount: notifications.length,
-                      separatorBuilder: (_, __) =>
-                          const Divider(height: 1, color: WW.elevated),
-                      itemBuilder: (_, i) {
-                        final n = notifications[i];
-                        final read = n['read'] == true;
-                        final notificationId = n['notificationId'] as String?;
-                        return InkWell(
-                          onTap: notificationId == null
-                              ? null
-                              : () {
-                                  _firestoreService.markNotificationRead(
-                                      uid, notificationId);
-                                  if (n['type'] == 'friend_request') {
-                                    Navigator.pop(ctx);
-                                    widget.onGoToClubFriends?.call();
-                                  }
-                                },
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: 8,
-                                  height: 8,
-                                  margin: const EdgeInsets.only(right: 10),
-                                  decoration: BoxDecoration(
-                                    color: read ? Colors.transparent : WW.primary,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                Expanded(
-                                  child: Text(
-                                    _notificationText(n),
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight:
-                                          read ? FontWeight.w500 : FontWeight.w700,
-                                      color: WW.text,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
+                Expanded(
+                  child: StreamBuilder<List<Map<String, dynamic>>>(
+                    stream: _firestoreService.getNotificationsStream(uid),
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return const Center(
+                          child: CircularProgressIndicator(color: WW.primary),
+                        );
+                      }
+                      final notifications = snapshot.data ?? [];
+                      if (notifications.isEmpty) {
+                        return const Center(
+                          child: Text(
+                            'No notifications yet',
+                            style: TextStyle(fontSize: 13, color: WW.textSec),
                           ),
                         );
-                      },
-                    );
-                  },
+                      }
+                      // StatefulBuilder gives this list its own local
+                      // setState (setSheetState) scoped to the sheet's
+                      // subtree — setState on _HomeTabState itself would
+                      // NOT rebuild this content, since showModalBottomSheet
+                      // inserts its builder's result into the Navigator's
+                      // overlay rather than into _HomeTabState's own
+                      // build() tree.
+                      return StatefulBuilder(
+                        builder: (context, setSheetState) {
+                          return ListView.separated(
+                            padding: const EdgeInsets.fromLTRB(18, 0, 18, 24),
+                            itemCount: notifications.length,
+                            separatorBuilder: (_, __) =>
+                                const Divider(height: 1, color: WW.elevated),
+                            itemBuilder: (_, i) {
+                              final n = notifications[i];
+                              final read = n['read'] == true;
+                              final notificationId =
+                                  n['notificationId'] as String?;
+                              final isChallengeInvite =
+                                  n['type'] == 'challenge_invite';
+                              final inviteStatus =
+                                  n['status'] as String? ?? 'pending';
+                              final isProcessing = notificationId != null &&
+                                  processingIds.contains(notificationId);
+                              return InkWell(
+                                onTap: notificationId == null
+                                    ? null
+                                    : () {
+                                        _firestoreService.markNotificationRead(
+                                            uid, notificationId);
+                                        if (n['type'] == 'friend_request') {
+                                          Navigator.pop(ctx);
+                                          widget.onGoToClubFriends?.call();
+                                        }
+                                      },
+                                child: Padding(
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 12),
+                                  child: Row(
+                                    children: [
+                                      Container(
+                                        width: 8,
+                                        height: 8,
+                                        margin: const EdgeInsets.only(right: 10),
+                                        decoration: BoxDecoration(
+                                          color: read
+                                              ? Colors.transparent
+                                              : WW.primary,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: Text(
+                                          _notificationText(n),
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: read
+                                                ? FontWeight.w500
+                                                : FontWeight.w700,
+                                            color: WW.text,
+                                          ),
+                                        ),
+                                      ),
+                                      // Only challenge_invite gets extra
+                                      // trailing content — every other type
+                                      // keeps the plain dot+text row above.
+                                      if (isChallengeInvite &&
+                                          notificationId != null) ...[
+                                        const SizedBox(width: 10),
+                                        if (inviteStatus == 'pending')
+                                          _ChallengeInviteActions(
+                                            isProcessing: isProcessing,
+                                            onDecline: () => respond(
+                                              context,
+                                              setSheetState,
+                                              n,
+                                              notificationId,
+                                              accept: false,
+                                            ),
+                                            onAccept: () => respond(
+                                              context,
+                                              setSheetState,
+                                              n,
+                                              notificationId,
+                                              accept: true,
+                                            ),
+                                          )
+                                        else
+                                          _ChallengeInviteStatusPill(
+                                            status: inviteStatus,
+                                          ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      );
+                    },
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         );
       },
@@ -665,11 +791,16 @@ class _HomeTabState extends State<_HomeTab> {
   String _notificationText(Map<String, dynamic> n) {
     final type = n['type'] as String? ?? '';
     final fromName = n['fromDisplayName'] as String? ?? 'Someone';
+    final challengeName = n['challengeName'] as String? ?? 'a challenge';
     switch (type) {
       case 'friend_request':
         return '$fromName sent you a friend request';
       case 'friend_accepted':
         return '$fromName accepted your friend request';
+      case 'challenge_invite':
+        return '$fromName invited you to challenge $challengeName';
+      case 'challenge_friend_progress':
+        return '$fromName made progress on $challengeName';
       default:
         return 'New notification';
     }
@@ -842,6 +973,111 @@ class _HomeTabState extends State<_HomeTab> {
             child: const Icon(Icons.logout_rounded, color: WW.textSec, size: 22),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Challenge invite row actions ────────────────────────────────────────────
+// Inline accept/decline for a pending challenge_invite notification row —
+// same 2-icon-button interaction as friends_screen.dart's
+// _buildRequestRow(), sized up slightly with an outlined decline button so
+// it reads as clearly secondary against the solid-filled accept button.
+// isProcessing swaps both buttons for a single small spinner rather than
+// disabling them individually, so there's no ambiguity about whether a tap
+// registered while its Firestore call is still in flight.
+class _ChallengeInviteActions extends StatelessWidget {
+  final bool isProcessing;
+  final VoidCallback onDecline;
+  final VoidCallback onAccept;
+  const _ChallengeInviteActions({
+    required this.isProcessing,
+    required this.onDecline,
+    required this.onAccept,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (isProcessing) {
+      return const SizedBox(
+        width: 34,
+        height: 34,
+        child: Padding(
+          padding: EdgeInsets.all(9),
+          child: CircularProgressIndicator(
+            strokeWidth: 2.5,
+            color: WW.primary,
+          ),
+        ),
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        GestureDetector(
+          onTap: onDecline,
+          child: Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: WW.card,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: WW.border, width: 1.2),
+            ),
+            child: const Icon(
+              Icons.close_rounded,
+              size: 17,
+              color: WW.textSec,
+            ),
+          ),
+        ),
+        const SizedBox(width: 6),
+        GestureDetector(
+          onTap: onAccept,
+          child: Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: WW.primary,
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: const Icon(
+              Icons.check_rounded,
+              size: 17,
+              color: Colors.white,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// Muted inline label replacing the action buttons once a challenge_invite
+// has been responded to. Driven entirely by the notification doc's own
+// `status` field (read via getNotificationsStream, not local widget
+// state), so it renders correctly even after the sheet is closed and
+// reopened, or rebuilt for any other reason.
+class _ChallengeInviteStatusPill extends StatelessWidget {
+  final String status;
+  const _ChallengeInviteStatusPill({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final label = status == 'accepted' ? 'Accepted' : 'Declined';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: WW.elevated,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: WW.textSec,
+        ),
       ),
     );
   }

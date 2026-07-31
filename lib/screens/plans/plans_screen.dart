@@ -23,17 +23,12 @@ class PlansScreen extends StatefulWidget {
   State<PlansScreen> createState() => _PlansScreenState();
 }
 
-const List<Map<String, dynamic>> _kFallbackPlans = [
-  {'name': 'Beginner Push-Pull-Legs', 'type': 'Gym', 'level': 'Beginner', 'daysPerWeek': 3},
-  {'name': '5K Running Plan', 'type': 'Running', 'level': 'Beginner', 'daysPerWeek': 4},
-  {'name': 'My Custom Push', 'type': 'Gym', 'level': 'Custom', 'daysPerWeek': 3},
-];
-
 class _PlansScreenState extends State<PlansScreen> {
   final _firestoreService = FirestoreService();
   final _authService = AuthService();
   List<Map<String, dynamic>> _plans = [];
   bool _isLoading = true;
+  bool _hasError = false;
   Map<String, dynamic>? _trackedPlan;
   bool _trackedPlanLoading = true;
   StreamSubscription<DocumentSnapshot>? _userDocSub;
@@ -79,6 +74,10 @@ class _PlansScreenState extends State<PlansScreen> {
   }
 
   Future<void> _loadPlans() async {
+    setState(() {
+      _isLoading = true;
+      _hasError = false;
+    });
     try {
       final plans = await _firestoreService.getPlans();
       final uid = _authService.getCurrentUser()?.uid;
@@ -100,9 +99,14 @@ class _PlansScreenState extends State<PlansScreen> {
         });
       }
     } catch (_) {
+      // No more silent fallback to fake plan data on failure — a genuine
+      // fetch error now shows a real error state instead (see the
+      // _isLoading/_hasError branch in build()), matching this app's
+      // existing error-state convention elsewhere (e.g. the "Add
+      // Exercise" search sheets' error/retry state).
       if (mounted) {
         setState(() {
-          _plans = _kFallbackPlans;
+          _hasError = true;
           _isLoading = false;
         });
       }
@@ -571,6 +575,8 @@ class _PlansScreenState extends State<PlansScreen> {
               child: CircularProgressIndicator(color: WW.primary),
             ),
           )
+        else if (_hasError)
+          _buildPlansErrorState()
         else
           ...List.generate(_plans.length, (i) {
             final plan = _plans[i];
@@ -599,6 +605,55 @@ class _PlansScreenState extends State<PlansScreen> {
             );
           }),
       ],
+    );
+  }
+
+  // Shown when _loadPlans() genuinely fails — replaces the old silent
+  // fallback to hardcoded fake plan data (_kFallbackPlans, removed) with a
+  // real error state, same icon+message+retry convention already used
+  // elsewhere in this app (e.g. the "Add Exercise" search sheets' error
+  // state in build_routine_screen.dart/gym_session_screen.dart).
+  Widget _buildPlansErrorState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.error_outline_rounded,
+                size: 40, color: WW.textSec),
+            const SizedBox(height: 10),
+            const Text(
+              "Couldn't load plans",
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: WW.text,
+              ),
+            ),
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: _loadPlans,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                decoration: BoxDecoration(
+                  color: WW.primary,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Text(
+                  'Retry',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

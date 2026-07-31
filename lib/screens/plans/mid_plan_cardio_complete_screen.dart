@@ -320,10 +320,24 @@ class _MidPlanCardioCompleteScreenState
     // list and every block/set's done state directly from Firestore —
     // correct regardless of how this screen was reached or what's
     // currently on the navigation stack.
+    //
+    // 'forceRefresh' — sessionRunId/planId/dayIndex are all identical on
+    // every "Next" tap within the same session (set once at session start,
+    // never touched again), so router.dart's identity-based key-caching
+    // (added to stop an unrelated push-on-top from tearing down a live gym
+    // session — see that route's own doc comment) would otherwise treat
+    // every "Next" after the first as a cache hit and reuse the already-
+    // mounted GymSessionScreen instance, silently skipping the rehydrate
+    // this call was specifically written to guarantee. A fresh value here
+    // on every tap forces router.dart's identity string to differ each
+    // time, guaranteeing a cache miss (and therefore a genuinely fresh
+    // instance/rehydrate) regardless of how many times "Next" is tapped
+    // within the same unchanging session.
     context.go(Routes.gymSession, extra: {
       'planId': _planId,
       'dayIndex': _dayIndex,
       'sessionRunId': _sessionRunId,
+      'forceRefresh': DateTime.now().microsecondsSinceEpoch.toString(),
     });
   }
 

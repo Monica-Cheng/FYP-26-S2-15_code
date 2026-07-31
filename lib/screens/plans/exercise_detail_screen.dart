@@ -83,13 +83,23 @@ class _ExerciseDetailScreenState extends State<ExerciseDetailScreen> {
     );
   }
 
+  // Prefers gifUrl (admin-added animated demo) over imageUrl (static
+  // photo) when both are present, falling back to the placeholder if
+  // neither exists yet — both fields are currently null on every seeded
+  // exercise doc, real media sourcing is deferred to a teammate. A GIF is
+  // just another image format as far as Image.network is concerned —
+  // Flutter's built-in image codec decodes and animates multi-frame GIFs
+  // automatically, so this reuses the exact same Image.network call
+  // imageUrl already used, no new package or asset-loading logic needed.
   Widget _buildImageArea() {
+    final gifUrl = _exercise?['gifUrl'] as String? ?? '';
     final imageUrl = _exercise?['imageUrl'] as String? ?? '';
+    final mediaUrl = gifUrl.isNotEmpty ? gifUrl : imageUrl;
     return Container(
       color: WW.primaryDark,
-      child: imageUrl.isNotEmpty
+      child: mediaUrl.isNotEmpty
           ? Image.network(
-              imageUrl,
+              mediaUrl,
               fit: BoxFit.contain,
               errorBuilder: (_, __, ___) => _buildImagePlaceholder(),
             )
@@ -130,7 +140,13 @@ class _ExerciseDetailScreenState extends State<ExerciseDetailScreen> {
 
   Widget _buildBody() {
     final exercise = _exercise;
-    final instructions = exercise?['instructions'] as String? ?? '';
+    final rawSteps = exercise?['instructionSteps'];
+    final instructionSteps = rawSteps is List
+        ? rawSteps
+            .map((e) => e.toString())
+            .where((s) => s.trim().isNotEmpty)
+            .toList()
+        : <String>[];
     final equipment = exercise?['equipment'] as String? ?? '';
     final difficulty = exercise?['difficulty'] as String? ?? '';
     final secondaryMuscles =
@@ -186,7 +202,7 @@ class _ExerciseDetailScreenState extends State<ExerciseDetailScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          if (exercise == null)
+          if (instructionSteps.isEmpty)
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -210,15 +226,51 @@ class _ExerciseDetailScreenState extends State<ExerciseDetailScreen> {
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: WW.border, width: 0.5),
               ),
-              child: Text(
-                instructions.isNotEmpty
-                    ? instructions
-                    : 'No instructions available yet.',
-                style: const TextStyle(
-                  fontSize: 14,
-                  color: WW.text,
-                  height: 1.7,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: List.generate(instructionSteps.length, (i) {
+                  final isLast = i == instructionSteps.length - 1;
+                  return Padding(
+                    padding: EdgeInsets.only(bottom: isLast ? 0 : 14),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: WW.chipBg,
+                            borderRadius: BorderRadius.circular(7),
+                          ),
+                          child: Center(
+                            child: Text(
+                              '${i + 1}',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                                color: WW.primary,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Text(
+                              instructionSteps[i],
+                              style: const TextStyle(
+                                fontSize: 14,
+                                color: WW.text,
+                                height: 1.5,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
               ),
             ),
         ],

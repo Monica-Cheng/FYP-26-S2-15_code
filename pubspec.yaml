@@ -42,6 +42,8 @@ dependencies:
   # Outdoor cardio (GPS tracking + map rendering)
   geolocator: ^14.0.2
   maplibre_gl: ^0.26.2
+  # Indoor cardio (accelerometer-based motion-presence accrual gate)
+  sensors_plus: ^6.0.1
   # JPEG encoding for session photos (see outdoor_cardio_screen.dart's
   # _encodeImageForSession) — dart:ui has no JPEG encoder of its own.
   image: ^4.9.1

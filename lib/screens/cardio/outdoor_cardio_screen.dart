@@ -43,14 +43,26 @@ const Duration _kStaleAcceptanceThreshold = Duration(seconds: 18);
 // Max plausible speed per activity (km/h) — generous buffers above
 // realistic max effort (even elite race pace/sprinting/cycling), so this
 // only rejects genuine GPS jumps/teleportation, not just a fast segment.
-// Falls back to _kDefaultMaxSpeedKmh for any activity value not in this
-// map (e.g. if the extra passed in doesn't match one of these exactly).
-const Map<String, double> _kMaxSpeedKmhByActivity = {
+// Falls back to _kFallbackDefaultMaxSpeedKmh for any activity value not in
+// this map (e.g. if the extra passed in doesn't match one of these
+// exactly).
+//
+// All 7 constants in this section are now Firestore-configurable, via
+// appConfig/gamification's cardioAntiCheat.outdoor{} — see
+// FirestoreService().getGamificationConfig()'s own doc comment for the
+// overall pattern, and _loadCardioAntiCheatConfig()/_configNum() below for
+// how this screen fetches and applies it. Each _kFallback-prefixed const
+// below is kept, unchanged, as exactly today's original hardcoded value —
+// used only when the config doc is missing, malformed, or unreachable;
+// the actual mutable instance field the rest of this class reads from
+// (same name, minus the _kFallback prefix) starts at this fallback and is
+// overwritten once the config fetch resolves.
+const Map<String, double> _kFallbackMaxSpeedKmhByActivity = {
   'Walk': 10,
   'Run': 30,
   'Cycle': 60,
 };
-const double _kDefaultMaxSpeedKmh = 30;
+const double _kFallbackDefaultMaxSpeedKmh = 30;
 
 // Rolling-average window (seconds) for the active-seconds accrual pause
 // gate's implausible-speed check — see _computeAccrualPaused(). Short and
@@ -60,7 +72,7 @@ const double _kDefaultMaxSpeedKmh = 30;
 // already ran, so averaging over a few seconds smooths that out while
 // still catching a genuinely sustained implausible-speed stretch. 4s: the
 // middle of a 3-5s range — reacts quickly without being noise-prone.
-const int _kSpeedRollingWindowSeconds = 4;
+const int _kFallbackSpeedRollingWindowSeconds = 4;
 
 // Window (seconds) + distance threshold (meters) for the active-seconds
 // accrual pause gate's stationary-detection check — see
@@ -71,8 +83,8 @@ const int _kSpeedRollingWindowSeconds = 4;
 // realistic GPS jitter-while-stationary (a few meters of drift is normal
 // even standing still) while still catching genuine idling well within a
 // typical rest period.
-const int _kStationaryWindowSeconds = 12;
-const double _kStationaryThresholdMeters = 3.0;
+const int _kFallbackStationaryWindowSeconds = 12;
+const double _kFallbackStationaryThresholdMeters = 3.0;
 
 // Hysteresis for the _accrualPaused transition — see _startTimer()'s tick
 // callback. The underlying per-tick _computeAccrualPaused() check (and its
@@ -83,18 +95,60 @@ const double _kStationaryThresholdMeters = 3.0;
 // asymmetric: pausing (denying calorie/XP credit) requires more sustained
 // evidence than resuming (restoring it), since a false pause only costs UX
 // while a false resume costs real anti-cheat effectiveness.
-//  - _kAccrualPauseDebounceTicks = 3: the raw "should pause" condition must
-//    hold for 3 consecutive 1s ticks (~3s) before _accrualPaused actually
-//    flips true — long enough that one momentary blip can't trigger it, in
-//    line with the existing _kSpeedRollingWindowSeconds/
-//    _kStationaryWindowSeconds windows this check is layered on top of.
-//  - _kAccrualResumeDebounceTicks = 2: shorter than the pause threshold —
-//    once genuinely resumed, the user shouldn't be kept waiting as long to
-//    get credit back — but still more than a single tick, so one lucky
-//    good reading during an otherwise-ongoing bad stretch can't
-//    immediately flip the banner off and back on.
-const int _kAccrualPauseDebounceTicks = 3;
-const int _kAccrualResumeDebounceTicks = 2;
+//  - _kFallbackAccrualPauseDebounceTicks = 3: the raw "should pause"
+//    condition must hold for 3 consecutive 1s ticks (~3s) before
+//    _accrualPaused actually flips true — long enough that one momentary
+//    blip can't trigger it, in line with the existing
+//    _speedRollingWindowSeconds/_stationaryWindowSeconds windows this
+//    check is layered on top of.
+//  - _kFallbackAccrualResumeDebounceTicks = 2: shorter than the pause
+//    threshold — once genuinely resumed, the user shouldn't be kept
+//    waiting as long to get credit back — but still more than a single
+//    tick, so one lucky good reading during an otherwise-ongoing bad
+//    stretch can't immediately flip the banner off and back on.
+const int _kFallbackAccrualPauseDebounceTicks = 3;
+const int _kFallbackAccrualResumeDebounceTicks = 2;
+
+// Reads a nested numeric field out of a gamification config map (e.g.
+// path ['cardioAntiCheat', 'outdoor', 'stationaryThresholdMeters']),
+// falling back to `fallback` if any segment of the path is missing, the
+// wrong type, or the map itself is empty — mirrors
+// FirestoreService()'s own private _configNum() (duplicated here rather
+// than shared, since it's a two-line pure function and this screen
+// otherwise has no reason to reach into that service's private members).
+num _configNum(Map<String, dynamic>? config, List<String> path, num fallback) {
+  dynamic current = config;
+  for (final key in path) {
+    if (current is! Map) return fallback;
+    current = current[key];
+  }
+  return current is num ? current : fallback;
+}
+
+// Per-activity fallback applied individually — an admin overriding just
+// 'Run' in the config, say, still leaves 'Walk'/'Cycle' correctly falling
+// back to their own defaults rather than the whole map being discarded.
+Map<String, double> _configMaxSpeedKmhByActivity(Map<String, dynamic>? config) {
+  dynamic current = config;
+  for (final key in [
+    'cardioAntiCheat',
+    'outdoor',
+    'maxSpeedKmhByActivity',
+  ]) {
+    if (current is! Map) {
+      current = null;
+      break;
+    }
+    current = current[key];
+  }
+  final raw = current;
+  final result = <String, double>{};
+  _kFallbackMaxSpeedKmhByActivity.forEach((activity, fallback) {
+    final value = raw is Map ? raw[activity] : null;
+    result[activity] = value is num ? value.toDouble() : fallback;
+  });
+  return result;
+}
 
 // Below this much recorded distance, pace math is too noisy to be
 // meaningful (a few meters of GPS jitter can swing it wildly) — show
@@ -185,6 +239,27 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   // route, which doesn't pass any extra at all).
   String? _sessionRunId;
   int? _blockIndex;
+
+  // ── Accrual-pause anti-cheat config — Firestore-configurable, see
+  // _loadCardioAntiCheatConfig() and the _kFallback-prefixed consts above.
+  // Each starts at its own fallback and is overwritten once the config
+  // fetch resolves. _startTracking() awaits _cardioAntiCheatConfigFuture
+  // before tracking actually begins (see that method), so — unlike when
+  // this was first added — these are guaranteed resolved (or safely
+  // fallen back via timeout) by the time any real accrual decision is
+  // ever made; they're never read while still mid-fetch.
+  Map<String, double> _maxSpeedKmhByActivity = _kFallbackMaxSpeedKmhByActivity;
+  double _defaultMaxSpeedKmh = _kFallbackDefaultMaxSpeedKmh;
+  int _speedRollingWindowSeconds = _kFallbackSpeedRollingWindowSeconds;
+  int _stationaryWindowSeconds = _kFallbackStationaryWindowSeconds;
+  double _stationaryThresholdMeters = _kFallbackStationaryThresholdMeters;
+  int _accrualPauseDebounceTicks = _kFallbackAccrualPauseDebounceTicks;
+  int _accrualResumeDebounceTicks = _kFallbackAccrualResumeDebounceTicks;
+  Future<void>? _cardioAntiCheatConfigFuture;
+  // True while _startTracking() is awaiting the config load/timeout —
+  // gates the Start button to a spinner for this (normally imperceptible)
+  // window rather than allowing a double-tap or silently doing nothing.
+  bool _isPreparingToStart = false;
 
   // Each inner list is one continuously-recorded stretch of the route — a
   // new one starts on Resume (see _resumeTracking) so the pause gap isn't
@@ -320,6 +395,51 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     });
     _requestLocation();
     WidgetsBinding.instance.addPostFrameCallback((_) => _readActivityExtra());
+    // Started immediately (well before the user can possibly reach the
+    // Start button — _requestLocation()'s own permission flow and
+    // _handleStartTap()'s background-tracking disclosure both take real
+    // user interaction time first) so that by the time _startTracking()
+    // below actually awaits it, it has almost always already resolved —
+    // in practice, closing the race window below adds no perceptible
+    // delay to a normal session start. The Future itself is stored (not
+    // just fired) so _startTracking() can await this exact call rather
+    // than kicking off a second, redundant fetch.
+    _cardioAntiCheatConfigFuture = _loadCardioAntiCheatConfig();
+  }
+
+  Future<void> _loadCardioAntiCheatConfig() async {
+    final config = await FirestoreService().getGamificationConfig();
+    if (!mounted) return;
+    _maxSpeedKmhByActivity = _configMaxSpeedKmhByActivity(config);
+    _defaultMaxSpeedKmh = _configNum(config,
+            ['cardioAntiCheat', 'outdoor', 'defaultMaxSpeedKmh'],
+            _kFallbackDefaultMaxSpeedKmh)
+        .toDouble();
+    _speedRollingWindowSeconds = _configNum(
+            config,
+            ['cardioAntiCheat', 'outdoor', 'speedRollingWindowSeconds'],
+            _kFallbackSpeedRollingWindowSeconds)
+        .toInt();
+    _stationaryWindowSeconds = _configNum(
+            config,
+            ['cardioAntiCheat', 'outdoor', 'stationaryWindowSeconds'],
+            _kFallbackStationaryWindowSeconds)
+        .toInt();
+    _stationaryThresholdMeters = _configNum(
+            config,
+            ['cardioAntiCheat', 'outdoor', 'stationaryThresholdMeters'],
+            _kFallbackStationaryThresholdMeters)
+        .toDouble();
+    _accrualPauseDebounceTicks = _configNum(
+            config,
+            ['cardioAntiCheat', 'outdoor', 'accrualPauseDebounceTicks'],
+            _kFallbackAccrualPauseDebounceTicks)
+        .toInt();
+    _accrualResumeDebounceTicks = _configNum(
+            config,
+            ['cardioAntiCheat', 'outdoor', 'accrualResumeDebounceTicks'],
+            _kFallbackAccrualResumeDebounceTicks)
+        .toInt();
   }
 
   // Mirrors cardio_setup_screen.dart's own _readExtra() pattern — reads
@@ -721,7 +841,37 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
 
   // ── Tracking lifecycle ────────────────────────────────────────────────
 
+  // Tracking must not begin until the anti-cheat config load has resolved
+  // (or safely fallen back) — per product decision, closing the earlier
+  // race window where _startTimer() could fire in parallel with a
+  // still-in-flight config fetch, briefly running on fallback defaults
+  // until the real values arrived mid-session. In practice this await
+  // resolves near-instantly: the fetch was already kicked off back in
+  // initState(), well before the user could possibly reach this point
+  // (location-permission checks and _handleStartTap()'s own background-
+  // tracking disclosure both take real interaction time first), so a
+  // normal Firestore read has almost always already completed by now.
+  //
+  // The .timeout() below is a belt-and-suspenders safety net, not the
+  // primary fallback mechanism: _loadCardioAntiCheatConfig() already can't
+  // hang or throw on its own (FirestoreService().getGamificationConfig()
+  // fails soft to {} on any error, per its own doc comment, and every
+  // field extracted from it already falls back to today's hardcoded
+  // default individually). This timeout exists purely to guarantee Start
+  // can never get stuck waiting in some unforeseen scenario, without
+  // needing to touch firestore_service.dart.
   Future<void> _startTracking() async {
+    setState(() => _isPreparingToStart = true);
+    try {
+      await (_cardioAntiCheatConfigFuture ?? _loadCardioAntiCheatConfig())
+          .timeout(const Duration(seconds: 5), onTimeout: () {});
+    } catch (_) {
+      // Fields already sit at their hardcoded fallback defaults — nothing
+      // further to do, just proceed.
+    }
+    if (!mounted) return;
+    setState(() => _isPreparingToStart = false);
+
     final oldTail = _tailLine;
     setState(() {
       _trackingState = _TrackingState.tracking;
@@ -884,7 +1034,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
 
       final impliedSpeedKmh = (distanceMeters / elapsedSeconds) * 3.6;
       final maxSpeedKmh =
-          _kMaxSpeedKmhByActivity[_activity] ?? _kDefaultMaxSpeedKmh;
+          _maxSpeedKmhByActivity[_activity] ?? _defaultMaxSpeedKmh;
       // Implausible jump for this activity — genuine GPS glitch, not a
       // fast segment. Judged against the RAW fix, before any smoothing
       // below, so smoothing can never make an implausible jump look
@@ -1082,10 +1232,10 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
         }
 
         if (!_accrualPaused &&
-            _consecutivePauseConditionTicks >= _kAccrualPauseDebounceTicks) {
+            _consecutivePauseConditionTicks >= _accrualPauseDebounceTicks) {
           _accrualPaused = true;
         } else if (_accrualPaused &&
-            _consecutiveClearConditionTicks >= _kAccrualResumeDebounceTicks) {
+            _consecutiveClearConditionTicks >= _accrualResumeDebounceTicks) {
           _accrualPaused = false;
         }
 
@@ -1117,7 +1267,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     // too: a deliberately conservative default, since unverified time
     // shouldn't accrue calories/XP just because there's no data either way.
     final stationaryWindowStart =
-        now.subtract(const Duration(seconds: _kStationaryWindowSeconds));
+        now.subtract(Duration(seconds: _stationaryWindowSeconds));
     _recentAcceptedPoints.removeWhere((p) => p.time.isBefore(stationaryWindowStart));
     double stationaryDistance = 0;
     for (var i = 1; i < _recentAcceptedPoints.length; i++) {
@@ -1129,14 +1279,14 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       );
     }
     final isStationary = _recentAcceptedPoints.length < 2 ||
-        stationaryDistance < _kStationaryThresholdMeters;
+        stationaryDistance < _stationaryThresholdMeters;
 
     // Speed check: rolling average over a much shorter window than the
     // stationary one — skipped (never triggers a pause on its own) when
     // there's insufficient recent data, since the stationary check above
     // already owns the "no data" conservative case.
     final speedWindowStart =
-        now.subtract(const Duration(seconds: _kSpeedRollingWindowSeconds));
+        now.subtract(Duration(seconds: _speedRollingWindowSeconds));
     final speedWindowPoints = _recentAcceptedPoints
         .where((p) => p.time.isAfter(speedWindowStart))
         .toList();
@@ -1158,7 +1308,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       if (windowSeconds > 0) {
         final windowSpeedKmh = (windowDistance / windowSeconds) * 3.6;
         final maxSpeedKmh =
-            _kMaxSpeedKmhByActivity[_activity] ?? _kDefaultMaxSpeedKmh;
+            _maxSpeedKmhByActivity[_activity] ?? _defaultMaxSpeedKmh;
         isImplausiblySpeedy = windowSpeedKmh > maxSpeedKmh;
       }
     }
@@ -1414,7 +1564,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: GestureDetector(
-          onTap: () => _handleStartTap(),
+          onTap: _isPreparingToStart ? null : () => _handleStartTap(),
           child: Container(
             width: double.infinity,
             height: 56,
@@ -1429,15 +1579,24 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
                 ),
               ],
             ),
-            child: const Center(
-              child: Text(
-                'Start',
-                style: TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                ),
-              ),
+            child: Center(
+              child: _isPreparingToStart
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 2.5,
+                      ),
+                    )
+                  : const Text(
+                      'Start',
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                      ),
+                    ),
             ),
           ),
         ),

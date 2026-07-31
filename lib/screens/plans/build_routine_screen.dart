@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
@@ -12,51 +13,6 @@ import '../../services/firestore_service.dart';
 
 const _kMuscleFilters = [
   'All', 'Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Glutes', 'Cardio',
-];
-
-const _kExerciseLibrary = <Map<String, String>>[
-  {'name': 'Bench Press', 'muscle': 'Chest'},
-  {'name': 'Incline DB Press', 'muscle': 'Chest'},
-  {'name': 'Cable Fly', 'muscle': 'Chest'},
-  {'name': 'Dips', 'muscle': 'Chest'},
-  {'name': 'Pec Deck', 'muscle': 'Chest'},
-  {'name': 'Pull-up', 'muscle': 'Back'},
-  {'name': 'Barbell Row', 'muscle': 'Back'},
-  {'name': 'Lat Pulldown', 'muscle': 'Back'},
-  {'name': 'Cable Row', 'muscle': 'Back'},
-  {'name': 'T-Bar Row', 'muscle': 'Back'},
-  {'name': 'Deadlift', 'muscle': 'Back'},
-  {'name': 'Overhead Press', 'muscle': 'Shoulders'},
-  {'name': 'Lateral Raise', 'muscle': 'Shoulders'},
-  {'name': 'Face Pull', 'muscle': 'Shoulders'},
-  {'name': 'Rear Delt Fly', 'muscle': 'Shoulders'},
-  {'name': 'Barbell Curl', 'muscle': 'Arms'},
-  {'name': 'Tricep Pushdown', 'muscle': 'Arms'},
-  {'name': 'Hammer Curl', 'muscle': 'Arms'},
-  {'name': 'Skull Crusher', 'muscle': 'Arms'},
-  {'name': 'Preacher Curl', 'muscle': 'Arms'},
-  {'name': 'Cable Tricep Extension', 'muscle': 'Arms'},
-  {'name': 'Squat', 'muscle': 'Legs'},
-  {'name': 'Romanian Deadlift', 'muscle': 'Legs'},
-  {'name': 'Leg Press', 'muscle': 'Legs'},
-  {'name': 'Leg Extension', 'muscle': 'Legs'},
-  {'name': 'Leg Curl', 'muscle': 'Legs'},
-  {'name': 'Calf Raise', 'muscle': 'Legs'},
-  {'name': 'Walking Lunges', 'muscle': 'Legs'},
-  {'name': 'Front Squat', 'muscle': 'Legs'},
-  {'name': 'Plank', 'muscle': 'Core'},
-  {'name': 'Cable Crunch', 'muscle': 'Core'},
-  {'name': 'Dead Bug', 'muscle': 'Core'},
-  {'name': 'Ab Wheel', 'muscle': 'Core'},
-  {'name': 'Hanging Leg Raise', 'muscle': 'Core'},
-  {'name': 'Hip Thrust', 'muscle': 'Glutes'},
-  {'name': 'Glute Bridge', 'muscle': 'Glutes'},
-  {'name': 'Cable Kickback', 'muscle': 'Glutes'},
-  {'name': 'Treadmill Run', 'muscle': 'Cardio', 'equipment': 'Treadmill', 'tag': 'Cardio'},
-  {'name': 'Stationary Bike', 'muscle': 'Cardio', 'equipment': 'Bike Machine', 'tag': 'Cardio'},
-  {'name': 'Rowing Machine', 'muscle': 'Cardio', 'equipment': 'Rowing Machine', 'tag': 'Cardio'},
-  {'name': 'Elliptical', 'muscle': 'Cardio', 'equipment': 'Elliptical', 'tag': 'Cardio'},
-  {'name': 'Stair Climber', 'muscle': 'Cardio', 'equipment': 'Stair Machine', 'tag': 'Cardio'},
 ];
 
 // ── Muscle color helpers ───────────────────────────────────────────────────────
@@ -1533,7 +1489,13 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                 // ⓘ info button
                 if (!isCardio) ...[
                   GestureDetector(
-                    onTap: () => widget.onSnack('Exercise info coming soon'),
+                    onTap: () => context.push(
+                      Routes.exerciseDetail,
+                      extra: {
+                        'name': _ex['name'] as String? ?? '',
+                        'muscle': _ex['muscle'] as String? ?? '',
+                      },
+                    ),
                     child: Container(
                       width: 30,
                       height: 30,
@@ -1892,18 +1854,60 @@ class _ExerciseSearchSheetState extends State<_ExerciseSearchSheet> {
   String _query = '';
   String _muscleFilter = 'All';
 
+  // Fetched once when the sheet opens (see _loadExercises) rather than
+  // re-querying Firestore on every chip/search keystroke — _results below
+  // filters this in-memory list client-side. Used to filter the hardcoded
+  // _kExerciseLibrary const directly; that const has since been removed
+  // now that this Firestore-backed fetch is confirmed working.
+  List<Map<String, dynamic>> _allExercises = [];
+  bool _isLoading = true;
+  bool _hasError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadExercises();
+  }
+
+  Future<void> _loadExercises() async {
+    setState(() {
+      _isLoading = true;
+      _hasError = false;
+    });
+    try {
+      final exercises = await FirestoreService().getAllExercises();
+      if (!mounted) return;
+      setState(() {
+        _allExercises = exercises;
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _hasError = true;
+        _isLoading = false;
+      });
+    }
+  }
+
   @override
   void dispose() {
     _searchCtrl.dispose();
     super.dispose();
   }
 
-  List<Map<String, String>> get _results {
-    return _kExerciseLibrary.where((e) {
+  // muscle ?? 'Other' — some real exercise documents may lack a muscle
+  // field (see getAllExercises()'s own doc comment on incomplete
+  // documents); falling back to 'Other' here rather than an empty string
+  // keeps both the muscle-chip filter and the row's muscle label sensible
+  // instead of silently matching nothing / displaying blank.
+  List<Map<String, dynamic>> get _results {
+    return _allExercises.where((e) {
+      final name = (e['name'] as String?) ?? '';
+      final muscle = (e['muscle'] as String?) ?? 'Other';
       final nameMatch = _query.isEmpty ||
-          (e['name']?.toLowerCase().contains(_query.toLowerCase()) ?? false);
-      final muscleMatch =
-          _muscleFilter == 'All' || e['muscle'] == _muscleFilter;
+          name.toLowerCase().contains(_query.toLowerCase());
+      final muscleMatch = _muscleFilter == 'All' || muscle == _muscleFilter;
       return nameMatch && muscleMatch;
     }).toList();
   }
@@ -2035,25 +2039,31 @@ class _ExerciseSearchSheetState extends State<_ExerciseSearchSheet> {
           const SizedBox(height: 6),
           const Divider(height: 1, color: WW.border),
 
-          // Results
+          // Results / loading / error
           Expanded(
-            child: results.isEmpty
+            child: _isLoading
                 ? const Center(
-                    child: Text(
-                      'No exercises found',
-                      style: TextStyle(
-                          fontSize: 13, color: WW.textSec),
-                    ),
+                    child: CircularProgressIndicator(color: WW.primary),
                   )
-                : ListView.separated(
+                : _hasError
+                    ? _buildErrorState()
+                    : results.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No exercises found',
+                              style: TextStyle(
+                                  fontSize: 13, color: WW.textSec),
+                            ),
+                          )
+                        : ListView.separated(
                     padding: const EdgeInsets.fromLTRB(18, 4, 18, 24),
                     itemCount: results.length,
                     separatorBuilder: (ctx2, idx2) =>
                         const Divider(height: 1, color: WW.border),
                     itemBuilder: (ctx3, i) {
                       final e = results[i];
-                      final name = e['name'] ?? '';
-                      final muscle = e['muscle'] ?? '';
+                      final name = (e['name'] as String?) ?? '';
+                      final muscle = (e['muscle'] as String?) ?? 'Other';
                       final added = widget.alreadyAdded.contains(name);
                       final mc = _muscleColor(muscle);
                       final mb = _muscleBg(muscle);
@@ -2122,6 +2132,47 @@ class _ExerciseSearchSheetState extends State<_ExerciseSearchSheet> {
                       );
                     },
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildErrorState() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline_rounded,
+              size: 40, color: WW.textSec),
+          const SizedBox(height: 10),
+          const Text(
+            "Couldn't load exercises",
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: WW.text,
+            ),
+          ),
+          const SizedBox(height: 12),
+          GestureDetector(
+            onTap: _loadExercises,
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(
+                color: WW.primary,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Text(
+                'Retry',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+              ),
+            ),
           ),
         ],
       ),

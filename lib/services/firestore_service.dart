@@ -25,19 +25,128 @@ class FirestoreService {
   // minimum plausible duration derived purely from that set's own rep
   // count — independent of whatever restTime happens to be configured.
   //
-  // _kMinSetTransitionSeconds: a fixed floor per set-to-set transition,
-  // independent of rep count — covers unavoidable overhead between two
-  // consecutive completions on the same exercise (re-racking/re-gripping
-  // the weight, resetting stance, physically registering the tick) that
-  // exists even for a single-rep set.
-  // _kMinSecondsPerRep: an additional floor per rep performed —
+  // _kFallbackMinSetTransitionSeconds: a fixed floor per set-to-set
+  // transition, independent of rep count — covers unavoidable overhead
+  // between two consecutive completions on the same exercise (re-racking/
+  // re-gripping the weight, resetting stance, physically registering the
+  // tick) that exists even for a single-rep set.
+  // _kFallbackMinSecondsPerRep: an additional floor per rep performed —
   // deliberately conservative (low) so genuinely fast, well-conditioned
   // training is never flagged; it exists only to catch a rep count that's
   // physically impossible in the time actually available, not to judge
   // tempo or form.
+  //
+  // Both are now Firestore-configurable (see getGamificationConfig()'s own
+  // doc comment below) — these two remain in the source as the fallback
+  // values used when the config doc is missing/malformed/unreachable,
+  // exactly today's original hardcoded values, never deleted.
   // ---------------------------------------------------------------------------
-  static const double _kMinSetTransitionSeconds = 5.0;
-  static const double _kMinSecondsPerRep = 1.5;
+  static const double _kFallbackMinSetTransitionSeconds = 5.0;
+  static const double _kFallbackMinSecondsPerRep = 1.5;
+
+  // ---------------------------------------------------------------------------
+  // Fallback defaults for the rest of the gamification config — see
+  // getGamificationConfig()'s own doc comment. Every one of these is
+  // today's exact existing hardcoded value, kept here specifically for use
+  // when the corresponding config field is missing, malformed, or the
+  // fetch fails outright — never deleted, never silently replaced with 0.
+  // ---------------------------------------------------------------------------
+  static const int _kFallbackGymXpPerSet = 15;
+  static const double _kFallbackCardioXpPerCalorie = 0.5;
+  static const int _kFallbackCardioMinXp = 20;
+  static const int _kFallbackCardioMaxXp = 500;
+  static const double _kFallbackGymCaloriesVolumeCoefficient = 0.06;
+  static const double _kFallbackGymCaloriesSetsCoefficient = 0.18;
+  static const int _kFallbackGymCaloriesMin = 0;
+  static const int _kFallbackGymCaloriesMax = 2000;
+
+  // ---------------------------------------------------------------------------
+  // Gamification/anti-cheat config — Firestore-configurable via
+  // appConfig/gamification (admin-edited through the separate React
+  // dashboard this app doesn't build, only reads from — same pattern as
+  // Collections.exercises' minKg/maxKg/minReps/maxReps bounds). Fetched
+  // once and cached for the app's session in a STATIC field, not an
+  // instance field — FirestoreService() is constructed fresh at many call
+  // sites throughout the app (it's not a singleton), so only a static
+  // cache actually persists a "fetch once per session" behavior across
+  // all of them. Lazily fetched on first use rather than eagerly at app
+  // start: an eager fetch would need to live in app-bootstrap code
+  // (main.dart or similar), outside this change's scope — lazy-on-first-
+  // use is also simpler and doesn't add latency to app launch for a
+  // config that's only actually needed once a session is being saved.
+  //
+  // Returns the raw fetched map — {} if the doc doesn't exist, is
+  // malformed, or the fetch fails for any reason (never throws). Every
+  // caller is responsible for its OWN field-level fallback when reading a
+  // specific value out of this map (see _configNum() below, and
+  // outdoor_cardio_screen.dart/cardio_session_screen.dart's own local
+  // equivalents) — deliberately NOT centralizing typed extraction here, so
+  // a single missing/malformed field can never take down every other
+  // field's ability to fall back correctly on its own.
+  //
+  // 'appConfig' is referenced as a raw string rather than a Collections.x
+  // constant, per this file's own existing precedent for businessPartners
+  // — adding it to Collections would require touching constants.dart,
+  // outside this change's permitted file scope.
+  // ---------------------------------------------------------------------------
+  static Map<String, dynamic>? _gamificationConfigCache;
+
+  Future<Map<String, dynamic>> getGamificationConfig() async {
+    final cached = _gamificationConfigCache;
+    if (cached != null) return cached;
+    try {
+      final doc = await _db.collection('appConfig').doc('gamification').get();
+      _gamificationConfigCache = doc.exists ? (doc.data() ?? {}) : {};
+    } catch (_) {
+      _gamificationConfigCache = {};
+    }
+    return _gamificationConfigCache!;
+  }
+
+  // Reads a nested numeric field out of a gamification config map (e.g.
+  // path ['xp', 'gymPerSet']), falling back to `fallback` if any segment
+  // of the path is missing, the wrong type, or the map itself is empty —
+  // this is what makes every individual config value fall back
+  // independently rather than one missing field invalidating the whole
+  // config.
+  num _configNum(
+    Map<String, dynamic> config,
+    List<String> path,
+    num fallback,
+  ) {
+    dynamic current = config;
+    for (final key in path) {
+      if (current is! Map) return fallback;
+      current = current[key];
+    }
+    return current is num ? current : fallback;
+  }
+
+  // Shared by saveGymSession() and finalizeInProgressSession() — the one
+  // place gym XP is now actually computed, collapsing what used to be two
+  // separately-hardcoded `totalSets * 15` copies into a single source read
+  // from the same cached config both callers already fetch.
+  int _computeGymXp(int totalSets, Map<String, dynamic> config) {
+    final perSet =
+        _configNum(config, ['xp', 'gymPerSet'], _kFallbackGymXpPerSet).toInt();
+    return totalSets * perSet;
+  }
+
+  // Shared by saveCardioSession() and finalizeInProgressSession() — the
+  // one place cardio XP is now actually computed, collapsing what used to
+  // be two separately-hardcoded `(caloriesBurned * 0.5).round().clamp(20,
+  // 500)` copies into a single source read from the same cached config
+  // both callers already fetch.
+  int _computeCardioXp(int caloriesBurned, Map<String, dynamic> config) {
+    final perCalorie = _configNum(
+            config, ['xp', 'cardioPerCalorieRate'], _kFallbackCardioXpPerCalorie)
+        .toDouble();
+    final minXp =
+        _configNum(config, ['xp', 'cardioMinXp'], _kFallbackCardioMinXp).toInt();
+    final maxXp =
+        _configNum(config, ['xp', 'cardioMaxXp'], _kFallbackCardioMaxXp).toInt();
+    return (caloriesBurned * perCalorie).round().clamp(minXp, maxXp);
+  }
 
   // ---------------------------------------------------------------------------
   // Creates or merges a user document at users/{uid}.
@@ -183,15 +292,29 @@ class FirestoreService {
   // not some artificial display minimum. Ceiling kept at 2000 as a sane
   // per-session sanity cap.
   // ---------------------------------------------------------------------------
-  int _estimateGymCalories({
+  Future<int> _estimateGymCalories({
     required double weightKg,
     required int totalSets,
     required double totalVolume,
-  }) {
-    final volumeComponent = 0.06 * totalVolume * (weightKg / 70.0);
-    final setsComponent = 0.18 * weightKg * totalSets;
+  }) async {
+    final config = await getGamificationConfig();
+    final volumeCoefficient = _configNum(config,
+            ['gymCalories', 'volumeCoefficient'], _kFallbackGymCaloriesVolumeCoefficient)
+        .toDouble();
+    final setsCoefficient = _configNum(
+            config, ['gymCalories', 'setsCoefficient'], _kFallbackGymCaloriesSetsCoefficient)
+        .toDouble();
+    final minCalories =
+        _configNum(config, ['gymCalories', 'minCalories'], _kFallbackGymCaloriesMin)
+            .toInt();
+    final maxCalories =
+        _configNum(config, ['gymCalories', 'maxCalories'], _kFallbackGymCaloriesMax)
+            .toInt();
+
+    final volumeComponent = volumeCoefficient * totalVolume * (weightKg / 70.0);
+    final setsComponent = setsCoefficient * weightKg * totalSets;
     final total = volumeComponent + setsComponent;
-    return total.round().clamp(0, 2000);
+    return total.round().clamp(minCalories, maxCalories);
   }
 
   // ---------------------------------------------------------------------------
@@ -220,9 +343,12 @@ class FirestoreService {
   // list), the done sets across the WHOLE SESSION whose completedAt gap
   // since the immediately preceding done set — by actual completion time,
   // never by array/exercise position — is below what that set's own rep
-  // count could plausibly take (see _kMinSetTransitionSeconds/
-  // _kMinSecondsPerRep's own doc comment). Replaces an earlier per-exercise
-  // version of this check: comparing only within the same exercise meant
+  // count could plausibly take (minSetTransitionSeconds/minSecondsPerRep
+  // below — Firestore-configurable, see getGamificationConfig(); callers
+  // resolve these from cached config before calling in, with
+  // _kFallbackMinSetTransitionSeconds/_kFallbackMinSecondsPerRep used if
+  // config is unavailable). Replaces an earlier per-exercise version of
+  // this check: comparing only within the same exercise meant
   // every exercise's own first set was exempt, so a session with N
   // exercises had N free unflagged sets no matter how implausible. Every
   // done set from every exercise (including a mid-session-added one — its
@@ -255,8 +381,10 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
   List<Set<int>> _computeSessionTimingFlags(
     List<dynamic> exercises,
-    DateTime? sessionStartAnchor,
-  ) {
+    DateTime? sessionStartAnchor, {
+    required double minSetTransitionSeconds,
+    required double minSecondsPerRep,
+  }) {
     // (exerciseIndex, setIndex, the set map itself, its completedAt) for
     // every done set with a parseable completedAt, across every exercise.
     final allDoneSets = <(int, int, Map, DateTime)>[];
@@ -287,7 +415,7 @@ class FirestoreService {
       final gapSeconds =
           completedAt.difference(prevTime).inMilliseconds / 1000.0;
       final minPlausibleSeconds =
-          _kMinSetTransitionSeconds + reps * _kMinSecondsPerRep;
+          minSetTransitionSeconds + reps * minSecondsPerRep;
       if (gapSeconds < minPlausibleSeconds) {
         result[ei].add(si);
       }
@@ -331,6 +459,7 @@ class FirestoreService {
     String uid,
     Map<String, dynamic> sessionData,
   ) async {
+    final gamificationConfig = await getGamificationConfig();
     final rawExercises = sessionData['exercises'];
     int totalSets = 0;
     double totalVolume = 0.0;
@@ -358,8 +487,18 @@ class FirestoreService {
       // session's true first set is simply never flagged for lack of a
       // trustworthy reference point — see _computeSessionTimingFlags()'s
       // own doc comment for why this is deliberate, not an oversight.
-      final timingFlagsByExercise =
-          _computeSessionTimingFlags(rawExercises, null);
+      final timingFlagsByExercise = _computeSessionTimingFlags(
+        rawExercises,
+        null,
+        minSetTransitionSeconds: _configNum(
+                gamificationConfig,
+                ['gymTiming', 'minSetTransitionSeconds'],
+                _kFallbackMinSetTransitionSeconds)
+            .toDouble(),
+        minSecondsPerRep: _configNum(gamificationConfig,
+                ['gymTiming', 'minSecondsPerRep'], _kFallbackMinSecondsPerRep)
+            .toDouble(),
+      );
 
       for (var ei = 0; ei < rawExercises.length; ei++) {
         final e = rawExercises[ei];
@@ -412,7 +551,7 @@ class FirestoreService {
     final profile = await getUserProfile(uid);
     final weightKg =
         double.tryParse(profile?['weight']?.toString() ?? '70') ?? 70.0;
-    final caloriesBurned = _estimateGymCalories(
+    final caloriesBurned = await _estimateGymCalories(
       weightKg: weightKg,
       totalSets: totalSets,
       totalVolume: totalVolume,
@@ -461,7 +600,7 @@ class FirestoreService {
         'totalVolume': totalVolume,
         'flaggedSetCount': flaggedSetCount,
         'caloriesBurned': caloriesBurned,
-        'xpEarned': totalSets * 15,
+        'xpEarned': _computeGymXp(totalSets, gamificationConfig),
         'isManuallyLogged': false,
         'planIsCustom': planIsCustom,
         if (notes != null && notes.isNotEmpty) 'notes': notes,
@@ -700,6 +839,65 @@ class FirestoreService {
     } catch (_) {
       return {};
     }
+  }
+
+  /// Fetches ALL documents from the exercises collection — the "browse/
+  /// list" counterpart to getExerciseDetail()'s single name-keyed lookup
+  /// and getInjuryRisksForExercises()/getExerciseBoundsForExercises()'s
+  /// bulk name-keyed lookups (all three of those only ever fetch this
+  /// collection to look up specific already-known names; nothing before
+  /// this method ever needed every document at once). Each result is the
+  /// raw doc data plus its own 'id' — same lightweight shape as
+  /// getExerciseDetail()/getPlan() elsewhere in this file — deliberately
+  /// NOT re-typed or defaulted here: some existing exercise documents are
+  /// missing some of these fields, and inventing a default at this layer
+  /// (e.g. muscle ?? 'Other') would hide that choice from callers who may
+  /// want to handle it differently (group under "Other" vs. exclude
+  /// entirely) — that's a UI-wiring decision for later, not this method's.
+  /// Confirmed real-world fields a document may contain, any of which may
+  /// be absent: name, muscle, muscleGroup, equipment, difficulty,
+  /// instructions, secondaryMuscles (List), injuryRisk (List), minKg/
+  /// maxKg/minReps/maxReps (num).
+  ///
+  /// muscle — not muscleGroup — is the field filtered on server-side.
+  /// Confirmed against a real seeded document (Squat): muscle: "Legs",
+  /// muscleGroup: "thighs" — muscle is the coarse category that actually
+  /// matches the existing "Add Exercise" sheets' filter chips
+  /// (_kMuscleFilters/_kGymMuscleFilters — 'Chest'/'Back'/'Shoulders'/etc.,
+  /// 8 coarse categories), while muscleGroup is a finer anatomical
+  /// subcategory (e.g. "thighs", "biceps") those chips were never meant to
+  /// match. Passing null, empty, or 'All' skips the where() clause and
+  /// returns every document — matching the existing filter chips' own
+  /// "All" semantics.
+  ///
+  /// Text search is deliberately NOT done here — Firestore has no native
+  /// substring/contains query, so name search stays exactly where it
+  /// already is today (client-side, over whatever list this method
+  /// returns); only the SOURCE of that list changes, from the hardcoded
+  /// _kExerciseLibrary/_kGymExerciseLibrary consts to this real fetch —
+  /// the filtering mechanics themselves don't change at all.
+  ///
+  /// Deliberately does NOT catch/swallow errors here (unlike
+  /// getExerciseDetail()/getInjuryRisksForExercises()/
+  /// getExerciseBoundsForExercises() above, which fail soft to null/{}
+  /// since they're supplementary lookups a caller can reasonably treat as
+  /// "nothing found either way"). This method's callers — the "Add
+  /// Exercise" search sheets in build_routine_screen.dart/
+  /// gym_session_screen.dart — need to tell "the query genuinely
+  /// succeeded and found nothing" apart from "the query failed", so they
+  /// can show a real error/retry state instead of a misleading "No
+  /// exercises found" for a genuine Firestore failure. Swallowing the
+  /// error here would make those two outcomes indistinguishable to any
+  /// caller. Callers must wrap this in their own try/catch.
+  Future<List<Map<String, dynamic>>> getAllExercises({
+    String? muscle,
+  }) async {
+    Query<Map<String, dynamic>> query = _db.collection(Collections.exercises);
+    if (muscle != null && muscle.isNotEmpty && muscle != 'All') {
+      query = query.where('muscle', isEqualTo: muscle);
+    }
+    final snapshot = await query.get();
+    return snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList();
   }
 
   /// Fetches all injury categories from Firestore.
@@ -1538,7 +1736,8 @@ class FirestoreService {
     String? photoBase64,
     String? mapSnapshotBase64,
   }) async {
-    final xpEarned = (caloriesBurned * 0.5).round().clamp(20, 500);
+    final gamificationConfig = await getGamificationConfig();
+    final xpEarned = _computeCardioXp(caloriesBurned, gamificationConfig);
     final sessionName = (name != null && name.isNotEmpty)
         ? name
         : '$activity · ${mode == 'indoor' ? 'Indoor' : 'Outdoor'}';
@@ -1800,12 +1999,15 @@ class FirestoreService {
   // transient in-memory _exercises array position — see
   // gym_session_screen.dart's _ExerciseData.originalIndex), removed
   // highest-index-first so removing one never shifts the position of
-  // another index still queued for removal in the same pass. Fails soft
-  // (logs, doesn't throw) matching updateInProgressSessionBlock()'s own
-  // convention — a stray/late call after the session was already
-  // finalized/abandoned shouldn't crash the caller.
+  // another index still queued for removal in the same pass. Returns
+  // whether the write actually succeeded (still fails soft — logs, doesn't
+  // throw, matching updateInProgressSessionBlock()'s convention that a
+  // stray/late call after the session was already finalized/abandoned
+  // shouldn't crash the caller) so gym_session_screen.dart's caller can
+  // retry on a transient failure instead of silently treating a dropped
+  // write as a successful dismissal.
   // ---------------------------------------------------------------------------
-  Future<void> dismissInjuryReview(
+  Future<bool> dismissInjuryReview(
     String uid,
     String sessionRunId,
     List<int> removedOriginalIndices,
@@ -1819,7 +2021,7 @@ class FirestoreService {
       final doc = await docRef.get();
       if (!doc.exists) {
         print('dismissInjuryReview: no such session $sessionRunId');
-        return;
+        return false;
       }
       final rawBlocks = doc.data()?['blocks'];
       final blocks = rawBlocks is List
@@ -1836,8 +2038,10 @@ class FirestoreService {
         'blocks': blocks,
         'injuryReviewDismissed': true,
       });
+      return true;
     } catch (e) {
       print('dismissInjuryReview error: $e');
+      return false;
     }
   }
 
@@ -1922,6 +2126,7 @@ class FirestoreService {
       throw StateError(
           'finalizeInProgressSession: no such session $sessionRunId');
     }
+    final gamificationConfig = await getGamificationConfig();
     final data = doc.data() ?? {};
     final rawBlocks = data['blocks'];
     final blocks = rawBlocks is List
@@ -1979,8 +2184,18 @@ class FirestoreService {
     final rawCreatedAt = data['createdAt'];
     final sessionStartAnchor =
         rawCreatedAt is Timestamp ? rawCreatedAt.toDate() : null;
-    final timingFlagsByExercise =
-        _computeSessionTimingFlags(gymBlocks, sessionStartAnchor);
+    final timingFlagsByExercise = _computeSessionTimingFlags(
+      gymBlocks,
+      sessionStartAnchor,
+      minSetTransitionSeconds: _configNum(
+              gamificationConfig,
+              ['gymTiming', 'minSetTransitionSeconds'],
+              _kFallbackMinSetTransitionSeconds)
+          .toDouble(),
+      minSecondsPerRep: _configNum(gamificationConfig,
+              ['gymTiming', 'minSecondsPerRep'], _kFallbackMinSecondsPerRep)
+          .toDouble(),
+    );
 
     for (var ei = 0; ei < gymBlocks.length; ei++) {
       final e = gymBlocks[ei];
@@ -2061,7 +2276,7 @@ class FirestoreService {
     final weightKg =
         double.tryParse(profile?['weight']?.toString() ?? '70') ?? 70.0;
     final gymCaloriesBurned = hasGym
-        ? _estimateGymCalories(
+        ? await _estimateGymCalories(
             weightKg: weightKg,
             totalSets: totalSets,
             totalVolume: totalVolume,
@@ -2072,10 +2287,10 @@ class FirestoreService {
       (acc, b) => acc + ((b['caloriesBurned'] as num?)?.toInt() ?? 0),
     );
     final caloriesBurned = gymCaloriesBurned + cardioCaloriesBurned;
-    final xpEarned = totalSets * 15 +
+    final xpEarned = _computeGymXp(totalSets, gamificationConfig) +
         cardioBlocks.fold<int>(0, (acc, b) {
           final cals = (b['caloriesBurned'] as num?)?.toInt() ?? 0;
-          return acc + (cals * 0.5).round().clamp(20, 500);
+          return acc + _computeCardioXp(cals, gamificationConfig);
         });
 
     final planId = data['planId'] as String? ?? '';
@@ -2994,5 +3209,429 @@ class FirestoreService {
         .where('read', isEqualTo: false)
         .get();
     return snapshot.docs.length;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CHALLENGES
+  // Individual-goal challenges (challenges/{challengeId}): each participant
+  // tracks their OWN progress toward the same shared target — not a pooled
+  // total. Admin-created challenges are isGlobal:true (discoverable by
+  // anyone, joined directly, managed via Firebase Console the same way
+  // Collections.exercises/injuryCategories are — no admin write path
+  // exists in this app yet). User-created challenges are always
+  // isGlobal:false and invite-only (see createChallenge()).
+  //
+  // challengeCategories/{categoryId} is read-only reference data from the
+  // app's side (admin-managed via Firebase Console/future dashboard,
+  // exactly like Collections.exercises/injuryCategories) — its collection
+  // name isn't in Collections since that class is intentionally left
+  // untouched here; it instead follows this file's own existing precedent
+  // of a private collection-name const for things Collections doesn't
+  // cover yet (see _planProgress/_inProgressSessions above).
+  // ═══════════════════════════════════════════════════════════════════════
+
+  static const _challengeCategories = 'challengeCategories';
+  static const _challengeProgressCache = 'progressCache';
+  static const _challengeProgressNotifications = 'progressNotifications';
+
+  /// Fetches all challenge categories. Read-only from the app; admin adds/
+  /// edits these directly in Firestore. Same fail-soft convention as
+  /// getInjuryCategories() — a lookup failure here shouldn't crash
+  /// whatever screen is trying to show category choices.
+  Future<List<Map<String, dynamic>>> getChallengeCategories() async {
+    try {
+      final snapshot =
+          await _db.collection(_challengeCategories).orderBy('name').get();
+      return snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Creates a user-made challenge (always private/invite-only — isGlobal
+  /// is hardcoded false here; only an admin writing directly via Firebase
+  /// Console can ever set isGlobal:true). The creator auto-joins
+  /// participantUids; everyone else starts in invitedUids until they
+  /// accept. One batch so the challenge doc and every invite notification
+  /// succeed or fail together, matching sendFriendRequest()'s pattern.
+  Future<String> createChallenge(
+    String uid, {
+    required String name,
+    required String categoryId,
+    required String metricType,
+    required String unit,
+    required double goalValue,
+    required DateTime startDate,
+    required DateTime endDate,
+    List<String> invitedUids = const [],
+  }) async {
+    final batch = _db.batch();
+    final challengeRef = _db.collection(Collections.challenges).doc();
+
+    batch.set(challengeRef, {
+      'name': name,
+      'categoryId': categoryId,
+      'metricType': metricType,
+      'unit': unit,
+      'goalValue': goalValue,
+      'startDate': Timestamp.fromDate(startDate),
+      'endDate': Timestamp.fromDate(endDate),
+      'isGlobal': false,
+      'createdBy': uid,
+      'participantUids': [uid],
+      'invitedUids': invitedUids,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+
+    if (invitedUids.isNotEmpty) {
+      final myProfile = await getUserProfile(uid);
+      final myName = myProfile?['displayName'] as String? ?? 'Someone';
+      for (final invitedUid in invitedUids) {
+        final notificationRef = _db
+            .collection(Collections.users)
+            .doc(invitedUid)
+            .collection(Collections.notifications)
+            .doc();
+        batch.set(notificationRef, {
+          'type': 'challenge_invite',
+          'challengeId': challengeRef.id,
+          'challengeName': name,
+          'fromUid': uid,
+          'fromDisplayName': myName,
+          'read': false,
+          'status': 'pending',
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      }
+    }
+
+    await batch.commit();
+    return challengeRef.id;
+  }
+
+  /// Accepts a challenge invite: moves [uid] from invitedUids to
+  /// participantUids. Both array ops happen in the same batched write, so
+  /// they can never be observed half-applied.
+  Future<void> acceptChallengeInvite(String uid, String challengeId) async {
+    final batch = _db.batch();
+    final ref = _db.collection(Collections.challenges).doc(challengeId);
+    batch.update(ref, {
+      'invitedUids': FieldValue.arrayRemove([uid]),
+      'participantUids': FieldValue.arrayUnion([uid]),
+    });
+    await batch.commit();
+  }
+
+  /// Declines a challenge invite: removes [uid] from invitedUids only —
+  /// never joins participantUids, no other side effect (mirrors
+  /// declineFriendRequest()'s silent-decline precedent).
+  Future<void> declineChallengeInvite(String uid, String challengeId) async {
+    await _db.collection(Collections.challenges).doc(challengeId).update({
+      'invitedUids': FieldValue.arrayRemove([uid]),
+    });
+  }
+
+  /// Responds to a challenge_invite notification from the notifications
+  /// sheet: updates the challenge doc (same invitedUids/participantUids
+  /// array ops as acceptChallengeInvite()/declineChallengeInvite() above)
+  /// AND writes 'accepted'/'declined' onto the notification doc itself,
+  /// plus marks it read — all in ONE batch. Deliberately not composed from
+  /// the two methods above (each commits its own separate batch) because
+  /// the whole point is that the challenge-membership change and the
+  /// notification's persisted status can never be observed out of sync —
+  /// e.g. the challenge write landing while the status write fails, which
+  /// would leave the row stuck re-showing Accept/Decline for an invite
+  /// that's already been acted on.
+  Future<void> respondToChallengeInvite(
+    String uid,
+    String challengeId,
+    String notificationId, {
+    required bool accept,
+  }) async {
+    final batch = _db.batch();
+
+    final challengeRef = _db.collection(Collections.challenges).doc(challengeId);
+    if (accept) {
+      batch.update(challengeRef, {
+        'invitedUids': FieldValue.arrayRemove([uid]),
+        'participantUids': FieldValue.arrayUnion([uid]),
+      });
+    } else {
+      batch.update(challengeRef, {
+        'invitedUids': FieldValue.arrayRemove([uid]),
+      });
+    }
+
+    final notificationRef = _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.notifications)
+        .doc(notificationId);
+    batch.update(notificationRef, {
+      'status': accept ? 'accepted' : 'declined',
+      'read': true,
+    });
+
+    await batch.commit();
+  }
+
+  /// Joins a discoverable global challenge directly — no invite needed
+  /// since isGlobal:true challenges are public.
+  Future<void> joinChallenge(String uid, String challengeId) async {
+    await _db.collection(Collections.challenges).doc(challengeId).update({
+      'participantUids': FieldValue.arrayUnion([uid]),
+    });
+  }
+
+  /// Live stream of challenges [uid] participates in (creator or accepted
+  /// invite), soonest-ending first — matches the "what do I need to act on
+  /// next" ordering a My Challenges list wants, same reasoning NRC/Strava
+  /// use for their own active-challenge ordering.
+  Stream<List<Map<String, dynamic>>> getMyChallengesStream(String uid) {
+    return _db
+        .collection(Collections.challenges)
+        .where('participantUids', arrayContains: uid)
+        .orderBy('endDate')
+        .snapshots()
+        .map((snapshot) =>
+            snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+  }
+
+  /// Live stream of global (public) challenges [uid] hasn't already joined.
+  /// Firestore has no "array does not contain" operator, so the
+  /// already-joined filter happens client-side after the isGlobal query —
+  /// fine at this app's scale (global challenge count is expected to stay
+  /// small; admin-managed, not user-generated).
+  Stream<List<Map<String, dynamic>>> getDiscoverableChallengesStream(
+    String uid,
+  ) {
+    return _db
+        .collection(Collections.challenges)
+        .where('isGlobal', isEqualTo: true)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .where((doc) =>
+                !((doc.data()['participantUids'] as List?) ?? [])
+                    .contains(uid))
+            .map((doc) => {'id': doc.id, ...doc.data()})
+            .toList());
+  }
+
+  /// Computes [uid]'s own progress toward [challenge] (a map as returned
+  /// by getMyChallengesStream/getDiscoverableChallengesStream — must
+  /// include 'id', 'startDate', 'endDate', 'metricType', 'unit',
+  /// 'participantUids', 'name'), reusing getSessionStats()'s exact
+  /// date-range query shape on the same sessions subcollection.
+  ///
+  /// Manually-logged sessions are excluded entirely (isManuallyLogged ==
+  /// true is skipped, not just deprioritized) — contributions must come
+  /// from validated, anti-cheat-checked data only, same reasoning as this
+  /// file's existing timing/bounds flags on gym sets.
+  ///
+  /// Metric extraction (see finalizeInProgressSession()'s own doc comment
+  /// for why the shape differs by type):
+  ///  - distance: 'cardio' promotes distanceMeters to the top level, read
+  ///    directly; 'combined' preserves every cardio block in a
+  ///    cardioBlocks[] array, summed; 'gym' (and manual, already excluded
+  ///    above) never carries distance, contributes 0.
+  ///  - calories: caloriesBurned summed across every qualifying type.
+  ///  - duration: durationSeconds summed across every qualifying type.
+  ///
+  /// The raw sum is in the metric's natural stored unit (meters, calories,
+  /// seconds) and is converted to the challenge's own `unit` before
+  /// returning, so the caller can compare directly against goalValue.
+  ///
+  /// notifyFriends defaults to true: as a side effect, this also checks
+  /// whether [uid]'s own progress increased since the last time this was
+  /// computed for this challenge, and if so, opportunistically notifies
+  /// [uid]'s friends among the other participants (see
+  /// _maybeNotifyFriendsOfProgress()'s own doc comment for why this call
+  /// site, not a Cloud Function, is the trigger).
+  Future<double> computeChallengeProgress(
+    String uid,
+    Map<String, dynamic> challenge, {
+    bool notifyFriends = true,
+  }) async {
+    final rawStart = challenge['startDate'];
+    final rawEnd = challenge['endDate'];
+    final startDate = rawStart is Timestamp ? rawStart.toDate() : DateTime(1970);
+    final endDate = rawEnd is Timestamp ? rawEnd.toDate() : DateTime.now();
+    final metricType = challenge['metricType'] as String? ?? 'distance';
+    final unit = challenge['unit'] as String? ?? '';
+
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(startDate))
+        .where('date', isLessThan: Timestamp.fromDate(endDate))
+        .get();
+
+    double total = 0;
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      if (data['isManuallyLogged'] == true) continue;
+      final type = data['type'] as String? ?? '';
+
+      switch (metricType) {
+        case 'distance':
+          if (type == 'cardio') {
+            total += (data['distanceMeters'] as num?)?.toDouble() ?? 0;
+          } else if (type == 'combined') {
+            final blocks = data['cardioBlocks'];
+            if (blocks is List) {
+              for (final b in blocks) {
+                if (b is Map) {
+                  total += (b['distanceMeters'] as num?)?.toDouble() ?? 0;
+                }
+              }
+            }
+          }
+          break;
+        case 'calories':
+          total += (data['caloriesBurned'] as num?)?.toDouble() ?? 0;
+          break;
+        case 'duration':
+          total += (data['durationSeconds'] as num?)?.toDouble() ?? 0;
+          break;
+      }
+    }
+
+    double converted;
+    switch (metricType) {
+      case 'distance':
+        // Raw total is always in meters (distanceMeters).
+        converted = unit == 'km' ? total / 1000 : total;
+        break;
+      case 'duration':
+        // Raw total is always in seconds (durationSeconds).
+        if (unit == 'min') {
+          converted = total / 60;
+        } else if (unit == 'hr') {
+          converted = total / 3600;
+        } else {
+          converted = total;
+        }
+        break;
+      default:
+        // calories: stored and displayed in the same unit, no conversion.
+        converted = total;
+    }
+
+    final challengeId = challenge['id'] as String?;
+    if (notifyFriends && challengeId != null) {
+      try {
+        await _maybeNotifyFriendsOfProgress(uid, challengeId, challenge, converted);
+      } catch (_) {
+        // Notification side effect must never block the progress number
+        // the caller actually needs to render.
+      }
+    }
+
+    return converted;
+  }
+
+  /// Trigger mechanism note: with no Cloud Functions in this project (see
+  /// pubspec.yaml's unused cloud_functions dependency), there is no
+  /// server-side hook that reacts to a new session write. So this runs
+  /// client-side, embedded directly in computeChallengeProgress() itself
+  /// — whichever screen calls that function (My Challenges list, a
+  /// challenge detail view, pull-to-refresh, etc., in a later pass) gets
+  /// this side effect for free, without needing its own separate wiring.
+  /// It only ever compares/notifies for the CURRENT device's own uid, since
+  /// a user's sessions subcollection can only be queried by that user's own
+  /// device in the first place.
+  ///
+  /// "Did progress increase" is judged against
+  /// challenges/{challengeId}/progressCache/{uid} (value, updatedAt),
+  /// which this method refreshes to the latest computed value on every
+  /// call regardless of outcome — so the next call always compares against
+  /// today's true prior baseline, not a stale one.
+  ///
+  /// Once-per-day dedup: before writing a notification for a given
+  /// (challenge, this uid as the friend who progressed, recipient) triple,
+  /// checks for a marker doc at
+  /// challenges/{challengeId}/progressNotifications/{recipientUid}_{uid}_{yyyy-mm-dd}.
+  /// If it exists, that recipient has already been notified about this
+  /// friend's progress on this challenge today — skipped. If not, the
+  /// marker doc and the actual notification are written together in one
+  /// batch, so a notification can never be sent without its dedup marker
+  /// also landing (which would otherwise let it re-send on every later
+  /// call this same day).
+  Future<void> _maybeNotifyFriendsOfProgress(
+    String uid,
+    String challengeId,
+    Map<String, dynamic> challenge,
+    double newProgress,
+  ) async {
+    final cacheRef = _db
+        .collection(Collections.challenges)
+        .doc(challengeId)
+        .collection(_challengeProgressCache)
+        .doc(uid);
+    final cacheDoc = await cacheRef.get();
+    final previous = (cacheDoc.data()?['value'] as num?)?.toDouble() ?? 0;
+
+    await cacheRef.set({
+      'value': newProgress,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    if (newProgress <= previous) return;
+
+    final participantUids =
+        (challenge['participantUids'] as List?)?.cast<String>() ?? [];
+    if (participantUids.length <= 1) return;
+
+    final friendsSnapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.friends)
+        .get();
+    final friendUids = friendsSnapshot.docs.map((d) => d.id).toSet();
+
+    final recipientUids = participantUids
+        .where((p) => p != uid && friendUids.contains(p))
+        .toList();
+    if (recipientUids.isEmpty) return;
+
+    final myProfile = await getUserProfile(uid);
+    final myName = myProfile?['displayName'] as String? ?? 'A friend';
+    final challengeName = challenge['name'] as String? ?? 'a challenge';
+
+    final today = DateTime.now();
+    final dateKey = '${today.year}-'
+        '${today.month.toString().padLeft(2, '0')}-'
+        '${today.day.toString().padLeft(2, '0')}';
+
+    for (final recipientUid in recipientUids) {
+      final dedupRef = _db
+          .collection(Collections.challenges)
+          .doc(challengeId)
+          .collection(_challengeProgressNotifications)
+          .doc('${recipientUid}_${uid}_$dateKey');
+      final dedupDoc = await dedupRef.get();
+      if (dedupDoc.exists) continue;
+
+      final batch = _db.batch();
+      batch.set(dedupRef, {'sentAt': FieldValue.serverTimestamp()});
+      final notificationRef = _db
+          .collection(Collections.users)
+          .doc(recipientUid)
+          .collection(Collections.notifications)
+          .doc();
+      batch.set(notificationRef, {
+        'type': 'challenge_friend_progress',
+        'challengeId': challengeId,
+        'challengeName': challengeName,
+        'fromUid': uid,
+        'fromDisplayName': myName,
+        'read': false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      await batch.commit();
+    }
   }
 }

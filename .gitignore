@@ -48,6 +48,15 @@ app.*.map.json
 google-services.json
 GoogleService-Info.plist
 lib/firebase_options.dart
+serviceAccountKey.json
+
+# Cloud Functions
+functions/node_modules/
+functions/.env
+functions/.env.*
+firebase-debug.log
+firebase-debug.*.log
+.runtimeconfig.json
 
 # Environment files
 .env

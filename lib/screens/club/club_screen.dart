@@ -569,7 +569,7 @@ class _ClubScreenState extends State<ClubScreen> {
                 ),
               ),
               GestureDetector(
-                onTap: () => _snack('Create challenge coming soon'),
+                onTap: () => context.push(Routes.createChallenge),
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(

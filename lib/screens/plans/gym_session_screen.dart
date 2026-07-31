@@ -29,47 +29,22 @@ import '../../services/firestore_service.dart';
 // standalone gym-session finish form's own photo picker.
 const int _kFinishPhotoMaxBase64Bytes = 500 * 1024;
 
-// ── Exercise library (Add Exercise sheet) ──────────────────────────────────────
+// Belt-and-suspenders safety net for the injury-review-dismissed flag,
+// alongside the Firestore-persisted injuryReviewDismissed field on the
+// inProgressSessions doc (see _hydrateFromInProgressSession's use of it).
+// Library-scope (survives every GymSessionScreen State object, including
+// the fresh one router.dart's forceRefresh deliberately creates on every
+// mid_plan_cardio_complete_screen.dart "Next" tap — see that route's own
+// doc comment) so that even if dismissInjuryReview()'s write is still
+// retrying/failed when a forceRefresh remount happens moments later, the
+// sheet still won't re-show within the same app run. Only ever added to,
+// never read as authoritative on its own — the Firestore field is still
+// the source of truth checked first; this only fills the gap for a
+// session already dismissed once THIS app run whose write hasn't landed
+// yet.
+final Set<String> _dismissedInjuryReviewSessionRunIds = <String>{};
 
-const _kGymExerciseLibrary = <Map<String, String>>[
-  {'name': 'Bench Press', 'muscle': 'Chest'},
-  {'name': 'Incline DB Press', 'muscle': 'Chest'},
-  {'name': 'Cable Fly', 'muscle': 'Chest'},
-  {'name': 'Dips', 'muscle': 'Chest'},
-  {'name': 'Pec Deck', 'muscle': 'Chest'},
-  {'name': 'Pull-up', 'muscle': 'Back'},
-  {'name': 'Barbell Row', 'muscle': 'Back'},
-  {'name': 'Lat Pulldown', 'muscle': 'Back'},
-  {'name': 'Cable Row', 'muscle': 'Back'},
-  {'name': 'T-Bar Row', 'muscle': 'Back'},
-  {'name': 'Deadlift', 'muscle': 'Back'},
-  {'name': 'Overhead Press', 'muscle': 'Shoulders'},
-  {'name': 'Lateral Raise', 'muscle': 'Shoulders'},
-  {'name': 'Face Pull', 'muscle': 'Shoulders'},
-  {'name': 'Rear Delt Fly', 'muscle': 'Shoulders'},
-  {'name': 'Barbell Curl', 'muscle': 'Arms'},
-  {'name': 'Tricep Pushdown', 'muscle': 'Arms'},
-  {'name': 'Hammer Curl', 'muscle': 'Arms'},
-  {'name': 'Skull Crusher', 'muscle': 'Arms'},
-  {'name': 'Preacher Curl', 'muscle': 'Arms'},
-  {'name': 'Cable Tricep Extension', 'muscle': 'Arms'},
-  {'name': 'Squat', 'muscle': 'Legs'},
-  {'name': 'Romanian Deadlift', 'muscle': 'Legs'},
-  {'name': 'Leg Press', 'muscle': 'Legs'},
-  {'name': 'Leg Extension', 'muscle': 'Legs'},
-  {'name': 'Leg Curl', 'muscle': 'Legs'},
-  {'name': 'Calf Raise', 'muscle': 'Legs'},
-  {'name': 'Walking Lunges', 'muscle': 'Legs'},
-  {'name': 'Front Squat', 'muscle': 'Legs'},
-  {'name': 'Plank', 'muscle': 'Core'},
-  {'name': 'Cable Crunch', 'muscle': 'Core'},
-  {'name': 'Dead Bug', 'muscle': 'Core'},
-  {'name': 'Ab Wheel', 'muscle': 'Core'},
-  {'name': 'Hanging Leg Raise', 'muscle': 'Core'},
-  {'name': 'Hip Thrust', 'muscle': 'Glutes'},
-  {'name': 'Glute Bridge', 'muscle': 'Glutes'},
-  {'name': 'Cable Kickback', 'muscle': 'Glutes'},
-];
+// ── Exercise library (Add Exercise sheet) ──────────────────────────────────────
 
 const _kGymMuscleFilters = [
   'All', 'Chest', 'Back', 'Shoulders', 'Arms',
@@ -757,8 +732,14 @@ class _GymSessionState extends State<GymSessionScreen> {
       _planSport = sport;
       _isLoadingSession = false;
       // Reused from this same already-fetched `data` — no second Firestore
-      // read needed. See _injuryReviewAlreadyDismissed's field doc.
-      _injuryReviewAlreadyDismissed = data['injuryReviewDismissed'] == true;
+      // read needed. See _injuryReviewAlreadyDismissed's field doc. Falls
+      // back to the in-memory _dismissedInjuryReviewSessionRunIds set (see
+      // its own doc comment) so a dismissal whose Firestore write is still
+      // in flight/retrying still isn't re-shown on this same-app-run
+      // forceRefresh remount, even though the doc field itself isn't true
+      // yet.
+      _injuryReviewAlreadyDismissed = data['injuryReviewDismissed'] == true ||
+          _dismissedInjuryReviewSessionRunIds.contains(sessionRunId);
     });
     return true;
   }
@@ -903,7 +884,12 @@ class _GymSessionState extends State<GymSessionScreen> {
     }
   }
 
-  void _applyInjuryFilter() {
+  // Returns whether the dismissal was actually persisted to Firestore (or
+  // there was nothing to persist to, e.g. a standalone session) — false
+  // only when a real sessionRunId exists but every write attempt failed,
+  // so the caller (the sheet's "Confirm & Start" button) can surface that
+  // to the user instead of assuming it silently worked, as before.
+  Future<bool> _applyInjuryFilter() async {
     final toRemove = _flaggedExercises
         .where((f) => f['remove'] == true)
         .map((f) => f['index'] as int)
@@ -925,13 +911,41 @@ class _GymSessionState extends State<GymSessionScreen> {
           newExercises.add(_exercises[i]);
         }
       }
-      setState(() {
-        _exercises = newExercises;
-        _isInjuryFiltered = true;
-        _injuryReviewPending = false;
-      });
+      if (mounted) {
+        setState(() {
+          _exercises = newExercises;
+          _isInjuryFiltered = true;
+          _injuryReviewPending = false;
+        });
+      }
     } else {
-      setState(() => _injuryReviewPending = false);
+      if (mounted) setState(() => _injuryReviewPending = false);
+    }
+
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return true;
+
+    // _sessionRunId is populated by _createInProgressSession()'s own
+    // fire-and-forget write (see that field's doc comment) — awaiting the
+    // already-cached _sessionInitFuture here, instead of bailing out on a
+    // still-null _sessionRunId the way this used to, closes the race
+    // where a fast dismiss beat session creation and the persist below
+    // was silently skipped entirely.
+    if (_sessionRunId == null && _sessionInitFuture != null) {
+      try {
+        await _sessionInitFuture;
+      } catch (_) {
+        // _createInProgressSession already logs its own failure — handled
+        // below by sessionRunId still being null.
+      }
+    }
+
+    final sessionRunId = _sessionRunId;
+    if (sessionRunId == null) {
+      // Standalone session, or createInProgressSession itself failed —
+      // nothing to persist to either way; the in-memory removal above is
+      // already the whole story, same as before this change.
+      return true;
     }
 
     // Persists the dismissal — and whichever exercises were actually
@@ -939,21 +953,43 @@ class _GymSessionState extends State<GymSessionScreen> {
     // sessionRunId (the mid-plan-cardio return trip, or a full
     // app-kill-and-reopen) doesn't re-prompt for the same exercises and
     // doesn't silently reintroduce ones the user already chose to remove.
-    // Standalone sessions (sessionRunId == null) have nowhere to persist
-    // this to — the in-memory removal above is already the whole story
-    // for those, exactly as before this change. Fire-and-forget, matching
-    // this file's existing convention for non-critical-path writes (e.g.
-    // _createInProgressSession) — nothing after this call site depends on
-    // its completion.
-    final uid = AuthService().getCurrentUser()?.uid;
-    final sessionRunId = _sessionRunId;
-    if (uid != null && sessionRunId != null) {
-      FirestoreService()
+    // Awaited (not fire-and-forget) with one retry on failure — a dropped
+    // write here used to mean router.dart's forceRefresh remounts would
+    // re-show this same sheet on every subsequent cardio-block return
+    // trip for the rest of the session.
+    const maxAttempts = 2;
+    var persisted = false;
+    for (var attempt = 1; attempt <= maxAttempts && !persisted; attempt++) {
+      persisted = await FirestoreService()
           .dismissInjuryReview(uid, sessionRunId, removedOriginalIndices);
+      if (!persisted && attempt < maxAttempts) {
+        await Future.delayed(const Duration(milliseconds: 600));
+      }
     }
+
+    // Added regardless of whether the Firestore write ultimately
+    // succeeded — see _dismissedInjuryReviewSessionRunIds' own doc
+    // comment — so a still-failing write doesn't re-show this sheet again
+    // this app run even though the doc field itself never became true.
+    _dismissedInjuryReviewSessionRunIds.add(sessionRunId);
+
+    if (!persisted) {
+      print('_applyInjuryFilter: dismissInjuryReview failed after '
+          '$maxAttempts attempts for sessionRunId=$sessionRunId — '
+          'dismissal may not survive an app restart.');
+    }
+    return persisted;
   }
 
   Future<void> _showInjuryReviewSheet() async {
+    // Tracks the brief window where "Confirm & Start" is awaiting
+    // _applyInjuryFilter()'s now-awaited persist-with-retry (see that
+    // method's own doc comment) — disables the button and swaps its label
+    // for a spinner instead of popping the sheet immediately, so the user
+    // can't double-tap while a retry is in flight and always gets a
+    // truthful "did this save" outcome rather than the old fire-and-forget
+    // instant-close.
+    var isConfirming = false;
     await showModalBottomSheet(
       context: context,
       isDismissible: false,
@@ -1106,17 +1142,42 @@ class _GymSessionState extends State<GymSessionScreen> {
                             borderRadius: BorderRadius.circular(12),
                           ),
                         ),
-                        onPressed: () {
-                          Navigator.pop(ctx);
-                          _applyInjuryFilter();
-                        },
-                        child: const Text(
-                          'Confirm & Start',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
+                        onPressed: isConfirming
+                            ? null
+                            : () async {
+                                setSheetState(() => isConfirming = true);
+                                final persisted = await _applyInjuryFilter();
+                                if (!ctx.mounted) return;
+                                Navigator.pop(ctx);
+                                if (!persisted && mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        "Your injury review choice may not "
+                                        "have saved — it could re-prompt "
+                                        "later in this session.",
+                                      ),
+                                    ),
+                                  );
+                                }
+                              },
+                        child: isConfirming
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.4,
+                                  valueColor: AlwaysStoppedAnimation(
+                                      Colors.white),
+                                ),
+                              )
+                            : const Text(
+                                'Confirm & Start',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
                       ),
                     ),
                   ],
@@ -2999,7 +3060,7 @@ class _GymSessionState extends State<GymSessionScreen> {
                   ),
                 ),
                 Text(
-                  '0:${_restSecs.toString().padLeft(2, '0')}',
+                  '${_restSecs ~/ 60}:${(_restSecs % 60).toString().padLeft(2, '0')}',
                   style: const TextStyle(
                     fontSize: 22,
                     fontWeight: FontWeight.w800,
@@ -4129,19 +4190,60 @@ class _GymExerciseSearchSheetState
   String _query = '';
   String _muscleFilter = 'All';
 
+  // Fetched once when the sheet opens (see _loadExercises) rather than
+  // re-querying Firestore on every chip/search keystroke — _results below
+  // filters this in-memory list client-side. Used to filter the hardcoded
+  // _kGymExerciseLibrary const directly; that const has since been removed
+  // now that this Firestore-backed fetch is confirmed working.
+  List<Map<String, dynamic>> _allExercises = [];
+  bool _isLoading = true;
+  bool _hasError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadExercises();
+  }
+
+  Future<void> _loadExercises() async {
+    setState(() {
+      _isLoading = true;
+      _hasError = false;
+    });
+    try {
+      final exercises = await FirestoreService().getAllExercises();
+      if (!mounted) return;
+      setState(() {
+        _allExercises = exercises;
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _hasError = true;
+        _isLoading = false;
+      });
+    }
+  }
+
   @override
   void dispose() {
     _searchCtrl.dispose();
     super.dispose();
   }
 
-  List<Map<String, String>> get _results {
-    return _kGymExerciseLibrary.where((e) {
+  // muscle ?? 'Other' — some real exercise documents may lack a muscle
+  // field (see getAllExercises()'s own doc comment on incomplete
+  // documents); falling back to 'Other' here rather than an empty string
+  // keeps both the muscle-chip filter and the row's muscle label sensible
+  // instead of silently matching nothing / displaying blank.
+  List<Map<String, dynamic>> get _results {
+    return _allExercises.where((e) {
+      final name = (e['name'] as String?) ?? '';
+      final muscle = (e['muscle'] as String?) ?? 'Other';
       final nameMatch = _query.isEmpty ||
-          (e['name']?.toLowerCase().contains(_query.toLowerCase()) ??
-              false);
-      final muscleMatch =
-          _muscleFilter == 'All' || e['muscle'] == _muscleFilter;
+          name.toLowerCase().contains(_query.toLowerCase());
+      final muscleMatch = _muscleFilter == 'All' || muscle == _muscleFilter;
       return nameMatch && muscleMatch;
     }).toList();
   }
@@ -4266,15 +4368,21 @@ class _GymExerciseSearchSheetState
           const SizedBox(height: 6),
           const Divider(height: 1, color: WW.border),
           Expanded(
-            child: results.isEmpty
+            child: _isLoading
                 ? const Center(
-                    child: Text(
-                      'No exercises found',
-                      style: TextStyle(
-                          fontSize: 13, color: WW.textSec),
-                    ),
+                    child: CircularProgressIndicator(color: WW.primary),
                   )
-                : ListView.separated(
+                : _hasError
+                    ? _buildErrorState()
+                    : results.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No exercises found',
+                              style: TextStyle(
+                                  fontSize: 13, color: WW.textSec),
+                            ),
+                          )
+                        : ListView.separated(
                     padding:
                         const EdgeInsets.fromLTRB(18, 4, 18, 24),
                     itemCount: results.length,
@@ -4282,8 +4390,8 @@ class _GymExerciseSearchSheetState
                         const Divider(height: 1, color: WW.border),
                     itemBuilder: (_, i) {
                       final e = results[i];
-                      final name = e['name'] ?? '';
-                      final muscle = e['muscle'] ?? '';
+                      final name = (e['name'] as String?) ?? '';
+                      final muscle = (e['muscle'] as String?) ?? 'Other';
                       final added =
                           widget.alreadyAdded.contains(name);
                       return InkWell(
@@ -4349,6 +4457,47 @@ class _GymExerciseSearchSheetState
                       );
                     },
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildErrorState() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline_rounded,
+              size: 40, color: WW.textSec),
+          const SizedBox(height: 10),
+          const Text(
+            "Couldn't load exercises",
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: WW.text,
+            ),
+          ),
+          const SizedBox(height: 12),
+          GestureDetector(
+            onTap: _loadExercises,
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(
+                color: WW.primary,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Text(
+                'Retry',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+              ),
+            ),
           ),
         ],
       ),
