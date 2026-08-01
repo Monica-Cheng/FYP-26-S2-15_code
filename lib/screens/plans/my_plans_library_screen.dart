@@ -5,7 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
-import 'plans_screen.dart' show PlanCard;
+import 'plans_screen.dart' show RecentPlanRow;
 
 // Full-screen "My Plans Library" — every plan from plans_screen.dart's own
 // filtered set (isCustom-and-mine, or saved), with no 3-item cap. Replaces
@@ -125,17 +125,12 @@ class MyPlansLibraryScreen extends StatelessWidget {
         final plan = plans[i];
         final name = plan['name']?.toString() ?? 'Unnamed Plan';
         final type = plan['type']?.toString() ?? '';
-        final level = plan['level']?.toString() ?? '';
-        final days = (plan['daysPerWeek'] as num?)?.toInt() ?? 0;
-        final isCustom = level.toLowerCase() == 'custom';
-        return PlanCard(
+        final isCustom = plan['isCustom'] == true;
+        return RecentPlanRow(
           name: name,
           type: type,
-          level: level,
-          days: days,
-          chipLabel: isCustom ? 'Custom' : null,
-          chipTextColor: isCustom ? WW.teal : null,
-          chipBgColor: isCustom ? WW.tealBg : null,
+          isCustom: isCustom,
+          imageUrl: plan['imageUrl'] as String?,
           onTap: () => context.push(Routes.planDetail, extra: plan),
         );
       },

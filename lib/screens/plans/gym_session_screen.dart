@@ -84,7 +84,6 @@ class _SetData {
 class _ExerciseData {
   final String name;
   final String muscle;
-  String note;
   int restTime;
   final List<_SetData> sets;
   final bool isCardio;
@@ -127,7 +126,6 @@ class _ExerciseData {
   _ExerciseData({
     required this.name,
     required this.muscle,
-    this.note = '',
     this.restTime = 90,
     required this.sets,
     this.isCardio = false,
@@ -248,9 +246,6 @@ class _GymSessionState extends State<GymSessionScreen> {
 
   Timer? _elapsedTimer;
   Timer? _restTimer;
-
-  // Note controllers keyed by exercise index — persists text across exercise switches.
-  final Map<int, TextEditingController> _noteControllers = {};
 
   List<_ExerciseData> _exercises = [];
 
@@ -1379,19 +1374,9 @@ class _GymSessionState extends State<GymSessionScreen> {
   void dispose() {
     _elapsedTimer?.cancel();
     _restTimer?.cancel();
-    for (final c in _noteControllers.values) {
-      c.dispose();
-    }
     _finishNameController.dispose();
     _finishNotesController.dispose();
     super.dispose();
-  }
-
-  TextEditingController _noteController(int idx) {
-    return _noteControllers.putIfAbsent(
-      idx,
-      () => TextEditingController(text: _exercises[idx].note),
-    );
   }
 
   // ── Timers ──────────────────────────────────────────────────────────────────
@@ -2909,69 +2894,72 @@ class _GymSessionState extends State<GymSessionScreen> {
       children: [
         Scaffold(
           backgroundColor: WW.bg,
-          body: Column(
-            children: [
-              // Top bar extends to status bar edge.
-              Container(
-                color: WW.primaryDark,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(height: MediaQuery.of(context).padding.top),
-                    _buildTopBar(),
-                    if (_showRest) _buildRestBar(),
-                  ],
+          body: GestureDetector(
+            onTap: () => FocusScope.of(context).unfocus(),
+            child: Column(
+              children: [
+                // Top bar extends to status bar edge.
+                Container(
+                  color: WW.primaryDark,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(height: MediaQuery.of(context).padding.top),
+                      _buildTopBar(),
+                      if (_showRest) _buildRestBar(),
+                    ],
+                  ),
                 ),
-              ),
-              if (_isCompressed) _buildCompressedBanner(),
-              if (_isInjuryFiltered) _buildInjuryFilteredBanner(),
-              Expanded(
-                child: Stack(
-                  children: [
-                    Positioned.fill(
-                      child: ListView.builder(
-                        padding: _readOnly
-                            ? const EdgeInsets.fromLTRB(16, 12, 16, 32)
-                            : const EdgeInsets.fromLTRB(16, 12, 16, 100),
-                        itemCount: _exercises.length + (_readOnly ? 1 : 0),
-                        itemBuilder: (context, index) {
-                          if (_readOnly && index == 0) {
-                            return _buildReadOnlyHeader();
-                          }
-                          final actualIndex = _readOnly ? index - 1 : index;
-                          final ex = _exercises[actualIndex];
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 16),
-                            // actualIndex is only a valid Firestore blocks[]
-                            // position when nothing has ever been removed
-                            // from _exercises ahead of it — not guaranteed
-                            // once injury filtering has run (see
-                            // ex.originalIndex's own field doc). Only
-                            // _buildExerciseCard still needs actualIndex —
-                            // that's local _exercises list access (sets,
-                            // notes, rest timer), which must stay a real
-                            // array position; _buildCardioPlaceholderCard's
-                            // blockIndex, by contrast, is Firestore-bound
-                            // and must use the stable ex.originalIndex.
-                            child: ex.isCardio
-                                ? _buildCardioPlaceholderCard(
-                                    ex, ex.originalIndex)
-                                : _buildExerciseCard(actualIndex),
-                          );
-                        },
+                if (_isCompressed) _buildCompressedBanner(),
+                if (_isInjuryFiltered) _buildInjuryFilteredBanner(),
+                Expanded(
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: ListView.builder(
+                          padding: _readOnly
+                              ? const EdgeInsets.fromLTRB(16, 12, 16, 32)
+                              : const EdgeInsets.fromLTRB(16, 12, 16, 100),
+                          itemCount: _exercises.length + (_readOnly ? 1 : 0),
+                          itemBuilder: (context, index) {
+                            if (_readOnly && index == 0) {
+                              return _buildReadOnlyHeader();
+                            }
+                            final actualIndex = _readOnly ? index - 1 : index;
+                            final ex = _exercises[actualIndex];
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 16),
+                              // actualIndex is only a valid Firestore blocks[]
+                              // position when nothing has ever been removed
+                              // from _exercises ahead of it — not guaranteed
+                              // once injury filtering has run (see
+                              // ex.originalIndex's own field doc). Only
+                              // _buildExerciseCard still needs actualIndex —
+                              // that's local _exercises list access (sets,
+                              // notes, rest timer), which must stay a real
+                              // array position; _buildCardioPlaceholderCard's
+                              // blockIndex, by contrast, is Firestore-bound
+                              // and must use the stable ex.originalIndex.
+                              child: ex.isCardio
+                                  ? _buildCardioPlaceholderCard(
+                                      ex, ex.originalIndex)
+                                  : _buildExerciseCard(actualIndex),
+                            );
+                          },
+                        ),
                       ),
-                    ),
-                    if (!_readOnly)
-                      Positioned(
-                        bottom: 0,
-                        left: 0,
-                        right: 0,
-                        child: _buildStickyBottomBar(),
-                      ),
-                  ],
+                      if (!_readOnly)
+                        Positioned(
+                          bottom: 0,
+                          left: 0,
+                          right: 0,
+                          child: _buildStickyBottomBar(),
+                        ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
         if (_isSaving)
@@ -3518,26 +3506,6 @@ class _GymSessionState extends State<GymSessionScreen> {
               ],
             ),
           ),
-
-          // Per-exercise note
-          if (!_readOnly) ...[
-            const Divider(height: 1, color: WW.elevated),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-              child: TextField(
-                controller: _noteController(exIndex),
-                onChanged: (v) => ex.note = v,
-                decoration: const InputDecoration(
-                  hintText: 'Add note… (e.g. pause at bottom, grip width)',
-                  hintStyle: TextStyle(fontSize: 12, color: WW.textSec),
-                  border: InputBorder.none,
-                  isDense: true,
-                  contentPadding: EdgeInsets.symmetric(vertical: 10),
-                ),
-                style: const TextStyle(fontSize: 12, color: WW.text),
-              ),
-            ),
-          ],
         ],
       ),
     );

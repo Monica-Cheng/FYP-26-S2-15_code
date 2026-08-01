@@ -8,12 +8,15 @@ import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
+import '../../providers/month_activity_provider.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../widgets/common/month_calendar.dart';
 import '../../widgets/quick_add_sheet.dart';
 import '../../widgets/session_resume_prompt.dart';
 import '../plans/plans_screen.dart';
@@ -207,6 +210,10 @@ class _HomeTabState extends State<_HomeTab> {
 
   String? _displayName;
   bool _isLoadingName = true;
+  // Covers the whole "profile group" (display name, calorie goal settings,
+  // tracked plan id/name) — see _loadProfileGroup(). One flag for the
+  // group, not per-field, since all of it comes from one users/{uid} read.
+  bool _profileError = false;
   int _todaysCalories = 0;
   int _caloriesEaten = 0;
   int _dailyCalorieGoal = 500;
@@ -214,8 +221,14 @@ class _HomeTabState extends State<_HomeTab> {
   int _proteinG = 0;
   int _carbsG = 0;
   int _fatG = 0;
+  bool _isLoadingCalorieRing = true;
+  bool _calorieRingError = false;
   int _streakDays = 0;
+  bool _isLoadingStreak = true;
+  bool _streakError = false;
   Set<String> _sessionDates = {};
+  bool _isLoadingCalendar = true;
+  bool _calendarError = false;
   String _trackedPlanName = '';
   String _trackedPlanId = '';
   int _currentDayIndex = 1;
@@ -504,44 +517,55 @@ class _HomeTabState extends State<_HomeTab> {
     super.dispose();
   }
 
+  // Dispatches the 4 independent load groups below concurrently (each
+  // manages its own try/catch/setState/loading+error flags, so a failure
+  // in one never blanks the others — see prior investigation this session
+  // for why the old single-Future.wait version cascaded). Still `await`s
+  // all 4 so external callers (e.g. Quick Add's `.then((_) =>
+  // _loadUserData())`) see the same "fully refreshed" completion signal as
+  // before; total load time is unchanged since all 4 fire together, not
+  // sequentially.
   Future<void> _loadUserData() async {
     final uid = _authService.getCurrentUser()?.uid;
     if (uid == null) {
-      setState(() => _isLoadingName = false);
+      setState(() {
+        _isLoadingName = false;
+        _isLoadingCalorieRing = false;
+        _isLoadingStreak = false;
+        _isLoadingCalendar = false;
+      });
       return;
     }
+    await Future.wait([
+      _loadProfileGroup(uid),
+      _loadCalorieRingGroup(uid),
+      _loadStreakGroup(uid),
+      _loadWeekCalendarGroup(uid),
+    ]);
+  }
+
+  // Profile group: one users/{uid} read feeds display name, tracked plan
+  // id/name, and the calorie goal settings — calorieGoalActive/
+  // dailyCalorieGoal used to come from a SEPARATE getUserCalorieGoal(uid)
+  // read of this exact same doc; now read once here instead (same field
+  // names/defaults getUserCalorieGoal used internally). Also owns
+  // starting the plan-progress stream/today's-session load/missed-session
+  // check, since all three are gated on trackedPlanId, which lives here —
+  // previously they only ran after the old shared 7-future bundle
+  // succeeded as a whole.
+  Future<void> _loadProfileGroup(String uid) async {
     try {
-      final results = await Future.wait<dynamic>([
-        _firestoreService.getUserProfile(uid),
-        _firestoreService.getUserCalorieGoal(uid),
-        _firestoreService.getTodaysCalories(uid),
-        _firestoreService.getTodaysNutritionCalories(uid),
-        _firestoreService.calculateStreak(uid),
-        _firestoreService.getSessionDates(uid, days: 30),
-        _firestoreService.getTodaysNutritionMacros(uid),
-      ]);
+      final profile = await _firestoreService.getUserProfile(uid);
       if (!mounted) return;
-      final profile = results[0] as Map<String, dynamic>?;
-      final calGoal = results[1] as Map<String, dynamic>;
-      final todaysCal = results[2] as int;
-      final caloriesEaten = results[3] as int;
-      final streak = results[4] as int;
-      final sessionDates = results[5] as Set<String>;
-      final macros = results[6] as ({int proteinG, int carbsG, int fatG});
       final trackedPlanId = profile?['trackedPlanId'] as String? ?? '';
 
       setState(() {
         _displayName = profile?['displayName'] as String?;
         _isLoadingName = false;
-        _calorieGoalActive = calGoal['calorieGoalActive'] as bool? ?? false;
-        _dailyCalorieGoal = calGoal['dailyCalorieGoal'] as int? ?? 500;
-        _todaysCalories = todaysCal;
-        _caloriesEaten = caloriesEaten;
-        _proteinG = macros.proteinG;
-        _carbsG = macros.carbsG;
-        _fatG = macros.fatG;
-        _streakDays = streak;
-        _sessionDates = sessionDates;
+        _profileError = false;
+        _calorieGoalActive = profile?['calorieGoalActive'] as bool? ?? false;
+        _dailyCalorieGoal =
+            (profile?['dailyCalorieGoal'] as num?)?.toInt() ?? 500;
         _trackedPlanId = trackedPlanId;
         _trackedPlanName = profile?['trackedPlanName'] as String? ?? '';
       });
@@ -554,7 +578,99 @@ class _HomeTabState extends State<_HomeTab> {
         _checkMissedSession(uid);
       }
     } catch (_) {
-      if (mounted) setState(() => _isLoadingName = false);
+      if (mounted) {
+        setState(() {
+          _isLoadingName = false;
+          _profileError = true;
+        });
+      }
+    }
+  }
+
+  // Calorie ring group: getTodaysCalories(uid) + a single
+  // getTodaysNutritionLogs(uid) read, with caloriesEaten/protein/carbs/fat
+  // all derived locally from that one log list — getTodaysNutritionCalories
+  // and getTodaysNutritionMacros used to each independently re-run that
+  // same query. Field-level fallback logic (num? -> toInt() ?? 0) mirrors
+  // exactly what those two service methods did internally.
+  Future<void> _loadCalorieRingGroup(String uid) async {
+    try {
+      final results = await Future.wait<dynamic>([
+        _firestoreService.getTodaysCalories(uid),
+        _firestoreService.getTodaysNutritionLogs(uid),
+      ]);
+      if (!mounted) return;
+      final todaysCal = results[0] as int;
+      final logs = results[1] as List<Map<String, dynamic>>;
+
+      int caloriesEaten = 0;
+      int proteinG = 0;
+      int carbsG = 0;
+      int fatG = 0;
+      for (final log in logs) {
+        caloriesEaten += (log['calories'] as num?)?.toInt() ?? 0;
+        proteinG += (log['proteinG'] as num?)?.toInt() ?? 0;
+        carbsG += (log['carbsG'] as num?)?.toInt() ?? 0;
+        fatG += (log['fatG'] as num?)?.toInt() ?? 0;
+      }
+
+      setState(() {
+        _todaysCalories = todaysCal;
+        _caloriesEaten = caloriesEaten;
+        _proteinG = proteinG;
+        _carbsG = carbsG;
+        _fatG = fatG;
+        _isLoadingCalorieRing = false;
+        _calorieRingError = false;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isLoadingCalorieRing = false;
+          _calorieRingError = true;
+        });
+      }
+    }
+  }
+
+  // Streak group: calculateStreak(uid) alone.
+  Future<void> _loadStreakGroup(String uid) async {
+    try {
+      final streak = await _firestoreService.calculateStreak(uid);
+      if (!mounted) return;
+      setState(() {
+        _streakDays = streak;
+        _isLoadingStreak = false;
+        _streakError = false;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isLoadingStreak = false;
+          _streakError = true;
+        });
+      }
+    }
+  }
+
+  // Week calendar group: getSessionDates(uid, days: 30) alone.
+  Future<void> _loadWeekCalendarGroup(String uid) async {
+    try {
+      final sessionDates =
+          await _firestoreService.getSessionDates(uid, days: 30);
+      if (!mounted) return;
+      setState(() {
+        _sessionDates = sessionDates;
+        _isLoadingCalendar = false;
+        _calendarError = false;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isLoadingCalendar = false;
+          _calendarError = true;
+        });
+      }
     }
   }
 
@@ -805,6 +921,120 @@ class _HomeTabState extends State<_HomeTab> {
     );
   }
 
+  // Opens the full-month calendar in a bottom sheet — triggered by tapping
+  // the week strip's header (see _WeekCalendar's onHeaderTap). Same
+  // showModalBottomSheet + StatefulBuilder shape as
+  // _showNotificationsSheet() above (local sheet-scoped state via
+  // setSheetState, not this State's own setState, since the sheet's
+  // content lives in the Navigator's overlay, not this widget's own
+  // build() tree) — here it tracks which month is currently displayed so
+  // prev/next taps rebuild just the sheet, not the whole Home tab.
+  //
+  // MonthCalendar itself is a plain StatelessWidget with no Firestore/
+  // provider access of its own (see its doc comment) — this Consumer is
+  // what actually watches monthActivityProvider and threads the result
+  // down as props. Consumer works here without _HomeTabState itself being
+  // a ConsumerState, since main.dart already wraps the whole app in a
+  // ProviderScope.
+  void _openMonthCalendarModal() {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    final now = DateTime.now();
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        DateTime displayedMonth = DateTime(now.year, now.month, 1);
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return SizedBox(
+              height: MediaQuery.of(ctx).size.height * 0.75,
+              child: Scaffold(
+                backgroundColor: Colors.transparent,
+                body: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 36,
+                        height: 4,
+                        margin: const EdgeInsets.only(top: 10, bottom: 14),
+                        decoration: BoxDecoration(
+                          color: WW.border,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(18, 0, 18, 12),
+                      child: Text(
+                        'Activity Calendar',
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
+                          color: WW.primaryDark,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(18, 0, 18, 24),
+                        child: Consumer(
+                          builder: (context, ref, _) {
+                            final asyncData = ref.watch(
+                              monthActivityProvider(
+                                MonthKey(
+                                  uid: uid,
+                                  year: displayedMonth.year,
+                                  month: displayedMonth.month,
+                                ),
+                              ),
+                            );
+                            return asyncData.when(
+                              data: (data) => MonthCalendar(
+                                month: displayedMonth,
+                                dayStates: data.dayStates,
+                                streakDates: data.streakDates,
+                                onMonthChanged: (newMonth) => setSheetState(
+                                    () => displayedMonth = newMonth),
+                              ),
+                              loading: () => const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 60),
+                                child: Center(
+                                  child: CircularProgressIndicator(
+                                      color: WW.primary),
+                                ),
+                              ),
+                              error: (_, _) => const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 60),
+                                child: Center(
+                                  child: Text(
+                                    "Couldn't load calendar",
+                                    style: TextStyle(
+                                        fontSize: 13, color: WW.textSec),
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   String _notificationText(Map<String, dynamic> n) {
     final type = n['type'] as String? ?? '';
     final fromName = n['fromDisplayName'] as String? ?? 'Someone';
@@ -844,6 +1074,9 @@ class _HomeTabState extends State<_HomeTab> {
             child: _WeekCalendar(
               sessionDates: _sessionDates,
               streakDays: _streakDays,
+              streakError: !_isLoadingStreak && _streakError,
+              calendarError: !_isLoadingCalendar && _calendarError,
+              onHeaderTap: _openMonthCalendarModal,
             ),
           ),
           SliverToBoxAdapter(
@@ -857,6 +1090,7 @@ class _HomeTabState extends State<_HomeTab> {
                 proteinG: _proteinG,
                 carbsG: _carbsG,
                 fatG: _fatG,
+                hasError: !_isLoadingCalorieRing && _calorieRingError,
               ),
             ),
           ),
@@ -892,6 +1126,7 @@ class _HomeTabState extends State<_HomeTab> {
                 currentDayIndex: _currentDayIndex,
                 todayCompleted: _todayCompleted,
                 isCompressed: _isSessionCompressed,
+                hasError: _profileError,
               ),
             ),
           ),
@@ -940,6 +1175,10 @@ class _HomeTabState extends State<_HomeTab> {
                           letterSpacing: -0.4,
                         ),
                       ),
+                if (!_isLoadingName && _profileError) ...[
+                  const SizedBox(height: 2),
+                  const _SectionErrorHint(),
+                ],
               ],
             ),
           ),
@@ -1107,13 +1346,53 @@ class _ChallengeInviteStatusPill extends StatelessWidget {
   }
 }
 
+// ── Shared section error hint ─────────────────────────────────────────────────
+// Minimal, muted "this section's data may be stale" inline hint — an icon +
+// tiny caption in WW.textSec, matching this file's existing caption-style
+// hints (e.g. _CalorieRingCard's "Turn on calorie tracking..." line) rather
+// than a loud banner. Shown only when a specific load group's own error flag
+// is true; the section itself still falls back to its last-known/default
+// values underneath, this just makes that fallback visible instead of silent.
+class _SectionErrorHint extends StatelessWidget {
+  final String message;
+  const _SectionErrorHint({this.message = "Couldn't refresh"});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(Icons.info_outline_rounded, size: 12, color: WW.textSec),
+        const SizedBox(width: 4),
+        Text(
+          message,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w500,
+            color: WW.textSec,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 // ── Week calendar strip ───────────────────────────────────────────────────────
 
 class _WeekCalendar extends StatelessWidget {
   final Set<String> sessionDates;
   final int streakDays;
+  final bool streakError;
+  final bool calendarError;
+  final VoidCallback? onHeaderTap;
 
-  const _WeekCalendar({required this.sessionDates, required this.streakDays});
+  const _WeekCalendar({
+    required this.sessionDates,
+    required this.streakDays,
+    this.streakError = false,
+    this.calendarError = false,
+    this.onHeaderTap,
+  });
 
   static String _dateKey(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
@@ -1133,8 +1412,14 @@ class _WeekCalendar extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Header row: "This Week" label + streak pill
-            Row(
+            // Header row: "This Week" label + streak pill — tappable as a
+            // whole (not just the label) to open the full month-calendar
+            // modal, matching the larger-tap-target convention already
+            // used elsewhere in this file (e.g. the avatar/name area).
+            GestureDetector(
+              onTap: onHeaderTap,
+              behavior: HitTestBehavior.opaque,
+              child: Row(
               children: [
                 const Text(
                   'This Week',
@@ -1144,8 +1429,13 @@ class _WeekCalendar extends StatelessWidget {
                     color: WW.text,
                   ),
                 ),
+                if (onHeaderTap != null)
+                  const Icon(Icons.chevron_right_rounded,
+                      color: WW.textSec, size: 16),
                 const Spacer(),
-                if (streakDays > 0)
+                if (streakError)
+                  const _SectionErrorHint(message: 'Streak unavailable')
+                else if (streakDays > 0)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
@@ -1170,8 +1460,13 @@ class _WeekCalendar extends StatelessWidget {
                     ),
                   ),
               ],
+              ),
             ),
             const SizedBox(height: 12),
+            if (calendarError) ...[
+              const _SectionErrorHint(message: "Couldn't load activity"),
+              const SizedBox(height: 8),
+            ],
             // Day cells
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1268,6 +1563,7 @@ class _CalorieRingCard extends StatelessWidget {
   final int proteinG;
   final int carbsG;
   final int fatG;
+  final bool hasError;
 
   const _CalorieRingCard({
     required this.calories,
@@ -1277,6 +1573,7 @@ class _CalorieRingCard extends StatelessWidget {
     required this.proteinG,
     required this.carbsG,
     required this.fatG,
+    this.hasError = false,
   });
 
   @override
@@ -1295,6 +1592,10 @@ class _CalorieRingCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (hasError) ...[
+            const _SectionErrorHint(),
+            const SizedBox(height: 8),
+          ],
           goalActive
               ? _buildGoalMode(caloriesEaten, calories, goal, left,
                   intakeFraction, burnedFraction, leftFraction)
@@ -1401,6 +1702,17 @@ class _CalorieRingCard extends StatelessWidget {
       double intakeFraction,
       double burnedFraction,
       double leftFraction) {
+    // Display-only clamp — intakeFraction/burnedFraction/leftFraction above
+    // are computed from the raw, unclamped `left` in build() and passed to
+    // _CalorieRingPainter completely untouched; only the TEXT shown here
+    // floors at 0. Goal is a burn target (see Settings' "Daily burn
+    // target" copy), so a negative `left` just means today's burn goal
+    // was exceeded — that's surfaced as its own "+X over goal" chip below
+    // instead of a confusing negative number in the two text spots that
+    // used to show the raw value.
+    final displayLeft = left < 0 ? 0 : left;
+    final isOverGoal = left < 0;
+
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
@@ -1423,7 +1735,7 @@ class _CalorieRingCard extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    '$left',
+                    '$displayLeft',
                     style: const TextStyle(
                       fontSize: 22,
                       fontWeight: FontWeight.w800,
@@ -1468,11 +1780,47 @@ class _CalorieRingCard extends StatelessWidget {
               const SizedBox(height: 6),
               _statRow(WW.lightYellow, 'Gym or Cardio', '$caloriesBurned kcal'),
               const SizedBox(height: 6),
-              _statRow(WW.border, 'Left', '$left kcal'),
+              _statRow(WW.border, 'Left', '$displayLeft kcal'),
+              if (isOverGoal) ...[
+                const SizedBox(height: 8),
+                _overGoalChip(-left),
+              ],
             ],
           ),
         ),
       ],
+    );
+  }
+
+  // Same small-pill shape as _WeekCalendar's streak badge (Container,
+  // horizontal:10/vertical:4 padding, circular(20) radius, a light-tint
+  // background + matching bold icon/text color) — reused here rather than
+  // inventing new chip styling, per instruction. Shown only when the raw
+  // (unclamped) `left` above is negative, i.e. the burn goal was exceeded;
+  // reframes that as a positive achievement instead of the negative number
+  // it replaces in the two text spots above.
+  Widget _overGoalChip(int surplus) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: WW.tealBg,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.check_circle_rounded, color: WW.teal, size: 13),
+          const SizedBox(width: 4),
+          Text(
+            '+$surplus over goal',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: WW.teal,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1564,6 +1912,7 @@ class _TodayPlanCard extends StatefulWidget {
   final int currentDayIndex;
   final bool todayCompleted;
   final bool isCompressed;
+  final bool hasError;
 
   const _TodayPlanCard({
     required this.trackedPlanName,
@@ -1574,6 +1923,7 @@ class _TodayPlanCard extends StatefulWidget {
     this.currentDayIndex = 1,
     this.todayCompleted = false,
     this.isCompressed = false,
+    this.hasError = false,
   });
 
   @override
@@ -1588,9 +1938,22 @@ class _TodayPlanCardState extends State<_TodayPlanCard> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.trackedPlanName.isEmpty) return _buildEmptyState(context);
-    if (widget.todayIsRestDay) return _buildRestDayCard();
-    return _buildPlanCard(context);
+    final Widget content = widget.trackedPlanName.isEmpty
+        ? _buildEmptyState(context)
+        : widget.todayIsRestDay
+            ? _buildRestDayCard()
+            : _buildPlanCard(context);
+    if (!widget.hasError) return content;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(bottom: 6, left: 4),
+          child: _SectionErrorHint(),
+        ),
+        content,
+      ],
+    );
   }
 
   Widget _buildRestDayCard() {

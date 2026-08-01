@@ -787,9 +787,17 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                       const SizedBox(height: 12),
                       if (_isGym || _isCombined) ...[
                         ..._xpCardWidgets(),
-                        _buildBadgesCard(),
                         const SizedBox(height: 12),
                       ],
+                      // Badges are earned for ANY session type (gym,
+                      // plan-linked gym, cardio, combined) — this must NOT
+                      // share the XP card's gym/combined-only gate above.
+                      // _buildBadgesCard() itself renders nothing
+                      // (SizedBox.shrink()) when _newlyEarnedBadges is
+                      // empty, so it's safe to always include unconditionally
+                      // here regardless of session type.
+                      _buildBadgesCard(),
+                      const SizedBox(height: 12),
                       if (_isCardio && _hasRoute) ...[
                         _buildCardioMapSection(),
                         const SizedBox(height: 12),

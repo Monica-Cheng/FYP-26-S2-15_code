@@ -220,8 +220,6 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           'name': ex['name'] as String? ?? '',
           'muscle': ex['muscle'] as String? ?? '',
           'restTime': (ex['restTime'] as num?)?.toInt() ?? 90,
-          'note': ex['note'] as String? ?? '',
-          'showNote': false,
           'sets': sets,
         };
       }).toList();
@@ -263,8 +261,6 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         'name': name,
         'muscle': muscle,
         'restTime': 90,
-        'note': '',
-        'showNote': false,
         'sets': <Map<String, dynamic>>[
           _newSet(),
         ],
@@ -467,6 +463,27 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
     }
     setState(() {
       (_days[_activeDay]['exercises'] as List).removeAt(exIdx);
+      _hasChanges = true;
+    });
+  }
+
+  void _deleteDay(int dayIdx) {
+    if (_days.length <= 1) return;
+    // Clean up controllers for every set in every exercise on this day
+    final exercises =
+        _days[dayIdx]['exercises'] as List<Map<String, dynamic>>;
+    for (final ex in exercises) {
+      for (final s in (ex['sets'] as List<Map<String, dynamic>>)) {
+        _removeCtrlsForSet(s);
+      }
+    }
+    setState(() {
+      _days.removeAt(dayIdx);
+      if (_activeDay > dayIdx) {
+        _activeDay--;
+      } else if (_activeDay == dayIdx) {
+        _activeDay = _activeDay.clamp(0, _days.length - 1);
+      }
       _hasChanges = true;
     });
   }
@@ -769,8 +786,6 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         'name': '$activity ${minutes}min',
         'muscle': 'Cardio',
         'restTime': 0,
-        'note': '',
-        'showNote': false,
         'isCardio': true,
         'cardioActivity': activity,
         'cardioMinutes': minutes,
@@ -829,7 +844,6 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
             'name': ex['name'],
             'muscle': ex['muscle'],
             'restTime': ex['restTime'],
-            'note': ex['note'],
             'tag': 'Primary',
             'sets': sets,
             if (ex['isCardio'] == true) ...{
@@ -875,6 +889,12 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
       if (mounted) {
         setState(() => _hasChanges = false);
         _snack(_isEditMode ? 'Routine updated.' : 'Routine saved to All Plans.');
+        // Same short delay plan_detail_screen.dart's _handleDeleteCustomPlan
+        // already uses between showing a SnackBar and popping — popping
+        // immediately after showSnackBar() tears the route down before the
+        // SnackBar has actually rendered, so it was never visible at all.
+        await Future.delayed(const Duration(milliseconds: 600));
+        if (!mounted) return;
         context.pop(_isEditMode);
       }
     } catch (e) {
@@ -892,20 +912,23 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
     return Scaffold(
       backgroundColor: WW.bg,
       resizeToAvoidBottomInset: true,
-      body: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            _buildTopBar(),
-            _buildDayTabs(),
-            Expanded(
-              child: _isLoading
-                  ? const Center(
-                      child: CircularProgressIndicator(color: WW.primary),
-                    )
-                  : _buildExerciseList(),
-            ),
-          ],
+      body: GestureDetector(
+        onTap: () => FocusScope.of(context).unfocus(),
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              _buildTopBar(),
+              _buildDayTabs(),
+              Expanded(
+                child: _isLoading
+                    ? const Center(
+                        child: CircularProgressIndicator(color: WW.primary),
+                      )
+                    : _buildExerciseList(),
+              ),
+            ],
+          ),
         ),
       ),
       bottomNavigationBar: _buildFooter(),
@@ -1041,27 +1064,13 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           final active = i == _activeDay;
           return Padding(
             padding: const EdgeInsets.only(right: 8),
-            child: GestureDetector(
+            child: _DayTab(
+              label: _days[i]['label'] as String,
+              active: active,
+              canDelete: _days.length > 1,
               onTap: () => setState(() => _activeDay = i),
-              onLongPress: () => _showDayRenameDialog(i),
-              child: Container(
-                height: 36,
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                decoration: BoxDecoration(
-                  color: active ? WW.primary : WW.elevated,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Center(
-                  child: Text(
-                    _days[i]['label'] as String,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: active ? Colors.white : WW.textSec,
-                    ),
-                  ),
-                ),
-              ),
+              onRename: () => _showDayRenameDialog(i),
+              onDelete: () => _deleteDay(i),
             ),
           );
         },
@@ -1215,6 +1224,204 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
   }
 }
 
+// ── Day tab ────────────────────────────────────────────────────────────────────
+// Mirrors _ExerciseCard's overflow-menu pattern below: a small trigger opens
+// an Overlay-based popup (Rename / Delete Day) instead of only exposing
+// rename via long-press. Delete is guarded by widget.canDelete (hidden when
+// this is the last remaining day) — see _deleteDay's own guard in
+// _BuildRoutineScreenState.
+
+class _DayTab extends StatefulWidget {
+  final String label;
+  final bool active;
+  final bool canDelete;
+  final VoidCallback onTap;
+  final VoidCallback onRename;
+  final VoidCallback onDelete;
+
+  const _DayTab({
+    required this.label,
+    required this.active,
+    required this.canDelete,
+    required this.onTap,
+    required this.onRename,
+    required this.onDelete,
+  });
+
+  @override
+  State<_DayTab> createState() => _DayTabState();
+}
+
+class _DayTabState extends State<_DayTab> {
+  OverlayEntry? _overlayEntry;
+  final LayerLink _layerLink = LayerLink();
+
+  @override
+  void dispose() {
+    _closeMenu();
+    super.dispose();
+  }
+
+  void _openMenu() {
+    const menuWidth = 170.0;
+    // The old fixed Offset(-130, 28) was copied from _ExerciseCard's "⋮"
+    // menu below, whose CompositedTransformTarget wraps only a small icon
+    // near the right edge of a wide card — subtracting 130px there still
+    // lands on-screen. Here the target is the *whole* day-tab pill, which
+    // (for Day 1) sits flush against the row's left padding, so the same
+    // negative offset pushed the menu off-screen to the left. Instead,
+    // measure the tapped tab's real on-screen position/size and clamp the
+    // menu's left edge to stay within the screen on both sides, for any
+    // tab position.
+    final targetBox = context.findRenderObject() as RenderBox;
+    final targetGlobalPos = targetBox.localToGlobal(Offset.zero);
+    final targetSize = targetBox.size;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final clampedLeft = targetGlobalPos.dx.clamp(8.0, screenWidth - menuWidth - 8.0);
+    final menuOffset = Offset(
+      clampedLeft - targetGlobalPos.dx,
+      targetSize.height + 8,
+    );
+
+    _overlayEntry = OverlayEntry(
+      builder: (context) => Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: _closeMenu,
+              behavior: HitTestBehavior.opaque,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Positioned(
+            width: menuWidth,
+            child: CompositedTransformFollower(
+              link: _layerLink,
+              showWhenUnlinked: false,
+              offset: menuOffset,
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: WW.card,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: WW.border, width: 0.5),
+                    boxShadow: WW.shadow,
+                  ),
+                  child: IntrinsicWidth(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _menuItem(
+                          icon: Icons.edit_outlined,
+                          label: 'Rename Day',
+                          onTap: () {
+                            _closeMenu();
+                            widget.onRename();
+                          },
+                        ),
+                        if (widget.canDelete)
+                          _menuItem(
+                            icon: Icons.delete_outline_rounded,
+                            label: 'Delete Day',
+                            color: const Color(0xFFEF4444),
+                            onTap: () {
+                              _closeMenu();
+                              widget.onDelete();
+                            },
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    Overlay.of(context).insert(_overlayEntry!);
+  }
+
+  void _closeMenu() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+  }
+
+  Widget _menuItem({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    Color color = WW.text,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 15, color: color),
+            const SizedBox(width: 10),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: color,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CompositedTransformTarget(
+      link: _layerLink,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        onLongPress: widget.onRename,
+        child: Container(
+          height: 36,
+          padding: const EdgeInsets.only(left: 14, right: 4),
+          decoration: BoxDecoration(
+            color: widget.active ? WW.primary : WW.elevated,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: widget.active ? Colors.white : WW.textSec,
+                ),
+              ),
+              GestureDetector(
+                onTap: _openMenu,
+                child: Padding(
+                  padding: const EdgeInsets.all(6),
+                  child: Icon(
+                    Icons.arrow_drop_down_rounded,
+                    size: 16,
+                    color: widget.active ? Colors.white : WW.textSec,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ── Exercise card ──────────────────────────────────────────────────────────────
 
 class _ExerciseCard extends StatefulWidget {
@@ -1245,19 +1452,10 @@ class _ExerciseCardState extends State<_ExerciseCard> {
   bool _menuOpen = false;
   OverlayEntry? _overlayEntry;
   final LayerLink _layerLink = LayerLink();
-  late final TextEditingController _noteCtrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _noteCtrl = TextEditingController(
-        text: widget.exercise['note'] as String? ?? '');
-  }
 
   @override
   void dispose() {
     _closeMenu();
-    _noteCtrl.dispose();
     super.dispose();
   }
 
@@ -1301,8 +1499,6 @@ class _ExerciseCardState extends State<_ExerciseCard> {
   }
 
   void _openMenu() {
-    final showNote = _ex['showNote'] as bool? ?? false;
-
     _overlayEntry = OverlayEntry(
       builder: (context) => Stack(
         children: [
@@ -1332,15 +1528,6 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _menuItem(
-                          icon: Icons.sticky_note_2_outlined,
-                          label: showNote ? 'Hide Note' : 'Add Note',
-                          onTap: () {
-                            _closeMenu();
-                            setState(() => _ex['showNote'] = !showNote);
-                            widget.onChanged();
-                          },
-                        ),
                         _menuItem(
                           icon: Icons.swap_horiz_rounded,
                           label: 'Replace Exercise',
@@ -1384,7 +1571,6 @@ class _ExerciseCardState extends State<_ExerciseCard> {
     final name = _ex['name'] as String? ?? '';
     final muscle = _ex['muscle'] as String? ?? '';
     final restTime = _ex['restTime'] as int? ?? 90;
-    final showNote = _ex['showNote'] as bool? ?? false;
     final isCardio = _ex['isCardio'] as bool? ?? false;
     final cardioActivity = _ex['cardioActivity'] as String? ?? '';
     final cardioMinutes = _ex['cardioMinutes'] as int? ?? 30;
@@ -1615,31 +1801,6 @@ class _ExerciseCardState extends State<_ExerciseCard> {
               ),
             ),
           ],
-
-          // ── Note field ─────────────────────────────────────────────────────
-          if (showNote)
-            Container(
-              decoration: const BoxDecoration(
-                border: Border(top: BorderSide(color: WW.elevated, width: 1)),
-              ),
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-              child: TextField(
-                controller: _noteCtrl,
-                onChanged: (v) {
-                  _ex['note'] = v;
-                  widget.onChanged();
-                },
-                decoration: const InputDecoration(
-                  hintText: 'Add note… (e.g. pause at bottom, grip width)',
-                  hintStyle: TextStyle(fontSize: 12, color: WW.textSec),
-                  border: InputBorder.none,
-                  isDense: true,
-                  contentPadding: EdgeInsets.symmetric(vertical: 10),
-                ),
-                style: const TextStyle(fontSize: 12, color: WW.text),
-                maxLines: null,
-              ),
-            ),
             ],
           ),
         ),

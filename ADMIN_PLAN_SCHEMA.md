@@ -33,6 +33,7 @@ Nothing here is guessed or carried over from stale documentation.
 | `matchSport` | `string` | `"Running"` | Used by the same matching quiz. Fuzzy-matched against the user's sport preference — use a plain value like `"Gym"` or `"Running"`, not a phrase like `"Gym only"` (a real inconsistency found and fixed in production data during this work). |
 | `matchLevel` | `string` | `"Beginner"` | Used by the same matching quiz — exact match against the user's stated level. |
 | `designedBy` | `map` | see below | Optional but present on every real curated plan. |
+| `imageUrl` | `string` | `"https://storage.googleapis.com/.../plan-thumb.jpg"` | **Optional.** A Firebase Storage URL or external image URL for the plan's leading thumbnail (shown e.g. on the Plans tab's Current Plan card). Not present on any real curated plan yet. If omitted, null, empty, or the URL fails to load, the app falls back to a default icon — this is **not a blocking requirement** for the admin team, just recommended for a nicer visual. Irrelevant for user-built custom routines (`isCustom: true`), which always show a fixed icon regardless of this field. |
 | `sessions` | `array<map>` | see §2 | The actual weekly training template. |
 
 ### `designedBy` shape

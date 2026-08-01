@@ -5,12 +5,15 @@ import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
+import '../../providers/month_activity_provider.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../widgets/common/month_calendar.dart';
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
@@ -79,6 +82,16 @@ class _ProgressScreenState extends State<ProgressScreen> {
   bool _weightExpanded = true;
   StreamSubscription<List<Map<String, dynamic>>>? _weightSub;
   StreamSubscription<DocumentSnapshot>? _userDocSub;
+
+  // Activity Calendar section — collapsed by default (unlike
+  // _weightExpanded above) since it's a new, opt-in addition to an
+  // already chart-heavy tab, not a pre-existing section users expect open.
+  // _calendarMonth is separate from _timeFilter's W/M/Y scope entirely —
+  // this is its own independently-browsable month, backed by the same
+  // monthActivityProvider Home's week-strip modal already uses (see
+  // _buildCalendarSection() below for why they don't need to sync).
+  bool _calendarExpanded = false;
+  DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
 
   List<Map<String, dynamic>> _nutritionLogs = [];
   bool _nutritionLoading = true;
@@ -674,6 +687,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
           _sectionDivider(),
           const SizedBox(height: 12),
           _buildWeightSection(),
+          const SizedBox(height: 12),
+          _sectionDivider(),
+          const SizedBox(height: 12),
+          _buildCalendarSection(),
         ],
       ),
     );
@@ -1524,6 +1541,124 @@ class _ProgressScreenState extends State<ProgressScreen> {
                       }),
                       const SizedBox(height: 4),
                     ],
+                  ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // Same collapsible header shape as _buildWeightSection() above (icon
+  // chip + title + chevron, tap-to-toggle) — this section is new, so it
+  // gets its own _calendarExpanded flag rather than reusing _weightExpanded,
+  // and starts collapsed (see that field's own doc comment for why).
+  //
+  // Backed by monthActivityProvider — the exact same provider Home's
+  // week-strip drill-down modal already watches, keyed by MonthKey(uid,
+  // year, month). Riverpod caches per MonthKey, so revisiting a month
+  // already viewed in Home's modal (or vice versa) reuses that cached
+  // result instead of re-querying Firestore; navigating to a new month
+  // here triggers exactly one new getMonthActivity() call, same as it
+  // would from Home. _calendarMonth is this section's own independently-
+  // browsable month — deliberately NOT synced with _timeFilter (the
+  // existing This Week/Month/Year segmented control above): _timeFilter
+  // scopes the aggregate charts to a window anchored at "now" (last 7
+  // days / this calendar month / this calendar year), while this
+  // calendar lets you browse ANY past month directly — forcing them
+  // together would mean e.g. switching _timeFilter to "This Year" would
+  // need some undefined mapping onto a single month here, and switching
+  // this calendar to a past month would have to snap the whole tab's
+  // charts to some equivalent past scope the Week/Year filter can't even
+  // represent. They're independent by design, not an oversight.
+  Widget _buildCalendarSection() {
+    final uid = AuthService().getCurrentUser()?.uid;
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: () => setState(() => _calendarExpanded = !_calendarExpanded),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: WW.lavenderBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.calendar_month_rounded,
+                    color: WW.lavender,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Activity Calendar',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: WW.text,
+                    ),
+                  ),
+                ),
+                Icon(
+                  _calendarExpanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  color: WW.textSec,
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_calendarExpanded) ...[
+          const Divider(height: 1, color: WW.elevated),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: uid == null
+                ? const SizedBox.shrink()
+                : Consumer(
+                    builder: (context, ref, _) {
+                      final asyncData = ref.watch(
+                        monthActivityProvider(
+                          MonthKey(
+                            uid: uid,
+                            year: _calendarMonth.year,
+                            month: _calendarMonth.month,
+                          ),
+                        ),
+                      );
+                      return asyncData.when(
+                        data: (data) => MonthCalendar(
+                          month: _calendarMonth,
+                          dayStates: data.dayStates,
+                          streakDates: data.streakDates,
+                          onMonthChanged: (newMonth) =>
+                              setState(() => _calendarMonth = newMonth),
+                        ),
+                        loading: () => const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 40),
+                          child: Center(
+                            child:
+                                CircularProgressIndicator(color: WW.primary),
+                          ),
+                        ),
+                        error: (_, _) => const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 40),
+                          child: Center(
+                            child: Text(
+                              "Couldn't load calendar",
+                              style:
+                                  TextStyle(fontSize: 13, color: WW.textSec),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
           ),
         ],

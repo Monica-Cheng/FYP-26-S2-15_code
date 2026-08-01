@@ -574,15 +574,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
             ],
           ),
           const SizedBox(height: 8),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: progress.clamp(0.0, 1.0),
-              backgroundColor: WW.elevated,
-              valueColor: const AlwaysStoppedAnimation<Color>(WW.primary),
-              minHeight: 8,
-            ),
-          ),
+          PlanProgressBar(progress: progress),
           const SizedBox(height: 10),
           Wrap(
             spacing: 6,
@@ -799,6 +791,36 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+// ── Plan progress bar ─────────────────────────────────────────────────────────
+// Public (not the usual leading-underscore private convention for a
+// single-file widget) so plans_screen.dart's Current Plan card can reuse this
+// exact bar instead of duplicating a second copy of it — the only two places
+// in the app that show plan-progress as a bar.
+
+class PlanProgressBar extends StatelessWidget {
+  final double progress;
+  final double height;
+
+  const PlanProgressBar({
+    super.key,
+    required this.progress,
+    this.height = 8,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(4),
+      child: LinearProgressIndicator(
+        value: progress.clamp(0.0, 1.0),
+        backgroundColor: WW.elevated,
+        valueColor: const AlwaysStoppedAnimation<Color>(WW.primary),
+        minHeight: height,
       ),
     );
   }

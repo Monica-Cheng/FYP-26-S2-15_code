@@ -827,6 +827,15 @@ class FirestoreService {
   // exclusion here — that would silently change this method's pre-existing
   // behavior for every other caller (e.g. profile_screen.dart's lifetime
   // stats row), which is outside this change's scope.
+  //
+  // gymSessionCount/cardioSessionCount/combinedSessionCount (added for more
+  // granular badge conditions) are computed in this same loop for the same
+  // "already scanning every doc" reason. Unlike sessionCount, all three
+  // exclude manually-logged sessions (same exclusion as totalDistanceMeters
+  // above), and each counts ONLY its own pure type — a 'combined' session
+  // counts toward combinedSessionCount alone, never toward
+  // gymSessionCount/cardioSessionCount too, so the three never overlap and
+  // sum to (sessionCount - manually-logged count).
   // ---------------------------------------------------------------------------
   Future<Map<String, dynamic>> getLifetimeStats(String uid) async {
     final snapshot = await _db
@@ -838,6 +847,9 @@ class FirestoreService {
     int sessionCount = snapshot.docs.length;
     double totalVolume = 0;
     double totalDistanceMeters = 0;
+    int gymSessionCount = 0;
+    int cardioSessionCount = 0;
+    int combinedSessionCount = 0;
 
     for (final doc in snapshot.docs) {
       final data = doc.data();
@@ -850,6 +862,7 @@ class FirestoreService {
         final type = data['type'] as String? ?? '';
         if (type == 'cardio') {
           totalDistanceMeters += (data['distanceMeters'] as num?)?.toDouble() ?? 0;
+          cardioSessionCount++;
         } else if (type == 'combined') {
           final blocks = data['cardioBlocks'];
           if (blocks is List) {
@@ -859,6 +872,9 @@ class FirestoreService {
               }
             }
           }
+          combinedSessionCount++;
+        } else if (type == 'gym') {
+          gymSessionCount++;
         }
       }
     }
@@ -867,6 +883,9 @@ class FirestoreService {
       'sessionCount': sessionCount,
       'totalVolume': totalVolume,
       'totalDistanceMeters': totalDistanceMeters,
+      'gymSessionCount': gymSessionCount,
+      'cardioSessionCount': cardioSessionCount,
+      'combinedSessionCount': combinedSessionCount,
     };
   }
 
@@ -923,13 +942,15 @@ class FirestoreService {
   /// Each badge's conditions[] is a list of {statType, value} pairs,
   /// meaning "this stat >= value" — ALL conditions on a badge must pass
   /// (AND) for it to be earned. statType is one of: 'level', 'totalXp',
-  /// 'sessionCount', 'totalVolume', 'totalDistance', 'streak'.
+  /// 'sessionCount', 'totalVolume', 'totalDistance', 'streak',
+  /// 'gymSessionCount', 'cardioSessionCount', 'combinedSessionCount'.
   ///
   /// Only computes the specific stats actually referenced by at least one
   /// unearned badge's conditions — the union of every unearned badge's
   /// statTypes is computed first, and each underlying fetch
   /// (getUserProfile for level/totalXp, getLifetimeStats for
-  /// sessionCount/totalVolume/totalDistance, calculateStreak for streak)
+  /// sessionCount/totalVolume/totalDistance/gymSessionCount/
+  /// cardioSessionCount/combinedSessionCount, calculateStreak for streak)
   /// only runs if its stat(s) are actually needed. calculateStreak() in
   /// particular is a full, unbounded session-collection scan — skipping it
   /// entirely when nothing needs 'streak' avoids real, avoidable cost on
@@ -967,7 +988,10 @@ class FirestoreService {
 
     if (neededStatTypes.contains('sessionCount') ||
         neededStatTypes.contains('totalVolume') ||
-        neededStatTypes.contains('totalDistance')) {
+        neededStatTypes.contains('totalDistance') ||
+        neededStatTypes.contains('gymSessionCount') ||
+        neededStatTypes.contains('cardioSessionCount') ||
+        neededStatTypes.contains('combinedSessionCount')) {
       final lifetime = await getLifetimeStats(uid);
       if (neededStatTypes.contains('sessionCount')) {
         stats['sessionCount'] = (lifetime['sessionCount'] as num?)?.toInt() ?? 0;
@@ -978,6 +1002,18 @@ class FirestoreService {
       if (neededStatTypes.contains('totalDistance')) {
         stats['totalDistance'] =
             (lifetime['totalDistanceMeters'] as num?)?.toDouble() ?? 0;
+      }
+      if (neededStatTypes.contains('gymSessionCount')) {
+        stats['gymSessionCount'] =
+            (lifetime['gymSessionCount'] as num?)?.toInt() ?? 0;
+      }
+      if (neededStatTypes.contains('cardioSessionCount')) {
+        stats['cardioSessionCount'] =
+            (lifetime['cardioSessionCount'] as num?)?.toInt() ?? 0;
+      }
+      if (neededStatTypes.contains('combinedSessionCount')) {
+        stats['combinedSessionCount'] =
+            (lifetime['combinedSessionCount'] as num?)?.toInt() ?? 0;
       }
     }
 
@@ -1416,7 +1452,35 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
-  // Calculates the current workout streak for users/{uid}.
+  // Calculates the current workout streak for users/{uid} — just the
+  // count. Delegates to calculateStreakDates() (below) for the actual
+  // backward walk so the two never drift out of sync; see that method's
+  // doc comment for the full walk semantics (rest-day protection,
+  // manually-logged exclusion, the dailyActivityLog pre-history caveat).
+  // ---------------------------------------------------------------------------
+  Future<int> calculateStreak(String uid) async {
+    final dates = await calculateStreakDates(uid);
+    return dates.length;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Same walk as calculateStreak(), but returns the actual Set of
+  // 'yyyy-MM-dd' dates the walk counted — not just how many. Added for the
+  // month-calendar's fire-icon streak marker (lib/widgets/common/
+  // month_calendar.dart via monthActivityProvider).
+  //
+  // Deliberately NOT scoped to any particular calendar month, even though
+  // its only caller besides calculateStreak() feeds a month-at-a-time
+  // widget: the currently active streak is one global fact anchored at
+  // today, not a per-month one, and it can span across a month boundary
+  // (e.g. a 10-day streak with only 6 days elapsed in the currently
+  // viewed month means the other 4 streak days are in the previous
+  // month). Scoping this walk to a single month's own fetched data would
+  // silently clip the streak at day 1 of that month and under-render the
+  // fire icon on those early days. So this always re-walks from today
+  // regardless of which month the caller is displaying; the caller
+  // intersects this global Set against whichever month's dates it needs.
+  //
   // Counts consecutive days (going back from today) that either have at
   // least one real (non-manually-logged) session, OR were recorded as a
   // scheduled rest day via recordDailyActivityLog() — a rest day doesn't
@@ -1437,7 +1501,8 @@ class FirestoreService {
   // date, so there is no reliable way to derive "was date X a rest day"
   // after the fact — confirmed during investigation, deliberately out of
   // scope. Past dates before this log exists simply get no rest-day
-  // benefit and behave exactly as before this change.
+  // benefit and behave exactly as before this change (both here and in
+  // getMonthActivity()'s protectedRestDates below).
   //
   // A user who has never tracked a plan (or is between tracked plans)
   // never gets a dailyActivityLog entry at all for those days (see
@@ -1446,7 +1511,7 @@ class FirestoreService {
   // read isRestDay from) — such days correctly still require real
   // activity to keep the streak alive, with no special-casing needed here.
   // ---------------------------------------------------------------------------
-  Future<int> calculateStreak(String uid) async {
+  Future<Set<String>> calculateStreakDates(String uid) async {
     final snapshot = await _db
         .collection(Collections.users)
         .doc(uid)
@@ -1454,7 +1519,7 @@ class FirestoreService {
         .orderBy('date', descending: true)
         .get();
 
-    String _key(DateTime d) =>
+    String key(DateTime d) =>
         '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
     final sessionDates = <String>{};
@@ -1463,7 +1528,7 @@ class FirestoreService {
       if (data['isManuallyLogged'] == true) continue;
       final ts = data['date'];
       if (ts is Timestamp) {
-        sessionDates.add(_key(ts.toDate().toLocal()));
+        sessionDates.add(key(ts.toDate().toLocal()));
       }
     }
 
@@ -1477,11 +1542,11 @@ class FirestoreService {
         if (doc.data()['isRestDay'] == true) doc.id,
     };
 
-    if (sessionDates.isEmpty && restDates.isEmpty) return 0;
+    if (sessionDates.isEmpty && restDates.isEmpty) return {};
 
     bool dayCounts(DateTime d) {
-      final key = _key(d);
-      return sessionDates.contains(key) || restDates.contains(key);
+      final k = key(d);
+      return sessionDates.contains(k) || restDates.contains(k);
     }
 
     final now = DateTime.now();
@@ -1489,14 +1554,14 @@ class FirestoreService {
     // start counting from yesterday.
     DateTime check = dayCounts(now) ? now : now.subtract(const Duration(days: 1));
 
-    if (!dayCounts(check)) return 0;
+    if (!dayCounts(check)) return {};
 
-    int streak = 0;
+    final streakDates = <String>{};
     while (dayCounts(check)) {
-      streak++;
+      streakDates.add(key(check));
       check = check.subtract(const Duration(days: 1));
     }
-    return streak;
+    return streakDates;
   }
 
   // ---------------------------------------------------------------------------
@@ -1523,6 +1588,94 @@ class FirestoreService {
       }
     }
     return dates;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Returns per-date workout/rest-day activity for one calendar month for
+  // users/{uid} — the data source for the shared month-calendar widget
+  // (lib/widgets/common/month_calendar.dart, via monthActivityProvider),
+  // used both by Home's week-strip drill-down modal and Progress > Charts.
+  // Same explicit start/end Timestamp range-query shape as
+  // getSessionStats() (not a "last N days from now" window like
+  // getSessionDates() above), just deriving per-day presence instead of
+  // aggregate sums.
+  //
+  // Returns two plain Sets, not a UI-facing day-state enum — that
+  // 3-way classification (workout / protectedRest / neither) is the
+  // widget's own vocabulary, derived by the provider from these two Sets;
+  // this method stays a plain-data method like getSessionDates() above.
+  // Does NOT include streak-membership dates — see
+  // calculateStreakDates()'s own doc comment for why that's a deliberately
+  // separate, month-independent fetch (a streak can span a month
+  // boundary; scoping it to one month's own data would clip it).
+  //
+  //   'workoutDates': dates with a real (non-manually-logged) session.
+  //   'protectedRestDates': dates with a dailyActivityLog/{date} doc where
+  //     isRestDay == true. Per calculateStreakDates()'s doc comment, this
+  //     collection only has entries from whenever recordDailyActivityLog()
+  //     started being called for this user — months (or parts of months)
+  //     before that simply won't have any entries here, which is the
+  //     correct "falls back to 2-state" behavior for old history, not an
+  //     error to special-case.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, Set<String>>> getMonthActivity(
+    String uid,
+    int year,
+    int month,
+  ) async {
+    final startDate = DateTime(year, month, 1);
+    final endDate = DateTime(year, month + 1, 1);
+
+    String key(DateTime d) =>
+        '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    String dateKeyStr(int y, int m, int d) =>
+        '$y-${m.toString().padLeft(2, '0')}-${d.toString().padLeft(2, '0')}';
+
+    final sessionsSnapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(startDate))
+        .where('date', isLessThan: Timestamp.fromDate(endDate))
+        .get();
+
+    final workoutDates = <String>{};
+    for (final doc in sessionsSnapshot.docs) {
+      final data = doc.data();
+      if (data['isManuallyLogged'] == true) continue;
+      final ts = data['date'];
+      if (ts is Timestamp) {
+        workoutDates.add(key(ts.toDate().toLocal()));
+      }
+    }
+
+    // dailyActivityLog doc ids ARE 'yyyy-MM-dd' date strings, so a
+    // documentId range query scopes this to the same month directly —
+    // ISO date strings sort identically to chronological order, same
+    // trick used nowhere else yet in this file but safe/standard for
+    // Firestore doc-id range queries.
+    final startKey = dateKeyStr(year, month, 1);
+    final nextMonthYear = month == 12 ? year + 1 : year;
+    final nextMonth = month == 12 ? 1 : month + 1;
+    final endKey = dateKeyStr(nextMonthYear, nextMonth, 1);
+
+    final activityLogSnapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_dailyActivityLog)
+        .where(FieldPath.documentId, isGreaterThanOrEqualTo: startKey)
+        .where(FieldPath.documentId, isLessThan: endKey)
+        .get();
+
+    final protectedRestDates = <String>{
+      for (final doc in activityLogSnapshot.docs)
+        if (doc.data()['isRestDay'] == true) doc.id,
+    };
+
+    return {
+      'workoutDates': workoutDates,
+      'protectedRestDates': protectedRestDates,
+    };
   }
 
   // ---------------------------------------------------------------------------
