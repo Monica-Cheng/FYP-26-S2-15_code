@@ -329,12 +329,21 @@ class _HomeTabState extends State<_HomeTab> {
           .checkAndAdvanceDay(uid, sessions.length, planId);
       final sessionIdx = (effectiveDayIndex - 1) % sessions.length;
       final session = sessions[sessionIdx] as Map<String, dynamic>;
+      final isRestDay = session['isRestDay'] == true;
       if (!mounted) return;
       setState(() {
         _currentDayIndex = effectiveDayIndex;
         _todaySession = session;
-        _todayIsRestDay = session['isRestDay'] == true;
+        _todayIsRestDay = isRestDay;
       });
+      // This is the one place today's rest-day status is already known
+      // live — record it so calculateStreak() can later treat a scheduled
+      // rest day as not breaking the streak. Safe to call every time this
+      // method runs (initial load, plan-progress stream day-changes, plan
+      // switches) — recordDailyActivityLog() writes to a doc keyed by
+      // today's date with merge:true, so repeat calls the same day are a
+      // no-op in effect, not a duplicate-write concern.
+      await _firestoreService.recordDailyActivityLog(uid, isRestDay: isRestDay);
     } catch (_) {}
   }
 
@@ -808,7 +817,11 @@ class _HomeTabState extends State<_HomeTab> {
       case 'challenge_invite':
         return '$fromName invited you to challenge $challengeName';
       case 'challenge_friend_progress':
-        return '$fromName made progress on $challengeName';
+        return '$fromName made progress on challenge $challengeName';
+      case 'admin_broadcast':
+        // Unlike every other type, the admin's own message IS the display
+        // text — there's no sentence to construct from fromDisplayName here.
+        return n['message'] as String? ?? 'New notification from WiseWorkout';
       default:
         return 'New notification';
     }

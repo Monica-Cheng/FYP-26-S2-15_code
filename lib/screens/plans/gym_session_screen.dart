@@ -981,6 +981,90 @@ class _GymSessionState extends State<GymSessionScreen> {
     return persisted;
   }
 
+  // Blocks "Confirm & Start" when every flagged exercise is still on
+  // "Remove" and there are no cardio blocks in this session to fall back
+  // on — i.e. confirming right now would leave _exercises completely
+  // empty (a pure-gym day where an injury happened to flag everything).
+  // Cardio blocks are never eligible for removal here (see
+  // _checkExercisesForInjuries()'s `if (ex.isCardio) continue;`), so this
+  // can only ever trip when the session has zero of them. Reuses
+  // _blockAlreadyCompletedDay()'s exact single-button warning Dialog
+  // shape rather than inventing a new style — the only difference is this
+  // one doesn't navigate anywhere afterward: the review sheet underneath
+  // is still open, and the user just needs to go back and keep at least
+  // one exercise before confirming again.
+  Future<void> _showInjuryFilterEmptyWarning(BuildContext dialogParentCtx) {
+    return showDialog<void>(
+      context: dialogParentCtx,
+      builder: (dialogCtx) => Dialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: WW.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const Text(
+                'Keep at least one exercise',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  color: WW.text,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Every exercise is currently set to be removed, which would '
+                'leave this session with nothing to do. Keep at least one '
+                'to continue.',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: WW.textSec,
+                  height: 1.5,
+                ),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(dialogCtx),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: WW.primary,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    elevation: 0,
+                  ),
+                  child: const Text(
+                    'OK',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _showInjuryReviewSheet() async {
     // Tracks the brief window where "Confirm & Start" is awaiting
     // _applyInjuryFilter()'s now-awaited persist-with-retry (see that
@@ -1145,6 +1229,21 @@ class _GymSessionState extends State<GymSessionScreen> {
                         onPressed: isConfirming
                             ? null
                             : () async {
+                                // Same toRemove computation _applyInjuryFilter()
+                                // itself does internally — checked here first
+                                // so a would-be-empty result blocks the confirm
+                                // action instead of silently applying it (see
+                                // _showInjuryFilterEmptyWarning's own doc
+                                // comment for why this can only ever trip on a
+                                // pure-gym day).
+                                final toRemove = _flaggedExercises
+                                    .where((f) => f['remove'] == true)
+                                    .map((f) => f['index'] as int)
+                                    .toSet();
+                                if (_exercises.length - toRemove.length <= 0) {
+                                  await _showInjuryFilterEmptyWarning(ctx);
+                                  return;
+                                }
                                 setSheetState(() => isConfirming = true);
                                 final persisted = await _applyInjuryFilter();
                                 if (!ctx.mounted) return;
@@ -1326,6 +1425,17 @@ class _GymSessionState extends State<GymSessionScreen> {
   void _startSession() {
     setState(() => _readOnly = false);
     _startElapsedTimer();
+    // Fire-and-forget "recently used" tracking — the single central point
+    // every entry point (Home, Plans tab, Plan Detail preview, Plan
+    // Schedule) funnels through once the user actually starts (not just
+    // previews) a plan-linked session. Guarded on _planId being non-empty:
+    // a genuinely standalone session (no tracked plan at all — see
+    // _loadPlanSession's early-return when getTrackedPlan() finds nothing)
+    // leaves _planId at its default '', with nothing to record.
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid != null && _planId.isNotEmpty) {
+      FirestoreService().recordPlanAccess(uid, _planId);
+    }
   }
 
   void _cycleType(int exIndex, int si) {
@@ -1527,9 +1637,12 @@ class _GymSessionState extends State<GymSessionScreen> {
         // remains unchanged and still correct for the cardio finish
         // handlers' own, different use: deciding whether to return to the
         // plan for more blocks vs. show the real summary.
-        final finalSessionId = await FirestoreService()
+        final finalizeResult = await FirestoreService()
             .finalizeInProgressSession(uid, sessionRunId);
-        sessionData['sessionId'] = finalSessionId;
+        sessionData['sessionId'] = finalizeResult.sessionId;
+        if (finalizeResult.newlyEarnedBadges.isNotEmpty) {
+          sessionData['newlyEarnedBadges'] = finalizeResult.newlyEarnedBadges;
+        }
         if (!mounted) return;
         setState(() => _isSaving = false);
         context.go(Routes.postSessionSummary, extra: sessionData);
@@ -1563,6 +1676,7 @@ class _GymSessionState extends State<GymSessionScreen> {
     }
 
     String? sessionId;
+    List<Map<String, dynamic>> newlyEarnedBadges = [];
     try {
       print('Saving session for uid: $uid');
       print('Session data: $sessionData');
@@ -1578,6 +1692,10 @@ class _GymSessionState extends State<GymSessionScreen> {
           'reason': 'Completed ${sessionData['sessionName']} · $totalCompletedSets sets',
           'type': 'gym',
         });
+        // Checked right after addXpToUser() — level/XP/session-count/
+        // volume are only current as of that write, so this must run
+        // after it, not before.
+        newlyEarnedBadges = await FirestoreService().checkAndAwardBadges(uid);
       } else {
         print('saveGymSession skipped: no authenticated user');
       }
@@ -1586,6 +1704,9 @@ class _GymSessionState extends State<GymSessionScreen> {
     }
 
     if (sessionId != null) sessionData['sessionId'] = sessionId;
+    if (newlyEarnedBadges.isNotEmpty) {
+      sessionData['newlyEarnedBadges'] = newlyEarnedBadges;
+    }
 
     if (!mounted) return;
     setState(() => _isSaving = false);
@@ -2674,7 +2795,16 @@ class _GymSessionState extends State<GymSessionScreen> {
               ),
               const SizedBox(height: 12),
               GestureDetector(
-                onTap: () => context.pop(),
+                // context.go(Routes.home), not context.pop(): this rest-day
+                // screen can be reached via context.push() OR context.go()
+                // depending on entry point (see session_resume_prompt.dart's
+                // Resume flow / mid_plan_cardio_complete_screen.dart's
+                // "Next" button, both of which use context.go() and replace
+                // the whole navigation stack) — same reasoning as
+                // _blockAlreadyCompletedDay()/_handleLeaveSession() above.
+                // Routes.home is reachable regardless of how this screen was
+                // entered; context.pop() is not.
+                onTap: () => context.go(Routes.home),
                 child: Container(
                   width: double.infinity,
                   height: 50,
@@ -2741,7 +2871,19 @@ class _GymSessionState extends State<GymSessionScreen> {
                 ),
                 const SizedBox(height: 24),
                 GestureDetector(
-                  onTap: () => context.pop(),
+                  // context.go(Routes.home), not context.pop() — same
+                  // reasoning as the rest-day screen's "Back to Plans"
+                  // button above and _blockAlreadyCompletedDay()/
+                  // _handleLeaveSession() elsewhere in this file: this
+                  // empty-state screen (reached whenever _exercises is
+                  // empty, including via the injury filter — see
+                  // _applyInjuryFilter()) can be reached via a stack-
+                  // replacing context.go() (session_resume_prompt.dart's
+                  // Resume flow, mid_plan_cardio_complete_screen.dart's
+                  // "Next" button), which leaves nothing for context.pop()
+                  // to pop back to. Routes.home is always reachable
+                  // regardless of entry point.
+                  onTap: () => context.go(Routes.home),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                         horizontal: 24, vertical: 12),

@@ -478,10 +478,10 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
                       child: Center(
                         child: Text(
                           _fromPlan
-                              ? 'Start $_selectedActivity · Indoor'
+                              ? 'Start $_selectedActivity'
                               : _goalType == 'time'
                               ? 'Start · $_goalMinutes min'
-                              : 'Start · Open Run',
+                              : 'Start',
                           style: const TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w700,

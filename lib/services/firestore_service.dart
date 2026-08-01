@@ -12,6 +12,54 @@ class FirestoreService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   static const _planProgress = 'planProgress';
   static const _inProgressSessions = 'inProgressSessions';
+  // One doc per calendar day (doc id = yyyy-MM-dd, same convention as
+  // weightLogs/{date}), recording whether that day was a scheduled rest
+  // day for the user's tracked plan at the time — written by
+  // home_screen.dart's _loadTodaySession() the moment that's known, so
+  // calculateStreak() can later treat a rest day as not breaking the
+  // streak. Only exists going forward from whenever this write was first
+  // added — see calculateStreak()'s own doc comment for why retroactive
+  // backfill isn't possible.
+  static const _dailyActivityLog = 'dailyActivityLog';
+  // Admin-managed badge definitions (top-level, read-only from the app —
+  // same convention as challengeCategories/exercises) and each user's own
+  // persisted earned-badge record (users/{uid}/earnedBadges/{badgeId}).
+  // See getBadgeDefinitions()/checkAndAwardBadges() below.
+  static const _badges = 'badges';
+  static const _earnedBadges = 'earnedBadges';
+  // Mirror of a pending friend request on the SENDER's own side —
+  // users/{fromUid}/sentFriendRequests/{toUid} — written alongside the
+  // recipient-side users/{toUid}/friendRequests/{fromUid} doc. Exists so
+  // hasSentFriendRequest() can check "did I already send this?" as a
+  // self-scoped read (fromUid == the caller) instead of reading the
+  // RECIPIENT's private inbox, which owner-only rules correctly deny to
+  // anyone but the recipient themself.
+  static const _sentFriendRequests = 'sentFriendRequests';
+  // Denormalized leaderboard-safe mirror of a subset of users/{uid}
+  // (displayName, username, weeklyXp, level, leaderboardVisible,
+  // lastWeeklyXpUpdate) — exists so getFriendsLeaderboardStream() can read
+  // other users' data once users/{uid} itself is locked to owner-only
+  // reads. Kept in sync by every users/{uid} write site that touches any
+  // of those fields (see updateUserProfile()/saveOnboardingStep1()/
+  // addXpToUser()) — always in the same batch as the users/{uid} write, so
+  // the two docs can never be observed out of sync.
+  static const _publicProfiles = 'publicProfiles';
+
+  // The subset of users/{uid} fields getFriendsLeaderboardStream() actually
+  // reads — the single source of truth for which fields get mirrored into
+  // publicProfiles/{uid} by every write site below. weekStartDate is
+  // deliberately NOT included: addXpToUser() uses it purely as an internal
+  // anchor for its own lazy weekly-reset math and the leaderboard stream
+  // never reads it, so mirroring it would just be dead weight on the
+  // public doc.
+  static const _publicProfileFields = {
+    'displayName',
+    'username',
+    'weeklyXp',
+    'level',
+    'leaderboardVisible',
+    'lastWeeklyXpUpdate',
+  };
 
   // ---------------------------------------------------------------------------
   // Timing-plausibility constants for the per-set anti-gaming check (see
@@ -59,6 +107,13 @@ class FirestoreService {
   static const double _kFallbackGymCaloriesSetsCoefficient = 0.18;
   static const int _kFallbackGymCaloriesMin = 0;
   static const int _kFallbackGymCaloriesMax = 2000;
+  // The exact array _calculateLevel() hardcoded before this change —
+  // confirmed by re-reading the method fresh, not carried over from
+  // memory (it does NOT match the array this task's own prompt described;
+  // this is the real one).
+  static const List<num> _kFallbackLevelThresholds = [
+    0, 500, 1200, 2500, 4500, 7000, 10000, 14000, 19000, 25000, 32000,
+  ];
 
   // ---------------------------------------------------------------------------
   // Gamification/anti-cheat config — Firestore-configurable via
@@ -122,6 +177,31 @@ class FirestoreService {
     return current is num ? current : fallback;
   }
 
+  // Same reasoning/shape as _configNum() above, for a numeric ARRAY field
+  // (levelThresholds) instead of a scalar. Falls back to the whole
+  // `fallback` list if the field is missing, isn't a List, or contains
+  // ANY non-numeric element — a partially-malformed thresholds table
+  // (e.g. one entry accidentally saved as a string) is treated as fully
+  // invalid rather than silently computing levels off a corrupted list.
+  List<num> _configNumList(
+    Map<String, dynamic> config,
+    List<String> path,
+    List<num> fallback,
+  ) {
+    dynamic current = config;
+    for (final key in path) {
+      if (current is! Map) return fallback;
+      current = current[key];
+    }
+    if (current is! List) return fallback;
+    final result = <num>[];
+    for (final value in current) {
+      if (value is! num) return fallback;
+      result.add(value);
+    }
+    return result;
+  }
+
   // Shared by saveGymSession() and finalizeInProgressSession() — the one
   // place gym XP is now actually computed, collapsing what used to be two
   // separately-hardcoded `totalSets * 15` copies into a single source read
@@ -166,12 +246,36 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
   // Updates specific fields on an existing users/{uid} document.
   // Throws if the document does not exist — call createUserProfile first.
+  //
+  // This is a generic pass-through used by many screens for many different
+  // field sets (settings_screen.dart's leaderboard-visibility toggle,
+  // edit_profile_screen.dart's displayName/username, health_profile_screen
+  // .dart's body-profile save, plan tracking/goal fields elsewhere, etc.) —
+  // rather than chasing every individual caller, this single chokepoint
+  // mirrors whichever of _publicProfileFields happen to be present in
+  // [data] into publicProfiles/{uid}, in the same batch as the users/{uid}
+  // write, so it automatically covers every current AND future caller that
+  // touches a leaderboard-relevant field without needing special-casing.
   // ---------------------------------------------------------------------------
   Future<void> updateUserProfile(
     String uid,
     Map<String, dynamic> data,
   ) async {
-    await _db.collection(Collections.users).doc(uid).update(data);
+    final publicUpdates = <String, dynamic>{
+      for (final entry in data.entries)
+        if (_publicProfileFields.contains(entry.key)) entry.key: entry.value,
+    };
+
+    final batch = _db.batch();
+    batch.update(_db.collection(Collections.users).doc(uid), data);
+    if (publicUpdates.isNotEmpty) {
+      batch.set(
+        _db.collection(_publicProfiles).doc(uid),
+        publicUpdates,
+        SetOptions(merge: true),
+      );
+    }
+    await batch.commit();
   }
 
   // ---------------------------------------------------------------------------
@@ -189,9 +293,13 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
   // Checks whether a username is already taken by another user document.
   // ---------------------------------------------------------------------------
+  // Queries publicProfiles rather than users/{uid} — this is a cross-user
+  // query (no per-doc uid scoping), which users/{uid}'s owner-only rule
+  // cannot satisfy; publicProfiles mirrors username and is readable by any
+  // authenticated user (see _publicProfileFields).
   Future<bool> isUsernameTaken(String username) async {
     final snapshot = await _db
-        .collection(Collections.users)
+        .collection(_publicProfiles)
         .where('username', isEqualTo: username)
         .limit(1)
         .get();
@@ -203,15 +311,37 @@ class FirestoreService {
   // Expected keys in bodyProfile:
   //   displayName, dob, biologicalSex, heightCm, weightKg,
   //   preferredUnits, healthConnected, wearableConnected
+  //
+  // This is the very first write for a brand-new user — the users/{uid}
+  // doc doesn't exist before this (see createUserProfile()'s own doc
+  // comment; nothing else creates it first). So this is also the first
+  // time publicProfiles/{uid} gets created, seeded with just displayName/
+  // username (the only bodyProfile keys that are also in
+  // _publicProfileFields) — same batch as the users/{uid} write.
   // ---------------------------------------------------------------------------
   Future<void> saveOnboardingStep1(
     String uid,
     Map<String, dynamic> bodyProfile,
   ) async {
-    await _db
-        .collection(Collections.users)
-        .doc(uid)
-        .set(bodyProfile, SetOptions(merge: true));
+    final publicUpdates = <String, dynamic>{
+      for (final entry in bodyProfile.entries)
+        if (_publicProfileFields.contains(entry.key)) entry.key: entry.value,
+    };
+
+    final batch = _db.batch();
+    batch.set(
+      _db.collection(Collections.users).doc(uid),
+      bodyProfile,
+      SetOptions(merge: true),
+    );
+    if (publicUpdates.isNotEmpty) {
+      batch.set(
+        _db.collection(_publicProfiles).doc(uid),
+        publicUpdates,
+        SetOptions(merge: true),
+      );
+    }
+    await batch.commit();
   }
 
   // ---------------------------------------------------------------------------
@@ -679,7 +809,24 @@ class FirestoreService {
 
   // ---------------------------------------------------------------------------
   // Returns lifetime totals across all sessions for users/{uid}: session
-  // count and summed gym volume (kg). Used by the Profile stats row.
+  // count, summed gym volume (kg) — both used by the Profile stats row —
+  // and totalDistanceMeters, added for badge conditions (see
+  // checkAndAwardBadges()). totalDistanceMeters is computed in this SAME
+  // full-collection scan rather than as its own separate method/query —
+  // this method already reads every session doc for sessionCount/
+  // totalVolume, so deriving distance here too is free; a standalone
+  // getLifetimeDistanceMeters() would either duplicate the same full scan
+  // (wasteful) or just call this method and discard two of its three
+  // fields (pointless indirection). Uses the exact same type-aware
+  // branching as computeChallengeProgress() (cardio -> distanceMeters
+  // directly, combined -> sum cardioBlocks[].distanceMeters, gym -> 0),
+  // and excludes manually-logged sessions from the distance sum
+  // specifically — badge conditions need validated activity, same
+  // reasoning as computeChallengeProgress()/calculateStreak()'s identical
+  // exclusion. sessionCount/totalVolume deliberately do NOT gain this same
+  // exclusion here — that would silently change this method's pre-existing
+  // behavior for every other caller (e.g. profile_screen.dart's lifetime
+  // stats row), which is outside this change's scope.
   // ---------------------------------------------------------------------------
   Future<Map<String, dynamic>> getLifetimeStats(String uid) async {
     final snapshot = await _db
@@ -690,6 +837,7 @@ class FirestoreService {
 
     int sessionCount = snapshot.docs.length;
     double totalVolume = 0;
+    double totalDistanceMeters = 0;
 
     for (final doc in snapshot.docs) {
       final data = doc.data();
@@ -697,12 +845,188 @@ class FirestoreService {
       if (vol is num) {
         totalVolume += vol.toDouble();
       }
+
+      if (data['isManuallyLogged'] != true) {
+        final type = data['type'] as String? ?? '';
+        if (type == 'cardio') {
+          totalDistanceMeters += (data['distanceMeters'] as num?)?.toDouble() ?? 0;
+        } else if (type == 'combined') {
+          final blocks = data['cardioBlocks'];
+          if (blocks is List) {
+            for (final b in blocks) {
+              if (b is Map) {
+                totalDistanceMeters += (b['distanceMeters'] as num?)?.toDouble() ?? 0;
+              }
+            }
+          }
+        }
+      }
     }
 
     return {
       'sessionCount': sessionCount,
       'totalVolume': totalVolume,
+      'totalDistanceMeters': totalDistanceMeters,
     };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // BADGES
+  // badges/{badgeId} is admin-managed reference data (name, description,
+  // imageUrl, conditions[]) — read-only from the app, same convention as
+  // challengeCategories/exercises. users/{uid}/earnedBadges/{badgeId} is
+  // the persisted record of which badges a user has actually earned —
+  // once written, a badge is never re-evaluated or revoked, even if the
+  // admin later changes its conditions (see checkAndAwardBadges(), which
+  // only ever looks at NOT-yet-earned badges).
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Fetches all badge definitions. Read-only from the app; admin adds/
+  /// edits these directly in Firestore/the dashboard. Same fail-soft
+  /// convention as getChallengeCategories()/getInjuryCategories().
+  Future<List<Map<String, dynamic>>> getBadgeDefinitions() async {
+    try {
+      final snapshot = await _db.collection(_badges).get();
+      return snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// The set of badge ids [uid] has already earned — used by
+  /// profile_screen.dart to render earned vs. locked in the badges grid.
+  /// Fail-soft to an empty set (renders everything as locked, never
+  /// crashes) rather than throwing.
+  Future<Set<String>> getEarnedBadgeIds(String uid) async {
+    try {
+      final snapshot = await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .collection(_earnedBadges)
+          .get();
+      return snapshot.docs.map((doc) => doc.id).toSet();
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Checks every NOT-yet-earned badge definition against [uid]'s current
+  /// stats, and persists any newly-qualifying ones into
+  /// users/{uid}/earnedBadges/{badgeId}. Returns the full data (not just
+  /// ids) of every badge newly earned by THIS call, so a caller (e.g.
+  /// post_session_summary_screen.dart) can display a "you unlocked a new
+  /// badge" moment for exactly what changed just now — not the user's
+  /// full earned-badge history.
+  ///
+  /// Each badge's conditions[] is a list of {statType, value} pairs,
+  /// meaning "this stat >= value" — ALL conditions on a badge must pass
+  /// (AND) for it to be earned. statType is one of: 'level', 'totalXp',
+  /// 'sessionCount', 'totalVolume', 'totalDistance', 'streak'.
+  ///
+  /// Only computes the specific stats actually referenced by at least one
+  /// unearned badge's conditions — the union of every unearned badge's
+  /// statTypes is computed first, and each underlying fetch
+  /// (getUserProfile for level/totalXp, getLifetimeStats for
+  /// sessionCount/totalVolume/totalDistance, calculateStreak for streak)
+  /// only runs if its stat(s) are actually needed. calculateStreak() in
+  /// particular is a full, unbounded session-collection scan — skipping it
+  /// entirely when nothing needs 'streak' avoids real, avoidable cost on
+  /// every single session save.
+  Future<List<Map<String, dynamic>>> checkAndAwardBadges(String uid) async {
+    final allBadges = await getBadgeDefinitions();
+    if (allBadges.isEmpty) return [];
+
+    final earnedIds = await getEarnedBadgeIds(uid);
+    final unearned = allBadges
+        .where((b) => !earnedIds.contains(b['id'] as String))
+        .toList();
+    if (unearned.isEmpty) return [];
+
+    final neededStatTypes = <String>{
+      for (final badge in unearned)
+        for (final cond in (badge['conditions'] as List? ?? const []))
+          if (cond is Map && cond['statType'] is String)
+            cond['statType'] as String,
+    };
+    if (neededStatTypes.isEmpty) return [];
+
+    final stats = <String, num>{};
+
+    if (neededStatTypes.contains('level') ||
+        neededStatTypes.contains('totalXp')) {
+      final profile = await getUserProfile(uid);
+      if (neededStatTypes.contains('level')) {
+        stats['level'] = (profile?['level'] as num?)?.toInt() ?? 1;
+      }
+      if (neededStatTypes.contains('totalXp')) {
+        stats['totalXp'] = (profile?['totalXp'] as num?)?.toInt() ?? 0;
+      }
+    }
+
+    if (neededStatTypes.contains('sessionCount') ||
+        neededStatTypes.contains('totalVolume') ||
+        neededStatTypes.contains('totalDistance')) {
+      final lifetime = await getLifetimeStats(uid);
+      if (neededStatTypes.contains('sessionCount')) {
+        stats['sessionCount'] = (lifetime['sessionCount'] as num?)?.toInt() ?? 0;
+      }
+      if (neededStatTypes.contains('totalVolume')) {
+        stats['totalVolume'] = (lifetime['totalVolume'] as num?)?.toDouble() ?? 0;
+      }
+      if (neededStatTypes.contains('totalDistance')) {
+        stats['totalDistance'] =
+            (lifetime['totalDistanceMeters'] as num?)?.toDouble() ?? 0;
+      }
+    }
+
+    if (neededStatTypes.contains('streak')) {
+      stats['streak'] = await calculateStreak(uid);
+    }
+
+    final batch = _db.batch();
+    final newlyEarned = <Map<String, dynamic>>[];
+
+    for (final badge in unearned) {
+      final conditions = (badge['conditions'] as List?) ?? const [];
+      if (conditions.isEmpty) continue;
+
+      var allConditionsPass = true;
+      for (final cond in conditions) {
+        if (cond is! Map) {
+          allConditionsPass = false;
+          break;
+        }
+        final statType = cond['statType'] as String?;
+        final requiredValue = cond['value'];
+        if (statType == null || requiredValue is! num) {
+          allConditionsPass = false;
+          break;
+        }
+        final actual = stats[statType];
+        if (actual == null || actual < requiredValue) {
+          allConditionsPass = false;
+          break;
+        }
+      }
+
+      if (allConditionsPass) {
+        final badgeId = badge['id'] as String;
+        final ref = _db
+            .collection(Collections.users)
+            .doc(uid)
+            .collection(_earnedBadges)
+            .doc(badgeId);
+        batch.set(ref, {'earnedAt': FieldValue.serverTimestamp()});
+        newlyEarned.add(badge);
+      }
+    }
+
+    if (newlyEarned.isNotEmpty) {
+      await batch.commit();
+    }
+    return newlyEarned;
   }
 
   /// Returns the most recent set data for a given
@@ -1022,8 +1346,16 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
   // Adds xpEarned to the user's totalXp and weeklyXp, then recalculates and
   // updates their level. Uses merge:true so unrelated fields are untouched.
+  //
+  // weeklyXp/level/lastWeeklyXpUpdate are also mirrored into
+  // publicProfiles/{uid} in the same batch (weekStartDate is not — it's
+  // purely an internal anchor for this method's own lazy-reset math below,
+  // never read by getFriendsLeaderboardStream(), so it has no reason to
+  // exist on the public doc). totalXp is deliberately not mirrored either —
+  // it isn't one of the 6 fields the leaderboard stream reads.
   // ---------------------------------------------------------------------------
   Future<void> addXpToUser(String uid, int xpEarned) async {
+    final config = await getGamificationConfig();
     final doc = await _db.collection(Collections.users).doc(uid).get();
     final data = doc.data() ?? {};
     final newTotal = ((data['totalXp'] as num?)?.toInt() ?? 0) + xpEarned;
@@ -1037,14 +1369,26 @@ class FirestoreService {
         storedWeekStart.toDate().isBefore(currentWeekStart);
     final existingWeekly = (data['weeklyXp'] as num?)?.toInt() ?? 0;
     final newWeekly = isNewWeek ? xpEarned : existingWeekly + xpEarned;
+    final newLevel = _calculateLevel(newTotal, config);
+    // One serverTimestamp() sentinel, used on both docs — both writes
+    // commit in the same batch, so they resolve to the identical server
+    // commit time on both docs, not two independently-resolved timestamps.
+    final now = FieldValue.serverTimestamp();
 
-    await _db.collection(Collections.users).doc(uid).set({
+    final batch = _db.batch();
+    batch.set(_db.collection(Collections.users).doc(uid), {
       'totalXp': newTotal,
       'weeklyXp': newWeekly,
       'weekStartDate': Timestamp.fromDate(currentWeekStart),
-      'lastWeeklyXpUpdate': FieldValue.serverTimestamp(),
-      'level': _calculateLevel(newTotal),
+      'lastWeeklyXpUpdate': now,
+      'level': newLevel,
     }, SetOptions(merge: true));
+    batch.set(_db.collection(_publicProfiles).doc(uid), {
+      'weeklyXp': newWeekly,
+      'level': newLevel,
+      'lastWeeklyXpUpdate': now,
+    }, SetOptions(merge: true));
+    await batch.commit();
   }
 
   // Most recent Monday at local midnight (device-local time).
@@ -1054,8 +1398,16 @@ class FirestoreService {
     return DateTime(monday.year, monday.month, monday.day);
   }
 
-  static int _calculateLevel(int totalXp) {
-    const thresholds = [0, 500, 1200, 2500, 4500, 7000, 10000, 14000, 19000, 25000, 32000];
+  // Firestore-configurable via appConfig/gamification's levelThresholds
+  // field — same pattern as _computeGymXp()/_computeCardioXp() above,
+  // reading from the config map the caller already fetched (via the same
+  // cached getGamificationConfig(), not a separate fetch) rather than
+  // fetching its own copy. Falls back to _kFallbackLevelThresholds (the
+  // exact array this method hardcoded before) if the field is missing or
+  // malformed.
+  int _calculateLevel(int totalXp, Map<String, dynamic> config) {
+    final thresholds =
+        _configNumList(config, ['levelThresholds'], _kFallbackLevelThresholds);
     int level = 1;
     for (int i = 0; i < thresholds.length; i++) {
       if (totalXp >= thresholds[i]) level = i + 1;
@@ -1065,8 +1417,34 @@ class FirestoreService {
 
   // ---------------------------------------------------------------------------
   // Calculates the current workout streak for users/{uid}.
-  // Counts consecutive days (going back from today) with at least one session.
-  // If today has no session, yesterday is checked first — streak still counts.
+  // Counts consecutive days (going back from today) that either have at
+  // least one real (non-manually-logged) session, OR were recorded as a
+  // scheduled rest day via recordDailyActivityLog() — a rest day doesn't
+  // break the streak, but only for dates that have a dailyActivityLog
+  // entry at all. If today has neither yet, yesterday is checked first —
+  // streak still counts (today may still get logged/marked later).
+  //
+  // Manually-logged sessions are excluded from "day has activity" entirely
+  // (isManuallyLogged == true is skipped when building sessionDates) —
+  // same reasoning as computeChallengeProgress()'s identical exclusion:
+  // contributions must come from validated, anti-cheat-checked data only.
+  //
+  // dailyActivityLog only exists going forward from whenever
+  // recordDailyActivityLog() was first added — there is no retroactive
+  // reconstruction of past rest days. Plan-day progression
+  // (checkAndAdvanceDay()) is completion-driven, not calendar-anchored,
+  // and keeps no history of which plan/day was active on a given past
+  // date, so there is no reliable way to derive "was date X a rest day"
+  // after the fact — confirmed during investigation, deliberately out of
+  // scope. Past dates before this log exists simply get no rest-day
+  // benefit and behave exactly as before this change.
+  //
+  // A user who has never tracked a plan (or is between tracked plans)
+  // never gets a dailyActivityLog entry at all for those days (see
+  // home_screen.dart's _loadTodaySession(), which only calls
+  // recordDailyActivityLog() once it has a real tracked plan/session to
+  // read isRestDay from) — such days correctly still require real
+  // activity to keep the streak alive, with no special-casing needed here.
   // ---------------------------------------------------------------------------
   Future<int> calculateStreak(String uid) async {
     final snapshot = await _db
@@ -1076,28 +1454,45 @@ class FirestoreService {
         .orderBy('date', descending: true)
         .get();
 
-    if (snapshot.docs.isEmpty) return 0;
-
     String _key(DateTime d) =>
         '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
     final sessionDates = <String>{};
     for (final doc in snapshot.docs) {
-      final ts = doc.data()['date'];
+      final data = doc.data();
+      if (data['isManuallyLogged'] == true) continue;
+      final ts = data['date'];
       if (ts is Timestamp) {
         sessionDates.add(_key(ts.toDate().toLocal()));
       }
     }
 
-    final now = DateTime.now();
-    // If today has no session, start counting from yesterday.
-    DateTime check =
-        sessionDates.contains(_key(now)) ? now : now.subtract(const Duration(days: 1));
+    final restDaySnapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_dailyActivityLog)
+        .get();
+    final restDates = <String>{
+      for (final doc in restDaySnapshot.docs)
+        if (doc.data()['isRestDay'] == true) doc.id,
+    };
 
-    if (!sessionDates.contains(_key(check))) return 0;
+    if (sessionDates.isEmpty && restDates.isEmpty) return 0;
+
+    bool dayCounts(DateTime d) {
+      final key = _key(d);
+      return sessionDates.contains(key) || restDates.contains(key);
+    }
+
+    final now = DateTime.now();
+    // If today has neither real activity nor a recorded rest day yet,
+    // start counting from yesterday.
+    DateTime check = dayCounts(now) ? now : now.subtract(const Duration(days: 1));
+
+    if (!dayCounts(check)) return 0;
 
     int streak = 0;
-    while (sessionDates.contains(_key(check))) {
+    while (dayCounts(check)) {
       streak++;
       check = check.subtract(const Duration(days: 1));
     }
@@ -1435,6 +1830,37 @@ class FirestoreService {
         .set(fields, SetOptions(merge: true));
   }
 
+  // Records that `planId` was actually started (not merely previewed) —
+  // called fire-and-forget from gym_session_screen.dart's _startSession(),
+  // the single point every entry point (Home, Plans tab, Plan Detail
+  // preview, Plan Schedule) funnels through once "Start Session" is
+  // tapped. Reuses updatePlanProgress's existing merge:true set, which
+  // already creates the planProgress/{planId} doc if this plan was never
+  // tracked before — no separate initPlanProgress() call needed.
+  Future<void> recordPlanAccess(String uid, String planId) async {
+    await updatePlanProgress(uid, planId, {
+      'lastAccessedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // Bulk-reads every planProgress doc for uid in one query, keyed by
+  // planId (the Firestore doc id under users/{uid}/planProgress) — for
+  // callers that need a field like lastAccessedAt across several plans at
+  // once (see plans_screen.dart's Recently Used sort) without issuing one
+  // read per plan. This subcollection only ever holds docs for plans this
+  // user has tracked/accessed, so it stays small in practice — a single
+  // unfiltered .get() is simplest here; no whereIn/chunking needed the way
+  // a cross-user query would.
+  Future<Map<String, Map<String, dynamic>>> getAllPlanProgress(
+      String uid) async {
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_planProgress)
+        .get();
+    return {for (final doc in snapshot.docs) doc.id: doc.data()};
+  }
+
   // ---------------------------------------------------------------------------
   // Sets the user's tracked plan. Progress is stored per-plan in the
   // planProgress subcollection; only trackedPlanId/Name live on the user doc.
@@ -1528,6 +1954,34 @@ class FirestoreService {
       return newIndex;
     }
     return currentDayIndex;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Records whether today was a scheduled rest day for [uid]'s tracked plan
+  // — called from home_screen.dart's _loadTodaySession() right after that's
+  // determined, since that's the one place this information already exists
+  // live. Doc id is today's date (yyyy-MM-dd), and the write uses
+  // SetOptions(merge:true), so it's naturally idempotent — _loadTodaySession
+  // can (and does) call this more than once on the same day (once on
+  // initial load, again whenever the plan-progress stream reports a day
+  // change) without needing a separate check-then-write guard; repeated
+  // identical writes to the same doc id are safe.
+  //
+  // Deliberately does NOT also record whether the day had real activity —
+  // calculateStreak() already scans the full sessions collection anyway to
+  // build its own set of active dates, so deriving that signal there is
+  // free. Precomputing and caching it here would need an extra query at
+  // write time AND risk going stale (e.g. this fires on morning app-open,
+  // before an evening workout gets logged later the same day).
+  // ---------------------------------------------------------------------------
+  Future<void> recordDailyActivityLog(String uid, {required bool isRestDay}) async {
+    final today = DateTime.now().toString().substring(0, 10);
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_dailyActivityLog)
+        .doc(today)
+        .set({'isRestDay': isRestDay}, SetOptions(merge: true));
   }
 
   // ---------------------------------------------------------------------------
@@ -1720,7 +2174,8 @@ class FirestoreService {
   // Saves a completed cardio session to users/{uid}/sessions/{auto-id}.
   // XP is awarded at 0.5× calories, clamped to 20–500.
   // ---------------------------------------------------------------------------
-  Future<String> saveCardioSession({
+  Future<({String sessionId, List<Map<String, dynamic>> newlyEarnedBadges})>
+      saveCardioSession({
     required String uid,
     required String activity,
     required int durationSeconds,
@@ -1772,7 +2227,16 @@ class FirestoreService {
       'photoBase64': ?photoBase64,
       'mapSnapshotBase64': ?mapSnapshotBase64,
     });
-    return ref.id;
+
+    // Previously missing entirely for this session type — xpEarned was
+    // computed and stored on the session doc above but never actually
+    // credited to the user's totalXp/level (see addXpToUser()'s own doc
+    // comment for what it writes), and badges could never be checked after
+    // a cardio session either. Matches gym_session_screen.dart's standalone
+    // finish flow, which calls both right after its own session write.
+    await addXpToUser(uid, xpEarned);
+    final newlyEarnedBadges = await checkAndAwardBadges(uid);
+    return (sessionId: ref.id, newlyEarnedBadges: newlyEarnedBadges);
   }
 
   // ---------------------------------------------------------------------------
@@ -2112,7 +2576,8 @@ class FirestoreService {
   // task's scope), these currently total 0 for any block that was only
   // marked done without that data attached.
   // ---------------------------------------------------------------------------
-  Future<String> finalizeInProgressSession(
+  Future<({String sessionId, List<Map<String, dynamic>> newlyEarnedBadges})>
+      finalizeInProgressSession(
     String uid,
     String sessionRunId,
   ) async {
@@ -2412,7 +2877,17 @@ class FirestoreService {
         .add(sessionDoc);
 
     await docRef.delete();
-    return ref.id;
+
+    // Previously missing entirely for this session type (plan-linked
+    // gym/cardio/combined finishes) — xpEarned was computed and stored on
+    // the session doc above but never actually credited to the user's
+    // totalXp/level (see addXpToUser()'s own doc comment for what it
+    // writes), and badges could never be checked after these session types
+    // either. Matches gym_session_screen.dart's standalone finish flow,
+    // which calls both right after its own session write.
+    await addXpToUser(uid, xpEarned);
+    final newlyEarnedBadges = await checkAndAwardBadges(uid);
+    return (sessionId: ref.id, newlyEarnedBadges: newlyEarnedBadges);
   }
 
   // ---------------------------------------------------------------------------
@@ -2951,13 +3426,19 @@ class FirestoreService {
   /// Prefix-searches users by username. Returns uid, displayName,
   /// username for each match. Does not exclude the current user or
   /// existing friends — the UI layer filters those out.
+  // Queries publicProfiles rather than users/{uid} — same reasoning as
+  // isUsernameTaken() above: a cross-user query users/{uid}'s owner-only
+  // rule can't satisfy. Upper bound includes the  suffix (the
+  // highest valid Unicode code point) so this is a genuine prefix range
+  // (matches "test" -> "testa", "testb", ...) rather than an exact-match-
+  // only filter.
   Future<List<Map<String, dynamic>>> searchUsersByUsername(
     String query,
   ) async {
     final snapshot = await _db
-        .collection(Collections.users)
+        .collection(_publicProfiles)
         .where('username', isGreaterThanOrEqualTo: query)
-        .where('username', isLessThanOrEqualTo: '$query')
+        .where('username', isLessThanOrEqualTo: '$query')
         .limit(20)
         .get();
     return snapshot.docs.map((doc) {
@@ -2971,9 +3452,12 @@ class FirestoreService {
   }
 
   /// Sends a friend request from [fromUid] to [toUid]. Writes the
-  /// pending request doc and a notification doc in a single batch —
-  /// the first WriteBatch in this file — so they always succeed or
-  /// fail together.
+  /// pending request doc, a notification doc, AND a minimal marker on the
+  /// sender's own side (users/{fromUid}/sentFriendRequests/{toUid}) — all
+  /// in one batch, so they can never be observed out of sync. The marker
+  /// is deliberately minimal ({sentAt}) since its only job is letting the
+  /// sender check "did I already send this?" (see hasSentFriendRequest())
+  /// without needing to read the recipient's private inbox.
   Future<void> sendFriendRequest(
     String fromUid,
     String fromDisplayName,
@@ -2995,6 +3479,15 @@ class FirestoreService {
       'createdAt': FieldValue.serverTimestamp(),
     });
 
+    final sentRef = _db
+        .collection(Collections.users)
+        .doc(fromUid)
+        .collection(_sentFriendRequests)
+        .doc(toUid);
+    batch.set(sentRef, {
+      'sentAt': FieldValue.serverTimestamp(),
+    });
+
     final notificationRef = _db
         .collection(Collections.users)
         .doc(toUid)
@@ -3012,18 +3505,27 @@ class FirestoreService {
   }
 
   /// Whether [fromUid] already has a pending friend request sent to
-  /// [toUid] (i.e. users/{toUid}/friendRequests/{fromUid} exists).
+  /// [toUid]. Reads users/{fromUid}/sentFriendRequests/{toUid} — the
+  /// sender's OWN marker doc, not the recipient's private friendRequests
+  /// inbox (users/{toUid}/friendRequests/{fromUid}), which owner-only
+  /// rules correctly deny reading unless the caller IS toUid. This is a
+  /// self-scoped read (fromUid is always the caller here), so it's
+  /// unconditionally allowed under those same rules.
   Future<bool> hasSentFriendRequest(String toUid, String fromUid) async {
     final doc = await _db
         .collection(Collections.users)
-        .doc(toUid)
-        .collection(Collections.friendRequests)
         .doc(fromUid)
+        .collection(_sentFriendRequests)
+        .doc(toUid)
         .get();
     return doc.exists;
   }
 
-  /// Accepts a pending friend request: removes the request, writes a
+  /// Accepts a pending friend request: removes the request (both the
+  /// recipient-side friendRequests doc and the requester's own
+  /// sentFriendRequests marker — otherwise the marker would linger
+  /// forever, making hasSentFriendRequest() keep reporting "already
+  /// sent" for a request that's actually been resolved), writes a
   /// mirrored friends doc on both users, and notifies the requester.
   Future<void> acceptFriendRequest(
     String currentUid,
@@ -3041,6 +3543,13 @@ class FirestoreService {
         .collection(Collections.friendRequests)
         .doc(requesterUid);
     batch.delete(requestRef);
+
+    final sentRef = _db
+        .collection(Collections.users)
+        .doc(requesterUid)
+        .collection(_sentFriendRequests)
+        .doc(currentUid);
+    batch.delete(sentRef);
 
     final myFriendRef = _db
         .collection(Collections.users)
@@ -3082,18 +3591,32 @@ class FirestoreService {
     await batch.commit();
   }
 
-  /// Declines a pending friend request — deletes it silently, no
-  /// notification or other side effect.
+  /// Declines a pending friend request — deletes it silently (both the
+  /// recipient-side friendRequests doc and the requester's own
+  /// sentFriendRequests marker, in one batch, same reasoning as
+  /// acceptFriendRequest()'s cleanup above), no notification or other
+  /// side effect.
   Future<void> declineFriendRequest(
     String currentUid,
     String requesterUid,
   ) async {
-    await _db
+    final batch = _db.batch();
+
+    final requestRef = _db
         .collection(Collections.users)
         .doc(currentUid)
         .collection(Collections.friendRequests)
+        .doc(requesterUid);
+    batch.delete(requestRef);
+
+    final sentRef = _db
+        .collection(Collections.users)
         .doc(requesterUid)
-        .delete();
+        .collection(_sentFriendRequests)
+        .doc(currentUid);
+    batch.delete(sentRef);
+
+    await batch.commit();
   }
 
   /// Live stream of pending friend requests for [uid], newest first.
@@ -3155,6 +3678,14 @@ class FirestoreService {
   ///
   /// Users who have turned off leaderboardVisible are filtered out,
   /// except [uid]'s own row, which is always included.
+  ///
+  /// Reads publicProfiles/{uid} rather than users/{uid} — once real
+  /// security rules lock users/{uid} to owner-only reads, this whereIn
+  /// query (which by definition reads OTHER users' docs) would stop
+  /// working entirely against the private collection. publicProfiles only
+  /// ever carries the fields extracted below (see _publicProfileFields),
+  /// kept in sync by every users/{uid} write site that touches them —
+  /// same field names, so the extraction logic here is unchanged.
   Stream<List<Map<String, dynamic>>> getFriendsLeaderboardStream(
     String uid,
     List<String> friendUids,
@@ -3169,7 +3700,7 @@ class FirestoreService {
 
     final chunkStreams = chunks
         .map((chunk) => _db
-            .collection(Collections.users)
+            .collection(_publicProfiles)
             .where(FieldPath.documentId, whereIn: chunk)
             .snapshots())
         .toList();
@@ -3299,6 +3830,22 @@ class FirestoreService {
     }
   }
 
+  /// Reads a single challenge doc by id, or null if it doesn't exist.
+  /// Same fail-soft convention as getPlan()/getSession() — used by
+  /// challenge_detail_screen.dart/challenge_leaderboard_screen.dart, which
+  /// only have a challengeId (from a card tap or a route's `extra`) and
+  /// need the full doc to render.
+  Future<Map<String, dynamic>?> getChallenge(String challengeId) async {
+    try {
+      final doc =
+          await _db.collection(Collections.challenges).doc(challengeId).get();
+      if (!doc.exists) return null;
+      return {'id': doc.id, ...doc.data()!};
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Creates a user-made challenge (always private/invite-only — isGlobal
   /// is hardcoded false here; only an admin writing directly via Firebase
   /// Console can ever set isGlobal:true). The creator auto-joins
@@ -3337,27 +3884,86 @@ class FirestoreService {
     if (invitedUids.isNotEmpty) {
       final myProfile = await getUserProfile(uid);
       final myName = myProfile?['displayName'] as String? ?? 'Someone';
-      for (final invitedUid in invitedUids) {
-        final notificationRef = _db
-            .collection(Collections.users)
-            .doc(invitedUid)
-            .collection(Collections.notifications)
-            .doc();
-        batch.set(notificationRef, {
-          'type': 'challenge_invite',
-          'challengeId': challengeRef.id,
-          'challengeName': name,
-          'fromUid': uid,
-          'fromDisplayName': myName,
-          'read': false,
-          'status': 'pending',
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-      }
+      _writeChallengeInviteNotifications(
+        batch,
+        challengeId: challengeRef.id,
+        challengeName: name,
+        fromUid: uid,
+        fromDisplayName: myName,
+        invitedUids: invitedUids,
+      );
     }
 
     await batch.commit();
     return challengeRef.id;
+  }
+
+  /// Shared notification-writing shape for a challenge_invite — one entry
+  /// per invited uid, added to [batch] (not committed here). Used by both
+  /// createChallenge() (invites sent at creation time) and
+  /// inviteFriendsToChallenge() (invites sent later, from the challenge
+  /// detail screen) so the two call sites can never drift into writing
+  /// differently-shaped notification docs.
+  void _writeChallengeInviteNotifications(
+    WriteBatch batch, {
+    required String challengeId,
+    required String challengeName,
+    required String fromUid,
+    required String fromDisplayName,
+    required List<String> invitedUids,
+  }) {
+    for (final invitedUid in invitedUids) {
+      final notificationRef = _db
+          .collection(Collections.users)
+          .doc(invitedUid)
+          .collection(Collections.notifications)
+          .doc();
+      batch.set(notificationRef, {
+        'type': 'challenge_invite',
+        'challengeId': challengeId,
+        'challengeName': challengeName,
+        'fromUid': fromUid,
+        'fromDisplayName': fromDisplayName,
+        'read': false,
+        'status': 'pending',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
+  /// Invites more friends to an already-existing challenge — adds them to
+  /// invitedUids and sends each a challenge_invite notification, via the
+  /// same _writeChallengeInviteNotifications() shape createChallenge()
+  /// uses. One batch so the invitedUids update and every notification
+  /// succeed or fail together. Callers are expected to have already
+  /// filtered out uids that are already in participantUids/invitedUids
+  /// (arrayUnion alone would just no-op a duplicate, but would still
+  /// spam a fresh notification for someone already invited).
+  Future<void> inviteFriendsToChallenge(
+    String uid,
+    String challengeId,
+    String challengeName,
+    List<String> invitedUids,
+  ) async {
+    if (invitedUids.isEmpty) return;
+    final batch = _db.batch();
+    final challengeRef = _db.collection(Collections.challenges).doc(challengeId);
+    batch.update(challengeRef, {
+      'invitedUids': FieldValue.arrayUnion(invitedUids),
+    });
+
+    final myProfile = await getUserProfile(uid);
+    final myName = myProfile?['displayName'] as String? ?? 'Someone';
+    _writeChallengeInviteNotifications(
+      batch,
+      challengeId: challengeId,
+      challengeName: challengeName,
+      fromUid: uid,
+      fromDisplayName: myName,
+      invitedUids: invitedUids,
+    );
+
+    await batch.commit();
   }
 
   /// Accepts a challenge invite: moves [uid] from invitedUids to
@@ -3682,5 +4288,75 @@ class FirestoreService {
       });
       await batch.commit();
     }
+  }
+
+  /// Fetches leaderboard rows for every uid in [participantUids] of
+  /// [challengeId]: their cached progress value (challenges/{challengeId}/
+  /// progressCache/{uid}) joined with their display name (publicProfiles/
+  /// {uid}), sorted descending by progress. Reads progressCache rather
+  /// than recomputing each participant's progress live from their own
+  /// (private, owner-only-readable) sessions — matches the architecture
+  /// decision already made for this leaderboard.
+  ///
+  /// Batch reads, not N sequential awaited gets: both progressCache and
+  /// publicProfiles docs for one challenge's participants live in a
+  /// single collection each, so a `whereIn` on FieldPath.documentId
+  /// fetches an entire chunk of up to 30 uids in ONE round trip — the
+  /// same chunking pattern getFriendsLeaderboardStream() already uses for
+  /// Firestore's 30-value whereIn cap. In practice this is almost always
+  /// exactly 2 queries total (one chunk each for progressCache and
+  /// publicProfiles), regardless of how many participants there are, up
+  /// to 30.
+  ///
+  /// A participant with no progressCache doc yet (hasn't triggered
+  /// computeChallengeProgress()/the Cloud Function since joining) defaults
+  /// to a progress value of 0 rather than being dropped from the list.
+  Future<List<Map<String, dynamic>>> getChallengeLeaderboard(
+    String challengeId,
+    List<String> participantUids,
+  ) async {
+    if (participantUids.isEmpty) return [];
+
+    final chunks = <List<String>>[];
+    for (var i = 0; i < participantUids.length; i += 30) {
+      final end =
+          i + 30 > participantUids.length ? participantUids.length : i + 30;
+      chunks.add(participantUids.sublist(i, end));
+    }
+
+    final progressByUid = <String, double>{};
+    final profileByUid = <String, Map<String, dynamic>>{};
+
+    for (final chunk in chunks) {
+      final progressSnap = await _db
+          .collection(Collections.challenges)
+          .doc(challengeId)
+          .collection(_challengeProgressCache)
+          .where(FieldPath.documentId, whereIn: chunk)
+          .get();
+      for (final doc in progressSnap.docs) {
+        progressByUid[doc.id] = (doc.data()['value'] as num?)?.toDouble() ?? 0;
+      }
+
+      final profileSnap = await _db
+          .collection(_publicProfiles)
+          .where(FieldPath.documentId, whereIn: chunk)
+          .get();
+      for (final doc in profileSnap.docs) {
+        profileByUid[doc.id] = doc.data();
+      }
+    }
+
+    final entries = participantUids.map((uid) {
+      final profile = profileByUid[uid];
+      return <String, dynamic>{
+        'uid': uid,
+        'displayName': profile?['displayName'] as String? ?? 'User',
+        'value': progressByUid[uid] ?? 0.0,
+      };
+    }).toList();
+
+    entries.sort((a, b) => (b['value'] as double).compareTo(a['value'] as double));
+    return entries;
   }
 }

@@ -27,6 +27,14 @@ class _PlansScreenState extends State<PlansScreen> {
   final _firestoreService = FirestoreService();
   final _authService = AuthService();
   List<Map<String, dynamic>> _plans = [];
+  // Top 3 of `_plans`, sorted by planProgress's lastAccessedAt (descending)
+  // — recomputed by _loadPlans() every time `_plans` is. Never-accessed
+  // plans (no planProgress doc yet, or one without lastAccessedAt) sort
+  // after every accessed plan, keeping their relative order from `_plans`
+  // among themselves. Powers "Recently Used" (see _buildAllPlansSection);
+  // `_plans` itself stays the full unsorted filtered set, passed to
+  // MyPlansLibraryScreen via "See all".
+  List<Map<String, dynamic>> _recentPlans = [];
   bool _isLoading = true;
   bool _hasError = false;
   Map<String, dynamic>? _trackedPlan;
@@ -92,9 +100,40 @@ class _PlansScreenState extends State<PlansScreen> {
         final id = p['id'] as String? ?? '';
         return savedIds.contains(id);
       }).toList();
+
+      // Recently Used sort — lastAccessedAt is written by
+      // gym_session_screen.dart's _startSession() via recordPlanAccess().
+      // Bulk-fetched once (see getAllPlanProgress's own doc comment)
+      // rather than per-plan. Sorted with explicit original-index
+      // tiebreaking (not relying on List.sort's stability) so plans that
+      // were never accessed keep their existing relative order among
+      // themselves instead of being reshuffled.
+      Map<String, Map<String, dynamic>> progressById = {};
+      if (uid != null) {
+        try {
+          progressById = await _firestoreService.getAllPlanProgress(uid);
+        } catch (_) {}
+      }
+      final indexed = List<MapEntry<int, Map<String, dynamic>>>.generate(
+          filtered.length, (i) => MapEntry(i, filtered[i]));
+      indexed.sort((a, b) {
+        final aTs = progressById[a.value['id']]?['lastAccessedAt']
+            as Timestamp?;
+        final bTs = progressById[b.value['id']]?['lastAccessedAt']
+            as Timestamp?;
+        if (aTs == null && bTs == null) return a.key.compareTo(b.key);
+        if (aTs == null) return 1;
+        if (bTs == null) return -1;
+        final cmp = bTs.compareTo(aTs);
+        return cmp != 0 ? cmp : a.key.compareTo(b.key);
+      });
+      final recentPlans =
+          indexed.map((e) => e.value).take(3).toList();
+
       if (mounted) {
         setState(() {
           _plans = filtered;
+          _recentPlans = recentPlans;
           _isLoading = false;
         });
       }
@@ -178,12 +217,6 @@ class _PlansScreenState extends State<PlansScreen> {
       dayIndex: _trackedPlanDayIndex,
       startFresh: () async =>
           context.push(Routes.gymSession, extra: {'readOnly': true}),
-    );
-  }
-
-  void _snack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
     );
   }
 
@@ -547,7 +580,7 @@ class _PlansScreenState extends State<PlansScreen> {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             const Text(
-              'All Plans',
+              'Recently Used',
               style: TextStyle(
                 fontSize: 17,
                 fontWeight: FontWeight.w700,
@@ -555,7 +588,8 @@ class _PlansScreenState extends State<PlansScreen> {
               ),
             ),
             GestureDetector(
-              onTap: () => _snack('My plans library coming soon'),
+              onTap: () =>
+                  context.push(Routes.myPlansLibrary, extra: _plans),
               child: const Text(
                 'See all',
                 style: TextStyle(
@@ -578,16 +612,17 @@ class _PlansScreenState extends State<PlansScreen> {
         else if (_hasError)
           _buildPlansErrorState()
         else
-          ...List.generate(_plans.length, (i) {
-            final plan = _plans[i];
+          ...List.generate(_recentPlans.length, (i) {
+            final plan = _recentPlans[i];
             final name = plan['name']?.toString() ?? 'Unnamed Plan';
             final type = plan['type']?.toString() ?? '';
             final level = plan['level']?.toString() ?? '';
             final days = (plan['daysPerWeek'] as num?)?.toInt() ?? 0;
             final isCustom = level.toLowerCase() == 'custom';
             return Padding(
-              padding: EdgeInsets.only(bottom: i < _plans.length - 1 ? 10 : 0),
-              child: _PlanCard(
+              padding: EdgeInsets.only(
+                  bottom: i < _recentPlans.length - 1 ? 10 : 0),
+              child: PlanCard(
                 name: name,
                 type: type,
                 level: level,
@@ -729,8 +764,12 @@ class _TrainCard extends StatelessWidget {
 }
 
 // ── Plan card ─────────────────────────────────────────────────────────────────
+// Public (not the usual leading-underscore private convention for a
+// single-file widget) so my_plans_library_screen.dart can reuse it
+// directly instead of duplicating this markup — the only two places in
+// the app that render a plan summary in this list-row style.
 
-class _PlanCard extends StatelessWidget {
+class PlanCard extends StatelessWidget {
   final String name;
   final String type;
   final String level;
@@ -740,7 +779,8 @@ class _PlanCard extends StatelessWidget {
   final Color? chipBgColor;
   final VoidCallback onTap;
 
-  const _PlanCard({
+  const PlanCard({
+    super.key,
     required this.name,
     required this.type,
     required this.level,

@@ -889,9 +889,12 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
       }
 
       String? finalSessionId;
+      List<Map<String, dynamic>> newlyEarnedBadges = [];
       try {
-        finalSessionId = await FirestoreService()
+        final finalizeResult = await FirestoreService()
             .finalizeInProgressSession(uid, sessionRunId);
+        finalSessionId = finalizeResult.sessionId;
+        newlyEarnedBadges = finalizeResult.newlyEarnedBadges;
       } catch (_) {}
 
       if (!mounted) return;
@@ -908,6 +911,8 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
         'cardioCalories': _calories.round(),
         'goalMinutes': _goalMinutes,
         'sessionId': finalSessionId,
+        if (newlyEarnedBadges.isNotEmpty)
+          'newlyEarnedBadges': newlyEarnedBadges,
       });
       return;
     }
@@ -924,6 +929,7 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
         trimmedFinishName.isEmpty ? defaultSessionName : trimmedFinishName;
 
     String? sessionId;
+    List<Map<String, dynamic>> newlyEarnedBadges = [];
     if (uid != null) {
       try {
         double? avgHR;
@@ -942,7 +948,7 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
         if (finishPhoto != null) {
           photoBase64 = await _encodeFinishPhotoForSession(finishPhoto);
         }
-        sessionId = await FirestoreService().saveCardioSession(
+        final saveResult = await FirestoreService().saveCardioSession(
           uid: uid,
           activity: _activity,
           // _activeSeconds (gated) — mirrors outdoor's own
@@ -956,6 +962,8 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
           notes: trimmedFinishNotes.isEmpty ? null : trimmedFinishNotes,
           photoBase64: photoBase64,
         );
+        sessionId = saveResult.sessionId;
+        newlyEarnedBadges = saveResult.newlyEarnedBadges;
       } catch (_) {}
     }
     if (!mounted) return;
@@ -972,6 +980,8 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
       'cardioCalories': _calories.round(),
       'goalMinutes': _goalMinutes,
       'sessionId': sessionId,
+      if (newlyEarnedBadges.isNotEmpty)
+        'newlyEarnedBadges': newlyEarnedBadges,
     });
   }
 

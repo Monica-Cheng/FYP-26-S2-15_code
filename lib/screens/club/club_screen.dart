@@ -19,87 +19,41 @@ String _fmtXp(int xp) {
   return '$xp';
 }
 
-// ── Data types ────────────────────────────────────────────────────────────────
+// ── Challenge display helpers ────────────────────────────────────────────────
+// Small pure functions shared by both the "My Challenges" and "Discover"
+// cards below — a distinctive color per category (kept to this app's
+// existing WW palette, no new colors) and a compact squircle-badge label
+// ("5K", "500cal", "60min") derived directly from the challenge's own
+// goalValue/unit fields, never hardcoded per-challenge data.
 
-class _Challenge {
-  final String name;
-  final String detail;
-  final Color gradStart;
-  final Color gradEnd;
-  final int pct;
-  final Color pctColor;
-  const _Challenge({
-    required this.name,
-    required this.detail,
-    required this.gradStart,
-    required this.gradEnd,
-    required this.pct,
-    required this.pctColor,
-  });
+Color _challengeCategoryColor(String metricType) {
+  switch (metricType) {
+    case 'distance':
+      return WW.teal;
+    case 'calories':
+      return WW.gold;
+    case 'duration':
+      return WW.lavender;
+    default:
+      return WW.primary;
+  }
 }
 
-class _DiscoverCard {
-  final String name;
-  final int participants;
-  final int xp;
-  final Color gradStart;
-  final Color gradEnd;
-  const _DiscoverCard({
-    required this.name,
-    required this.participants,
-    required this.xp,
-    required this.gradStart,
-    required this.gradEnd,
-  });
+String _fmtChallengeNum(double value) {
+  return value == value.roundToDouble()
+      ? value.toInt().toString()
+      : value.toStringAsFixed(1);
 }
 
-class _MiniEntry {
-  final String initial;
-  final Color color;
-  final String name;
-  final int pct;
-  const _MiniEntry({
-    required this.initial,
-    required this.color,
-    required this.name,
-    required this.pct,
-  });
+String _challengeBadgeLabel(double goalValue, String unit) {
+  final valueStr = _fmtChallengeNum(goalValue);
+  switch (unit) {
+    case 'km':
+      return '${valueStr}K';
+    default:
+      return '$valueStr$unit';
+  }
 }
-
-// ── Hardcoded data ────────────────────────────────────────────────────────────
-
-const _kActiveChallenges = <_Challenge>[
-  _Challenge(
-    name: '10k Steps Squad',
-    detail: '50,000 steps total · 4 participants · Ends May 18',
-    gradStart: WW.primaryDark,
-    gradEnd: WW.teal,
-    pct: 68,
-    pctColor: WW.teal,
-  ),
-  _Challenge(
-    name: 'Weekly Run Club',
-    detail: '20 km this week · 3 participants · Ends May 17',
-    gradStart: WW.teal,
-    gradEnd: WW.primary,
-    pct: 45,
-    pctColor: WW.primary,
-  ),
-];
-
-const _kDiscoverChallenges = <_DiscoverCard>[
-  _DiscoverCard(name: 'May Strength Month', participants: 142, xp: 500, gradStart: WW.primaryDark, gradEnd: WW.primary),
-  _DiscoverCard(name: '5K Every Week',      participants: 89,  xp: 300, gradStart: WW.primary,     gradEnd: WW.lavender),
-  _DiscoverCard(name: '30-Day Core',        participants: 67,  xp: 400, gradStart: WW.gold,        gradEnd: WW.primary),
-];
-
-// Participants in the 10k Steps Squad challenge
-const _kMiniLeader = <_MiniEntry>[
-  _MiniEntry(initial: 'M', color: WW.primary,  name: 'You',       pct: 68),
-  _MiniEntry(initial: 'A', color: WW.gold,     name: 'Alex Chen', pct: 55),
-  _MiniEntry(initial: 'S', color: WW.teal,     name: 'Sarah K',   pct: 42),
-  _MiniEntry(initial: 'J', color: WW.lavender, name: 'James L',   pct: 30),
-];
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -129,6 +83,14 @@ class _ClubScreenState extends State<ClubScreen> {
   // scopes its query to friend uids — see _buildLeaderboardTab().
   List<Map<String, dynamic>> _friends = [];
   StreamSubscription<List<Map<String, dynamic>>>? _friendsSub;
+
+  // Bumped by the Challenges tab's error-state Retry buttons — changing
+  // the StreamBuilder's key forces a fresh subscription (and therefore a
+  // fresh query attempt) instead of relying on the fact that
+  // getMyChallengesStream()/getDiscoverableChallengesStream() happen to
+  // return a new Stream instance on every rebuild anyway.
+  int _myChallengesRetryCount = 0;
+  int _discoverChallengesRetryCount = 0;
 
   static const _subtabLabels = ['Leaderboard', 'Challenges', 'Feed'];
   static const _kDivider = Color(0xFFE8EAF8);
@@ -393,27 +355,6 @@ class _ClubScreenState extends State<ClubScreen> {
                   );
                 }),
               ),
-              const SizedBox(height: 20),
-              const Padding(
-                padding: EdgeInsets.fromLTRB(20, 0, 20, 10),
-                child: Text(
-                  '10K STEPS SQUAD · ENDS MAY 18',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: WW.textSec,
-                    letterSpacing: 0.5,
-                  ),
-                ),
-              ),
-              Column(
-                children: List.generate(_kMiniLeader.length, (i) {
-                  return _buildMiniLeaderRow(
-                    _kMiniLeader[i],
-                    isLast: i == _kMiniLeader.length - 1,
-                  );
-                }),
-              ),
             ],
           ),
         );
@@ -486,80 +427,17 @@ class _ClubScreenState extends State<ClubScreen> {
     );
   }
 
-  Widget _buildMiniLeaderRow(_MiniEntry entry, {required bool isLast}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
-      decoration: BoxDecoration(
-        color: WW.card,
-        border: isLast
-            ? null
-            : const Border(bottom: BorderSide(color: _kDivider, width: 0.5)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: entry.color,
-              shape: BoxShape.circle,
-            ),
-            child: Center(
-              child: Text(
-                entry.initial,
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w800,
-                  color: Colors.white,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  entry.name,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: WW.text,
-                  ),
-                ),
-                const SizedBox(height: 5),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(3),
-                  child: LinearProgressIndicator(
-                    value: entry.pct / 100,
-                    minHeight: 5,
-                    backgroundColor: WW.elevated,
-                    valueColor: AlwaysStoppedAnimation<Color>(entry.color),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          Text(
-            '${entry.pct}%',
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w800,
-              color: WW.text,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   // ══════════════════════════════════════════════════════════════════════════
-  // CHALLENGES TAB
+  // CHALLENGES TAB — real Firestore-backed (getMyChallengesStream()/
+  // getDiscoverableChallengesStream()), not mock. Full-bleed: no outer
+  // Container/border wraps either list — each challenge is its own
+  // WW.cardDecoration card sitting directly on the tab's WW.bg background,
+  // matching the per-item (not per-section) elevation convention this app
+  // already uses elsewhere (see plan_detail_screen.dart's own cards).
   // ══════════════════════════════════════════════════════════════════════════
 
   Widget _buildChallengesTab() {
+    final uid = _authService.getCurrentUser()?.uid ?? '';
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
       child: Column(
@@ -607,7 +485,42 @@ class _ClubScreenState extends State<ClubScreen> {
             ],
           ),
           const SizedBox(height: 10),
-          ..._kActiveChallenges.map(_buildActiveChallengeCard),
+          StreamBuilder<List<Map<String, dynamic>>>(
+            key: ValueKey('myChallenges-$_myChallengesRetryCount'),
+            stream: _firestoreService.getMyChallengesStream(uid),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 20),
+                  child: Center(child: CircularProgressIndicator(color: WW.primary)),
+                );
+              }
+              if (snapshot.hasError) {
+                return _buildChallengesErrorState(
+                  "Couldn't load your challenges",
+                  onRetry: () => setState(() => _myChallengesRetryCount++),
+                );
+              }
+              final challenges = snapshot.data ?? [];
+              if (challenges.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 20),
+                  child: Center(
+                    child: Text(
+                      "You're not in any challenges yet — create one or join a public challenge below.",
+                      style: TextStyle(fontSize: 13, color: WW.textSec),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                );
+              }
+              return Column(
+                children: challenges
+                    .map((c) => _buildMyChallengeCard(uid, c))
+                    .toList(),
+              );
+            },
+          ),
           const SizedBox(height: 6),
           const Text(
             'DISCOVER CHALLENGES',
@@ -619,85 +532,85 @@ class _ClubScreenState extends State<ClubScreen> {
             ),
           ),
           const SizedBox(height: 10),
-          ..._kDiscoverChallenges.map(_buildDiscoverCard),
+          StreamBuilder<List<Map<String, dynamic>>>(
+            key: ValueKey('discoverChallenges-$_discoverChallengesRetryCount'),
+            stream: _firestoreService.getDiscoverableChallengesStream(uid),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 20),
+                  child: Center(child: CircularProgressIndicator(color: WW.primary)),
+                );
+              }
+              if (snapshot.hasError) {
+                return _buildChallengesErrorState(
+                  "Couldn't load public challenges",
+                  onRetry: () => setState(() => _discoverChallengesRetryCount++),
+                );
+              }
+              final challenges = snapshot.data ?? [];
+              if (challenges.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 20),
+                  child: Center(
+                    child: Text(
+                      'No public challenges available right now.',
+                      style: TextStyle(fontSize: 13, color: WW.textSec),
+                    ),
+                  ),
+                );
+              }
+              return Column(
+                children: challenges
+                    .map((c) => _buildDiscoverChallengeCard(uid, c))
+                    .toList(),
+              );
+            },
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildActiveChallengeCard(_Challenge c) {
+  // Matches build_routine_screen.dart's exercise-search _buildErrorState()
+  // convention exactly (icon + bold message + Retry pill) — shown whenever
+  // a challenges stream actually errors (e.g. a missing composite index,
+  // a permission-denied from rules), never silently folded into the
+  // "genuinely empty" state above.
+  Widget _buildChallengesErrorState(String message, {required VoidCallback onRetry}) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Container(
-        decoration: WW.cardDecoration,
-        clipBehavior: Clip.hardEdge,
+      padding: const EdgeInsets.symmetric(vertical: 20),
+      child: Center(
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            // Gradient hero strip
-            Container(
-              padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [c.gradStart, c.gradEnd],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    c.name,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    c.detail,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Colors.white70,
-                    ),
-                  ),
-                ],
+            const Icon(Icons.error_outline_rounded, size: 40, color: WW.textSec),
+            const SizedBox(height: 10),
+            Text(
+              message,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: WW.text,
               ),
             ),
-            // Progress
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-              child: Column(
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text(
-                        'Your progress',
-                        style: TextStyle(fontSize: 11, color: WW.textSec),
-                      ),
-                      Text(
-                        '${c.pct}% complete',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: WW.text,
-                        ),
-                      ),
-                    ],
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: onRetry,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                decoration: BoxDecoration(
+                  color: WW.primary,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Text(
+                  'Retry',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
                   ),
-                  const SizedBox(height: 6),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(3),
-                    child: LinearProgressIndicator(
-                      value: c.pct / 100,
-                      minHeight: 6,
-                      backgroundColor: WW.elevated,
-                      valueColor: AlwaysStoppedAnimation<Color>(c.pctColor),
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           ],
@@ -706,108 +619,185 @@ class _ClubScreenState extends State<ClubScreen> {
     );
   }
 
-  Widget _buildDiscoverCard(_DiscoverCard c) {
+  // Squircle badge (soft rounded-corner square, not a circle/hexagon)
+  // showing the goal value + unit as compact text — e.g. "5K", "500cal",
+  // "60min" — colored per category via _challengeCategoryColor().
+  Widget _challengeBadge(Map<String, dynamic> challenge) {
+    final unit = challenge['unit'] as String? ?? '';
+    final metricType = challenge['metricType'] as String? ?? 'distance';
+    final goalValue = (challenge['goalValue'] as num?)?.toDouble() ?? 0;
+    return Container(
+      width: 48,
+      height: 48,
+      decoration: BoxDecoration(
+        color: _challengeCategoryColor(metricType),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Center(
+        child: Text(
+          _challengeBadgeLabel(goalValue, unit),
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+            color: Colors.white,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMyChallengeCard(String uid, Map<String, dynamic> challenge) {
+    final challengeId = challenge['id'] as String;
+    final name = challenge['name'] as String? ?? 'Challenge';
+    final unit = challenge['unit'] as String? ?? '';
+    final metricType = challenge['metricType'] as String? ?? 'distance';
+    final goalValue = (challenge['goalValue'] as num?)?.toDouble() ?? 0;
+    final color = _challengeCategoryColor(metricType);
+    final participantCount =
+        (challenge['participantUids'] as List?)?.length ?? 0;
+
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Container(
-        decoration: WW.cardDecoration,
-        clipBehavior: Clip.hardEdge,
-        child: Column(
-          children: [
-            // Gradient hero
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [c.gradStart, c.gradEnd],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
+      padding: const EdgeInsets.only(bottom: 10),
+      child: GestureDetector(
+        onTap: () => context.push(
+          Routes.challengeDetail,
+          extra: {'challengeId': challengeId},
+        ),
+        child: Container(
+          decoration: WW.cardDecoration,
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _challengeBadge(challenge),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: WW.text,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '$participantCount participant${participantCount == 1 ? '' : 's'}',
+                      style: const TextStyle(fontSize: 11, color: WW.textSec),
+                    ),
+                    const SizedBox(height: 8),
+                    FutureBuilder<double>(
+                      future: _firestoreService.computeChallengeProgress(uid, challenge),
+                      builder: (context, snap) {
+                        final progress = snap.data ?? 0.0;
+                        final pct = goalValue > 0
+                            ? (progress / goalValue).clamp(0.0, 1.0)
+                            : 0.0;
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(3),
+                              child: LinearProgressIndicator(
+                                value: pct,
+                                minHeight: 6,
+                                backgroundColor: WW.elevated,
+                                valueColor: AlwaysStoppedAnimation<Color>(color),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              snap.connectionState == ConnectionState.waiting
+                                  ? 'Loading…'
+                                  : '${_fmtChallengeNum(progress)} / ${_fmtChallengeNum(goalValue)} $unit',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: WW.textSec,
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ],
                 ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  // XP pill
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: Colors.white24,
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.star_rounded, color: Colors.white, size: 11),
-                          const SizedBox(width: 3),
-                          Text(
-                            '+${c.xp} XP',
-                            style: const TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w800,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDiscoverChallengeCard(String uid, Map<String, dynamic> challenge) {
+    final challengeId = challenge['id'] as String;
+    final name = challenge['name'] as String? ?? 'Challenge';
+    final participantCount =
+        (challenge['participantUids'] as List?)?.length ?? 0;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: GestureDetector(
+        onTap: () => context.push(
+          Routes.challengeDetail,
+          extra: {'challengeId': challengeId},
+        ),
+        child: Container(
+          decoration: WW.cardDecoration,
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: [
+              _challengeBadge(challenge),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: WW.text,
                       ),
                     ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '$participantCount joined',
+                      style: const TextStyle(fontSize: 11, color: WW.textSec),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              GestureDetector(
+                onTap: () async {
+                  await _firestoreService.joinChallenge(uid, challengeId);
+                  if (mounted) _snack('Joined $name!');
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                  decoration: BoxDecoration(
+                    color: WW.primary,
+                    borderRadius: BorderRadius.circular(10),
                   ),
-                  const SizedBox(height: 8),
-                  Text(
-                    c.name,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w900,
+                  child: const Text(
+                    'Join',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
                       color: Colors.white,
-                      letterSpacing: -0.3,
                     ),
                   ),
-                ],
+                ),
               ),
-            ),
-            // Stats + Join button
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-              child: Column(
-                children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.people_outline_rounded, size: 14, color: WW.textSec),
-                      const SizedBox(width: 4),
-                      Text(
-                        '${c.participants} joined',
-                        style: const TextStyle(fontSize: 12, color: WW.textSec),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  GestureDetector(
-                    onTap: () => _snack('Challenge join coming soon'),
-                    child: Container(
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: WW.primary,
-                        borderRadius: BorderRadius.circular(11),
-                      ),
-                      child: const Center(
-                        child: Text(
-                          'Join Challenge',
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

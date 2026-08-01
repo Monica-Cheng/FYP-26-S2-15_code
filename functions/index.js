@@ -227,3 +227,99 @@ exports.checkChallengeProgressOnSessionCreate = onDocumentCreated(
       }
     },
 );
+
+/**
+ * sendAdminBroadcast — fans an admin-authored message out to every user's
+ * own users/{uid}/notifications subcollection, reusing the exact same
+ * notification document shape/conventions as the friend-request/challenge-
+ * invite notifications already in use (see the doc-writing shape in
+ * lib/services/firestore_service.dart's sendFriendRequest()/
+ * _writeChallengeInviteNotifications()).
+ *
+ * Triggered by the admin (React) dashboard creating a document in the new
+ * adminBroadcasts collection via its own privileged Admin SDK connection —
+ * never by the Flutter app's client SDK, which has no write path to this
+ * collection at all (no rule grants it).
+ *
+ * Idempotency: `processed` starts false and is set true only once the
+ * entire fan-out has committed successfully. If this function is ever
+ * re-triggered on the same already-completed document (Cloud Functions'
+ * at-least-once delivery guarantee), the processed check below exits
+ * immediately instead of re-sending to every user a second time. This does
+ * NOT protect against a mid-flight crash between two chunked batches within
+ * a single execution (some users could already have been notified before a
+ * later batch fails) — an acceptable, known limitation for a broadcast
+ * feature at this project's current scale, not a full exactly-once
+ * guarantee; documented in ADMIN_BROADCAST_SCHEMA.md.
+ */
+exports.sendAdminBroadcast = onDocumentCreated(
+    "adminBroadcasts/{broadcastId}",
+    async (event) => {
+      const snap = event.data;
+      if (!snap) return;
+      const broadcastId = event.params.broadcastId;
+      const broadcast = snap.data();
+
+      if (broadcast.processed === true) {
+        // Already fully sent — a re-trigger on the same doc must never
+        // double-send.
+        return;
+      }
+
+      // Only 'all' is implemented today. Any other value fails loudly here
+      // (logged, function exits) rather than silently doing nothing or
+      // guessing at a segmentation rule that doesn't exist yet — adding a
+      // new audience value requires updating this function's matching
+      // logic, not just writing a new string from the dashboard.
+      if (broadcast.audience !== "all") {
+        console.error(
+            `sendAdminBroadcast: unsupported audience "${broadcast.audience}" ` +
+            `on adminBroadcasts/${broadcastId} — only 'all' is implemented ` +
+            "today. Not processing.",
+        );
+        return;
+      }
+
+      const message = broadcast.message;
+      if (typeof message !== "string" || message.trim() === "") {
+        console.error(
+            `sendAdminBroadcast: adminBroadcasts/${broadcastId} has no ` +
+            "usable message field — nothing to send.",
+        );
+        return;
+      }
+
+      // Full collection read — acceptable at this project's current small
+      // user count; the fan-out writes below are chunked regardless of
+      // that count.
+      const usersSnap = await db.collection("users").get();
+      const uids = usersSnap.docs.map((d) => d.id);
+
+      // Chunk into batches of <=500 — Firestore's hard per-batch write
+      // limit — same defensive chunking convention already used elsewhere
+      // in this codebase (e.g. getFriendsLeaderboardStream()'s 30-value
+      // whereIn chunks), just at Firestore's write-batch cap instead of a
+      // query's whereIn cap.
+      for (let i = 0; i < uids.length; i += 500) {
+        const chunk = uids.slice(i, i + 500);
+        const batch = db.batch();
+        for (const uid of chunk) {
+          const notificationRef = db
+              .collection("users")
+              .doc(uid)
+              .collection("notifications")
+              .doc();
+          batch.set(notificationRef, {
+            type: "admin_broadcast",
+            message,
+            fromDisplayName: "WiseWorkout",
+            read: false,
+            createdAt: FieldValue.serverTimestamp(),
+          });
+        }
+        await batch.commit();
+      }
+
+      await snap.ref.update({processed: true});
+    },
+);

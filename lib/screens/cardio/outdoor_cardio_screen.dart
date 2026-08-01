@@ -2570,9 +2570,12 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
         }
 
         String? finalSessionId;
+        List<Map<String, dynamic>> newlyEarnedBadges = [];
         try {
-          finalSessionId = await FirestoreService()
+          final finalizeResult = await FirestoreService()
               .finalizeInProgressSession(uid, sessionRunId);
+          finalSessionId = finalizeResult.sessionId;
+          newlyEarnedBadges = finalizeResult.newlyEarnedBadges;
         } catch (_) {}
 
         if (!mounted) return;
@@ -2589,12 +2592,14 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
             'cardioCalories': caloriesRounded,
             'goalMinutes': 0,
             'sessionId': finalSessionId,
+            if (newlyEarnedBadges.isNotEmpty)
+              'newlyEarnedBadges': newlyEarnedBadges,
           },
         );
         return;
       }
 
-      final sessionId = await FirestoreService().saveCardioSession(
+      final saveResult = await FirestoreService().saveCardioSession(
         uid: uid,
         activity: _activity,
         durationSeconds: _activeSeconds,
@@ -2608,6 +2613,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
         photoBase64: photoBase64,
         mapSnapshotBase64: mapSnapshotBase64,
       );
+      final sessionId = saveResult.sessionId;
 
       if (!mounted) return;
       // Matches cardio_session_screen.dart's own post-save navigation
@@ -2626,6 +2632,8 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
           'cardioCalories': caloriesRounded,
           'goalMinutes': 0,
           'sessionId': sessionId,
+          if (saveResult.newlyEarnedBadges.isNotEmpty)
+            'newlyEarnedBadges': saveResult.newlyEarnedBadges,
         },
       );
     } catch (e) {

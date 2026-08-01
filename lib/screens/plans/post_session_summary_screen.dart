@@ -61,6 +61,16 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
   bool get _hasSession => _sessionData != null;
   Map<String, dynamic> get _session => _sessionData ?? {};
 
+  // Badges checkAndAwardBadges() newly awarded for THIS specific save —
+  // not the user's full earned-badge history, just what changed right now.
+  // Read from extra['newlyEarnedBadges'] alongside sessionId (see
+  // _loadSession()). Every finish path threads this through now
+  // (standalone gym in gym_session_screen.dart; plan-linked gym/cardio/
+  // combined via finalizeInProgressSession(); standalone cardio via
+  // saveCardioSession() — both in firestore_service.dart), so this is only
+  // empty when the save genuinely earned no new badge.
+  List<Map<String, dynamic>> _newlyEarnedBadges = [];
+
   String _wiseCoachSummary = '';
   bool _summaryLoading = true;
 
@@ -131,6 +141,12 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
     final sessionId = extra?['sessionId'] as String?;
     final uid = AuthService().getCurrentUser()?.uid;
+    final rawNewlyEarnedBadges = extra?['newlyEarnedBadges'] as List<dynamic>?;
+    final newlyEarnedBadges = rawNewlyEarnedBadges
+            ?.whereType<Map>()
+            .map((b) => Map<String, dynamic>.from(b))
+            .toList() ??
+        <Map<String, dynamic>>[];
 
     if (sessionId == null || uid == null) {
       if (mounted) setState(() => _loading = false);
@@ -142,6 +158,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     setState(() {
       _sessionData = data;
       _loading = false;
+      _newlyEarnedBadges = newlyEarnedBadges;
       _routePoints =
           _parseRoutePoints((data?['route'] as List<dynamic>?) ?? []);
     });
@@ -770,8 +787,6 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                       const SizedBox(height: 12),
                       if (_isGym || _isCombined) ...[
                         ..._xpCardWidgets(),
-                        _buildPbCard(),
-                        const SizedBox(height: 12),
                         _buildBadgesCard(),
                         const SizedBox(height: 12),
                       ],
@@ -1194,37 +1209,13 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     ];
   }
 
-  // ── Personal Bests — hardcoded placeholder, unchanged, out of scope ───────
-
-  Widget _buildPbCard() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: WW.cardDecoration,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: const [
-          Text(
-            'Personal Bests 🏆',
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              color: WW.text,
-            ),
-          ),
-          SizedBox(height: 12),
-          _PbRow(
-            exercise: 'Bench Press',
-            value: '82.5 kg × 8',
-            prev: '80 kg × 8',
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ── Badges — hardcoded placeholder, unchanged, out of scope ───────────────
+  // ── Badges — real, from checkAndAwardBadges()'s result for this specific
+  // session save (see _loadSession()), not a persisted/refetched list.
+  // Renders nothing at all (not an empty card) when no badge was newly
+  // earned this session. ─────────────────────────────────────────────────
 
   Widget _buildBadgesCard() {
+    if (_newlyEarnedBadges.isEmpty) return const SizedBox.shrink();
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: WW.cardDecoration,
@@ -1232,7 +1223,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            'Badges Earned',
+            'You unlocked a new badge!',
             style: TextStyle(
               fontSize: 15,
               fontWeight: FontWeight.w700,
@@ -1240,46 +1231,71 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
             ),
           ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: WW.chipBg,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Center(
-                  child: Text('💪', style: TextStyle(fontSize: 22)),
-                ),
-              ),
-              const SizedBox(width: 12),
-              const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Iron Session',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: WW.text,
-                    ),
-                  ),
-                  SizedBox(height: 2),
-                  Text(
-                    'Completed every set',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      color: WW.textSec,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
+          for (var i = 0; i < _newlyEarnedBadges.length; i++) ...[
+            if (i > 0) const SizedBox(height: 12),
+            _buildBadgeRow(_newlyEarnedBadges[i]),
+          ],
         ],
       ),
+    );
+  }
+
+  Widget _buildBadgeRow(Map<String, dynamic> badge) {
+    final imageUrl = badge['imageUrl'] as String? ?? '';
+    final name = badge['name'] as String? ?? 'Badge';
+    final description = badge['description'] as String? ?? '';
+    return Row(
+      children: [
+        Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: WW.chipBg,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          clipBehavior: Clip.hardEdge,
+          child: imageUrl.isNotEmpty
+              ? Image.network(
+                  imageUrl,
+                  width: 44,
+                  height: 44,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => const Center(
+                    child: Icon(Icons.emoji_events_rounded, color: WW.gold, size: 22),
+                  ),
+                )
+              : const Center(
+                  child: Icon(Icons.emoji_events_rounded, color: WW.gold, size: 22),
+                ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                name,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: WW.text,
+                ),
+              ),
+              if (description.isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Text(
+                  description,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: WW.textSec,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -2118,72 +2134,6 @@ class _WiseCoachTypingDotsState extends State<_WiseCoachTypingDots>
           },
         );
       }),
-    );
-  }
-}
-
-// ── PB row ────────────────────────────────────────────────────────────────────
-
-class _PbRow extends StatelessWidget {
-  final String exercise;
-  final String value;
-  final String prev;
-
-  const _PbRow({
-    required this.exercise,
-    required this.value,
-    required this.prev,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Container(
-          width: 36,
-          height: 36,
-          decoration: BoxDecoration(
-            color: WW.gold.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: const Center(
-            child: Text('🏆', style: TextStyle(fontSize: 18)),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                exercise,
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: WW.text,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                value,
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: WW.gold,
-                ),
-              ),
-            ],
-          ),
-        ),
-        Text(
-          'prev: $prev',
-          style: const TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w500,
-            color: WW.textSec,
-          ),
-        ),
-      ],
     );
   }
 }

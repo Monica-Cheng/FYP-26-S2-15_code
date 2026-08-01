@@ -27,6 +27,8 @@ import '../screens/settings/health_profile_screen.dart';
 import '../screens/settings/settings_screen.dart';
 import '../screens/club/friends_screen.dart';
 import '../screens/club/create_challenge_screen.dart';
+import '../screens/club/challenge_detail_screen.dart';
+import '../screens/club/challenge_leaderboard_screen.dart';
 import '../screens/coach/find_professional_screen.dart';
 import '../screens/plans/exercise_detail_screen.dart';
 import '../screens/plans/plan_detail_screen.dart';
@@ -34,6 +36,7 @@ import '../screens/plans/plan_match_screen.dart';
 import '../screens/plans/build_routine_screen.dart';
 import '../screens/plans/explore_screen.dart';
 import '../screens/plans/plan_schedule_screen.dart';
+import '../screens/plans/my_plans_library_screen.dart';
 import '../screens/plans/mid_plan_cardio_complete_screen.dart';
 import '../screens/progress/activity_detail_screen.dart';
 import '../screens/progress/nutrition_log_detail_screen.dart';
@@ -61,6 +64,8 @@ class Routes {
   static const String club = '/club';
   static const String friends = '/friends';
   static const String createChallenge = '/create-challenge';
+  static const String challengeDetail = '/challenge-detail';
+  static const String challengeLeaderboard = '/challenge-leaderboard';
   static const String progress = '/progress';
   static const String gymSession = '/gym-session';
   static const String postSessionSummary = '/post-session-summary';
@@ -81,6 +86,7 @@ class Routes {
   static const String explore = '/explore';
   static const String buildRoutine = '/build-routine';
   static const String editRoutine = '/edit-routine';
+  static const String myPlansLibrary = '/my-plans-library';
   static const String cardioSetup = '/cardio-setup';
   static const String cardioSession = '/cardio-session';
   // Temporary/scaffolding route for testing the map-renders-and-permission
@@ -377,6 +383,13 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const BuildRoutineScreen(),
       ),
       GoRoute(
+        path: Routes.myPlansLibrary,
+        builder: (context, state) {
+          final plans = state.extra as List<Map<String, dynamic>>?;
+          return MyPlansLibraryScreen(plans: plans ?? const []);
+        },
+      ),
+      GoRoute(
         path: Routes.cardioSetup,
         builder: (context, state) => const CardioSetupScreen(),
       ),
@@ -410,6 +423,24 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.createChallenge,
         builder: (context, state) => const CreateChallengeScreen(),
+      ),
+      GoRoute(
+        path: Routes.challengeDetail,
+        builder: (context, state) {
+          final extra = state.extra as Map<String, dynamic>?;
+          return ChallengeDetailScreen(
+            challengeId: extra?['challengeId'] as String? ?? '',
+          );
+        },
+      ),
+      GoRoute(
+        path: Routes.challengeLeaderboard,
+        builder: (context, state) {
+          final extra = state.extra as Map<String, dynamic>?;
+          return ChallengeLeaderboardScreen(
+            challengeId: extra?['challengeId'] as String? ?? '',
+          );
+        },
       ),
       // Add more routes here as you build each screen
     ],

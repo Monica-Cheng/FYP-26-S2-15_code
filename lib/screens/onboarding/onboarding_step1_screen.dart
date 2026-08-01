@@ -317,11 +317,24 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
 
       await _firestoreService.saveOnboardingStep1(uid, data);
       if (mounted) context.go(Routes.onboardingStep2);
-    } catch (_) {
+    } catch (e) {
+      // Was a bare `catch (_)` that silently discarded the exception —
+      // this step's failure (e.g. a Firestore PERMISSION_DENIED from a
+      // rules regression) was previously indistinguishable from any other
+      // failure, both in the console and to the user. Logged here so a
+      // future issue like that shows up immediately instead of needing to
+      // be independently investigated from scratch.
+      print('onboarding_step1_screen: save failed: $e');
       if (mounted) {
+        final isNetworkError = e is SocketException ||
+            e.toString().toLowerCase().contains('network');
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Something went wrong. Please try again.'),
+          SnackBar(
+            content: Text(
+              isNetworkError
+                  ? 'No internet connection. Please check your connection and try again.'
+                  : 'Something went wrong saving your profile. Please try again.',
+            ),
             behavior: SnackBarBehavior.floating,
           ),
         );
