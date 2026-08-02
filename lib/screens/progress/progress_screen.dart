@@ -60,7 +60,24 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
   List<Map<String, dynamic>> _sessions = [];
   bool _sessionsLoading = true;
-  StreamSubscription<List<Map<String, dynamic>>>? _sessionsSub;
+  // Pagination state for the Activities tab (see _loadSessionsPage()) —
+  // replaces the old live getRecentSessionsStream() subscription. _sessions
+  // now holds every page fetched so far, appended in order; _sessionsHasMore
+  // reflects whether the last page came back full (== pageSize), the same
+  // signal FirestoreService().getSessionsPage() already computes.
+  bool _sessionsLoadingMore = false;
+  bool _sessionsHasMore = true;
+  // Set on a failed fetch (e.g. a missing-composite-index Firestore
+  // exception) so _buildActivitiesList() can show a distinct "couldn't
+  // load, retry" state instead of silently rendering the same empty state
+  // as "genuinely zero sessions" — the previous catch-and-swallow here is
+  // exactly what turned a missing-index regression into an invisible one.
+  bool _sessionsError = false;
+  DocumentSnapshot<Map<String, dynamic>>? _sessionsLastDoc;
+  // null = no date-range filter ("All time"). Combinable with
+  // _activityFilter — both are passed to getSessionsPage() together.
+  DateTime? _activityStartDate;
+  DateTime? _activityEndDate;
   int _totalXp = 0;
   int _level = 1;
   List<Map<String, dynamic>> _xpEvents = [];
@@ -155,7 +172,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
   @override
   void initState() {
     super.initState();
-    _startSessionsStream();
+    _loadSessionsPage(reset: true);
     _loadXpData();
     _loadXpEvents();
     _loadChartData();
@@ -168,7 +185,6 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
   @override
   void dispose() {
-    _sessionsSub?.cancel();
     _weightSub?.cancel();
     _userDocSub?.cancel();
     super.dispose();
@@ -281,36 +297,103 @@ class _ProgressScreenState extends State<ProgressScreen> {
     }
   }
 
-  // Live stream (was a one-shot getRecentSessions() fetch) — mirrors
-  // _startWeightStream()'s exact pattern: a StreamSubscription field
-  // started here, cancelled in dispose(), updating state via setState on
-  // each snapshot. _sessionsLoading stays true until the first snapshot
-  // arrives (same convention as _weightLoading), not just "stream
-  // started" (unlike _checkInsStream/_checkInsLoading, which is consumed
-  // via a StreamBuilder elsewhere and has its own connectionState check
-  // to cover the "waiting for first data" gap — no StreamBuilder is used
-  // for sessions, so _sessionsLoading itself has to cover that here).
-  void _startSessionsStream() {
+  // One-time paginated fetch (was a live getRecentSessionsStream()
+  // subscription) — see getSessionsPage()'s own doc comment in
+  // firestore_service.dart for why this moved off .snapshots(). Called with
+  // reset:true on initial load and whenever a filter changes (type/date
+  // range), since those change the underlying query and any
+  // previously-fetched pages/cursor no longer apply. Called with
+  // reset:false (the default) by the "Load More" control to fetch the next
+  // page using the cursor from the last page fetched.
+  Future<void> _loadSessionsPage({bool reset = false}) async {
     final uid = AuthService().getCurrentUser()?.uid;
     if (uid == null) {
-      setState(() => _sessionsLoading = false);
+      if (mounted) setState(() => _sessionsLoading = false);
       return;
     }
-    _sessionsSub = FirestoreService()
-        .getRecentSessionsStream(uid, limit: 20)
-        .listen(
-          (sessions) {
-            if (mounted) {
-              setState(() {
-                _sessions = sessions;
-                _sessionsLoading = false;
-              });
-            }
-          },
-          onError: (_) {
-            if (mounted) setState(() => _sessionsLoading = false);
-          },
-        );
+    if (reset) {
+      setState(() {
+        _sessions = [];
+        _sessionsLastDoc = null;
+        _sessionsHasMore = true;
+        _sessionsLoading = true;
+        _sessionsError = false;
+      });
+    } else {
+      if (!_sessionsHasMore || _sessionsLoadingMore) return;
+      setState(() {
+        _sessionsLoadingMore = true;
+        _sessionsError = false;
+      });
+    }
+
+    // End date is inclusive of the whole day it falls on — a session
+    // logged at, say, 8pm on the selected end date has a 'date' Timestamp
+    // later than midnight, so a plain isLessThanOrEqualTo against midnight
+    // would wrongly exclude it.
+    DateTime? rangeStart = _activityStartDate;
+    DateTime? rangeEnd = _activityEndDate == null
+        ? null
+        : DateTime(
+            _activityEndDate!.year,
+            _activityEndDate!.month,
+            _activityEndDate!.day,
+            23,
+            59,
+            59,
+            999,
+          );
+
+    // Mirrors _filteredSessions' old mutually-exclusive semantics: only one
+    // of type/manualOnly/customOnly is ever active at once, since
+    // _activityFilter is a single-select index (see _actLabels).
+    String? type;
+    var manualOnly = false;
+    var customOnly = false;
+    if (_activityFilter == 1) {
+      type = 'gym';
+    } else if (_activityFilter == 2) {
+      type = 'cardio';
+    } else if (_activityFilter == 3) {
+      manualOnly = true;
+    } else if (_activityFilter == 4) {
+      customOnly = true;
+    }
+
+    try {
+      final page = await FirestoreService().getSessionsPage(
+        uid,
+        startAfterDoc: reset ? null : _sessionsLastDoc,
+        type: type,
+        manualOnly: manualOnly,
+        customOnly: customOnly,
+        rangeStart: rangeStart,
+        rangeEnd: rangeEnd,
+      );
+      if (!mounted) return;
+      setState(() {
+        _sessions = reset ? page.sessions : [..._sessions, ...page.sessions];
+        _sessionsLastDoc = page.lastDoc ?? _sessionsLastDoc;
+        _sessionsHasMore = page.hasMore;
+        _sessionsLoading = false;
+        _sessionsLoadingMore = false;
+        _sessionsError = false;
+      });
+    } catch (e) {
+      // Previously swallowed entirely (catch (_) {}), which is exactly why
+      // a missing-composite-index Firestore exception rendered as "no
+      // sessions" instead of a visible error — see this field's own doc
+      // comment. Printed (not rethrown) to match this file's existing
+      // fail-soft convention for background loads elsewhere.
+      print('_loadSessionsPage error: $e');
+      if (mounted) {
+        setState(() {
+          _sessionsLoading = false;
+          _sessionsLoadingMore = false;
+          _sessionsError = true;
+        });
+      }
+    }
   }
 
   Future<void> _loadNutritionLogs() async {
@@ -511,20 +594,6 @@ class _ProgressScreenState extends State<ProgressScreen> {
         ),
       ),
     );
-  }
-
-  List<Map<String, dynamic>> get _filteredSessions {
-    if (_activityFilter == 0) return _sessions;
-    if (_activityFilter == 3) {
-      return _sessions.where((s) => s['isManuallyLogged'] == true).toList();
-    }
-    if (_activityFilter == 4) {
-      // Cross-references type entirely — any custom-plan session of any
-      // activity type (gym/cardio/combined) matches here.
-      return _sessions.where((s) => s['planIsCustom'] == true).toList();
-    }
-    final type = _activityFilter == 1 ? 'gym' : 'cardio';
-    return _sessions.where((s) => s['type'] == type).toList();
   }
 
   String _formatDate(Timestamp? ts) {
@@ -1675,6 +1744,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _buildActivityFilter(),
+        _buildDateRangeFilter(),
         Expanded(child: _buildActivitiesList()),
       ],
     );
@@ -1685,9 +1755,65 @@ class _ProgressScreenState extends State<ProgressScreen> {
       return const Center(child: CircularProgressIndicator(color: WW.primary));
     }
 
-    final sessions = _filteredSessions;
+    final sessions = _sessions;
 
     if (sessions.isEmpty) {
+      // Distinct from the "genuinely no sessions" state below — see
+      // _sessionsError's own doc comment for why this matters.
+      if (_sessionsError) {
+        return Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.error_outline_rounded,
+                size: 48,
+                color: WW.textSec,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                "Couldn't load activities",
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  color: WW.text,
+                ),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'Something went wrong. Tap to try again.',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: WW.textSec,
+                ),
+              ),
+              const SizedBox(height: 14),
+              GestureDetector(
+                onTap: () => _loadSessionsPage(reset: true),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: WW.primary,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Text(
+                    'Retry',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      }
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1718,11 +1844,43 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
     return ListView.separated(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
-      itemCount: sessions.length,
+      // One extra trailing item for the Load More control/spinner whenever
+      // a further page might exist — see _sessionsHasMore's doc comment.
+      itemCount: sessions.length + (_sessionsHasMore ? 1 : 0),
       // Flat rows now (no boxed cards — see _ActivityCard), so a thin
       // divider marks the boundary between rows instead of a gap.
       separatorBuilder: (_, __) => Container(height: 0.5, color: WW.border),
       itemBuilder: (_, i) {
+        if (i == sessions.length) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Center(
+              child: _sessionsLoadingMore
+                  ? const CircularProgressIndicator(color: WW.primary)
+                  : GestureDetector(
+                      onTap: () => _loadSessionsPage(),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: WW.elevated,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          _sessionsError ? 'Retry' : 'Load More',
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: WW.text,
+                          ),
+                        ),
+                      ),
+                    ),
+            ),
+          );
+        }
         final s = sessions[i];
         final isManual = s['isManuallyLogged'] == true;
         final dateLabel = _formatDate(s['date'] as Timestamp?);
@@ -1825,7 +1983,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
           return Padding(
             padding: EdgeInsets.only(right: i < _actLabels.length - 1 ? 20 : 0),
             child: GestureDetector(
-              onTap: () => setState(() => _activityFilter = i),
+              onTap: () {
+                if (i == _activityFilter) return;
+                setState(() => _activityFilter = i);
+                _loadSessionsPage(reset: true);
+              },
               child: Text(
                 _actLabels[i],
                 style: TextStyle(
@@ -1839,6 +2001,121 @@ class _ProgressScreenState extends State<ProgressScreen> {
         }),
       ),
     );
+  }
+
+  static const List<String> _monthNames = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+
+  String _formatShortDate(DateTime d) =>
+      '${d.day} ${_monthNames[d.month - 1]} ${d.year}';
+
+  // Combinable with _buildActivityFilter() above — both feed into the same
+  // getSessionsPage() call in _loadSessionsPage(). Deliberately not reusing
+  // MonthCalendar (lib/widgets/common/month_calendar.dart): that widget
+  // renders a full day-grid with per-day workout/rest coloring sourced from
+  // monthActivityProvider's own Firestore reads — the wrong shape and an
+  // unnecessary extra query for what's just a date-range filter here.
+  Widget _buildDateRangeFilter() {
+    final start = _activityStartDate;
+    final end = _activityEndDate;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+      child: Row(
+        children: [
+          _buildDateChip(
+            label: start == null ? 'Start' : _formatShortDate(start),
+            onTap: () => _pickActivityDate(isStart: true),
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 6),
+            child: Text('–', style: TextStyle(fontSize: 12, color: WW.textSec)),
+          ),
+          _buildDateChip(
+            label: end == null ? 'End' : _formatShortDate(end),
+            onTap: () => _pickActivityDate(isStart: false),
+          ),
+          if (start != null || end != null) ...[
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: () {
+                setState(() {
+                  _activityStartDate = null;
+                  _activityEndDate = null;
+                });
+                _loadSessionsPage(reset: true);
+              },
+              child: const Icon(
+                Icons.close_rounded,
+                size: 15,
+                color: WW.textSec,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDateChip({required String label, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.calendar_month_rounded, size: 15, color: WW.textSec),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: WW.textSec,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Native Material date picker (showDatePicker, no new dependency).
+  // firstDate/lastDate enforce all 3 range rules declaratively rather than
+  // validating after the fact:
+  //  - no future dates: lastDate is never later than today for either field
+  //  - end can't be before start: End's firstDate is the chosen Start
+  //  - start can't be after end: Start's lastDate is the chosen End
+  // initialDate is clamped into [firstDate, lastDate] since showDatePicker
+  // asserts the initial value falls within that range — e.g. picking Start
+  // for the first time with an End already set in the past would otherwise
+  // default to today, which could fall after that End date.
+  Future<void> _pickActivityDate({required bool isStart}) async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final firstDate =
+        isStart ? DateTime(2000) : (_activityStartDate ?? DateTime(2000));
+    final lastDate = isStart ? (_activityEndDate ?? today) : today;
+    final current = isStart ? _activityStartDate : _activityEndDate;
+    final initialDate =
+        (current != null && !current.isBefore(firstDate) && !current.isAfter(lastDate))
+            ? current
+            : lastDate;
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: firstDate,
+      lastDate: lastDate,
+    );
+    if (picked == null) return;
+    setState(() {
+      if (isStart) {
+        _activityStartDate = picked;
+      } else {
+        _activityEndDate = picked;
+      }
+    });
+    _loadSessionsPage(reset: true);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -2290,6 +2567,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
 // now that cardio sessions can have a real map image to lead with.
 // Still flat (no card border/shadow, single accent color) — only the
 // content layout changed, not the "no boxed cards" design direction.
+// Strava-style row: a small square thumbnail on the left (icon for
+// gym/manual/custom, actual route map for cardio), everything else — title,
+// type tag, date, stat row — filling the remaining width to the right.
+// Replaces the previous full-width 120px icon/map header stacked above the
+// text, which ate excessive vertical space for what's mostly a compact list.
 class _ActivityCard extends StatelessWidget {
   final String title;
   final String dateLabel;
@@ -2302,7 +2584,7 @@ class _ActivityCard extends StatelessWidget {
   final String? mapSnapshotBase64;
   final VoidCallback? onTap;
 
-  static const double _headerHeight = 120;
+  static const double _thumbSize = 58;
 
   const _ActivityCard({
     required this.title,
@@ -2338,19 +2620,27 @@ class _ActivityCard extends StatelessWidget {
     }
   }
 
-  // Fallback header when there's no snapshot to show (gym, manual, or a
-  // cardio session saved before this feature existed) — same footprint
-  // as the thumbnail so the card doesn't resize depending on which is
-  // shown.
-  Widget _buildIconHeader() {
+  // Same precedence _iconData uses (cardio always wins over custom) so the
+  // tag text and the icon/thumbnail never disagree about what a row is.
+  String get _typeTag {
+    if (isManual) return 'Manual';
+    if (isCardio) return 'Cardio';
+    return isCustom ? 'Custom' : 'Gym';
+  }
+
+  // Fallback thumbnail when there's no map snapshot to show (gym, manual,
+  // custom, or a cardio session saved before this feature existed) — same
+  // footprint as the map thumbnail so rows don't resize depending on which
+  // is shown.
+  Widget _buildIconThumb() {
     return Container(
-      height: _headerHeight,
-      width: double.infinity,
+      width: _thumbSize,
+      height: _thumbSize,
       decoration: BoxDecoration(
         color: WW.elevated,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(12),
       ),
-      child: Center(child: Icon(_iconData, color: WW.textSec, size: 36)),
+      child: Center(child: Icon(_iconData, color: WW.textSec, size: 24)),
     );
   }
 
@@ -2374,33 +2664,35 @@ class _ActivityCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Map thumbnail replaces the icon-only header when a snapshot is
+    // Map thumbnail replaces the icon-only square when a snapshot is
     // present (outdoor cardio sessions saved after the snapshot feature
-    // landed) — same footprint either way so cards don't resize
-    // depending on which is shown. Gym/manual rows and any cardio
-    // session saved before this field existed simply have no snapshot
-    // and fall straight back to the icon header; a decode failure does
-    // the same rather than breaking the card.
-    Widget header;
+    // landed) — same footprint either way so rows don't resize depending
+    // on which is shown. Gym/manual/custom rows and any cardio session
+    // saved before this field existed simply have no snapshot and fall
+    // straight back to the icon square; a decode failure does the same
+    // rather than breaking the row. BoxFit.cover here properly crops the
+    // wider-than-square source image to fill this square slot — it does
+    // not stretch it (BoxFit.fill would; this is deliberately not that).
+    Widget thumb;
     final snapshot = mapSnapshotBase64;
     if (snapshot != null) {
       try {
         final bytes = base64Decode(snapshot);
-        header = ClipRRect(
-          borderRadius: BorderRadius.circular(14),
+        thumb = ClipRRect(
+          borderRadius: BorderRadius.circular(12),
           child: Image.memory(
             bytes,
-            height: _headerHeight,
-            width: double.infinity,
+            width: _thumbSize,
+            height: _thumbSize,
             fit: BoxFit.cover,
-            errorBuilder: (_, _, _) => _buildIconHeader(),
+            errorBuilder: (_, _, _) => _buildIconThumb(),
           ),
         );
       } catch (_) {
-        header = _buildIconHeader();
+        thumb = _buildIconThumb();
       }
     } else {
-      header = _buildIconHeader();
+      thumb = _buildIconThumb();
     }
 
     // One consistent XP-badge color regardless of session type — matches
@@ -2413,65 +2705,67 @@ class _ActivityCard extends StatelessWidget {
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Column(
+        child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            header,
-            const SizedBox(height: 10),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Expanded(
-                  child: Column(
+            thumb,
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          color: WW.text,
+                      Expanded(
+                        child: Text(
+                          title,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: WW.text,
+                          ),
                         ),
                       ),
-                      const SizedBox(height: 2),
-                      Text(
-                        dateLabel,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          color: WW.textSec,
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: WW.tealBg,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          xpLabel,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: WW.teal,
+                          ),
                         ),
                       ),
                     ],
                   ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: WW.tealBg,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    xpLabel,
+                  const SizedBox(height: 2),
+                  Text(
+                    '$_typeTag · $dateLabel',
                     style: const TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: WW.teal,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: WW.textSec,
                     ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                for (final stat in stats)
-                  Expanded(child: _buildStatCell(stat.$1, stat.$2)),
-              ],
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      for (final stat in stats)
+                        Expanded(child: _buildStatCell(stat.$1, stat.$2)),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ],
         ),

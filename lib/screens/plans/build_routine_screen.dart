@@ -817,6 +817,21 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
 
     setState(() => _isSaving = true);
 
+    // Captured before any await. The previous fix gated BOTH the success
+    // SnackBar and the pop behind a single `if (mounted)` check made AFTER
+    // the Firestore write — so if this widget became unusable for any
+    // reason during that async gap, the entire feedback block (snackbar
+    // included) was silently skipped even though the write itself had
+    // already succeeded. Confirmed via live testing: edit-mode saves DO
+    // persist to Firestore with zero visible feedback — exactly this
+    // symptom. Grabbing the ScaffoldMessengerState up front means showing
+    // the success snackbar no longer depends on `context`/`mounted` still
+    // being valid once the write resolves; only the actual navigation
+    // (which genuinely does require a live widget) stays behind the
+    // mounted guard below.
+    final messenger = ScaffoldMessenger.of(context);
+    final wasEditMode = _isEditMode;
+
     try {
       print('Saving routine: $_routineName');
       final uid = AuthService().getCurrentUser()?.uid;
@@ -886,17 +901,26 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
 
       print('Saved successfully!');
 
-      if (mounted) {
-        setState(() => _hasChanges = false);
-        _snack(_isEditMode ? 'Routine updated.' : 'Routine saved to All Plans.');
-        // Same short delay plan_detail_screen.dart's _handleDeleteCustomPlan
-        // already uses between showing a SnackBar and popping — popping
-        // immediately after showSnackBar() tears the route down before the
-        // SnackBar has actually rendered, so it was never visible at all.
-        await Future.delayed(const Duration(milliseconds: 600));
-        if (!mounted) return;
-        context.pop(_isEditMode);
-      }
+      if (mounted) setState(() => _hasChanges = false);
+      // Uses the messenger captured before the write, not _snack(context) —
+      // see this method's own note above on why: showing this no longer
+      // depends on the widget still being mounted at this point.
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+              wasEditMode ? 'Routine updated.' : 'Routine saved to All Plans.'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: WW.primaryDark,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      );
+      // Same short delay plan_detail_screen.dart's _handleDeleteCustomPlan
+      // already uses between showing a SnackBar and popping — popping
+      // immediately after showSnackBar() tears the route down before the
+      // SnackBar has actually rendered, so it was never visible at all.
+      await Future.delayed(const Duration(milliseconds: 600));
+      if (!mounted) return;
+      context.pop(wasEditMode);
     } catch (e) {
       print('Save error: $e');
       if (mounted) _snack('Failed to save. Please try again.');

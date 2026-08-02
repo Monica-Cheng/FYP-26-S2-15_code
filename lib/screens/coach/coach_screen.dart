@@ -1,13 +1,12 @@
 // lib/screens/coach/coach_screen.dart
-import 'dart:convert';
-
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:go_router/go_router.dart';
-import 'package:http/http.dart' as http;
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
+import '../../services/auth_service.dart';
+import '../../services/firestore_service.dart';
 
 const List<String> _kQuickReplies = [
   'My progress this week',
@@ -30,6 +29,8 @@ class _CoachScreenState extends State<CoachScreen> {
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _isTyping = false;
+  final _auth = AuthService();
+  final _firestore = FirestoreService();
 
   @override
   void initState() {
@@ -37,6 +38,72 @@ class _CoachScreenState extends State<CoachScreen> {
     _addCoachMessage(
       'Hi! I am WiseCoach. I can help you with workout advice, exercise tips, and fitness questions. What would you like to know?',
     );
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowConsentPrompt());
+  }
+
+  // One-time personalization consent prompt — shown the first time the
+  // Coach tab is opened, gated on hasSeenAiConsentPrompt so it never
+  // reappears once the user has made a choice either way (including
+  // "Not now"). Actual gating of what data the Cloud Function reads
+  // happens server-side in callWiseCoachOpenAI based on
+  // aiPersonalizationConsent, not on anything decided here — this dialog
+  // only ever writes the user's choice to Firestore, it doesn't gate
+  // requests itself.
+  Future<void> _maybeShowConsentPrompt() async {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final profile = await _firestore.getUserProfile(uid);
+      final hasSeenPrompt =
+          profile?['hasSeenAiConsentPrompt'] as bool? ?? false;
+      if (hasSeenPrompt || !mounted) return;
+      await _showConsentDialog(uid);
+    } catch (_) {}
+  }
+
+  Future<void> _showConsentDialog(String uid) async {
+    final turnOn = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Personalize WiseCoach?',
+          style: TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.w700,
+            color: WW.text,
+          ),
+        ),
+        content: const Text(
+          'With your permission, WiseCoach can use your recent training '
+          'history, current plan, injury profile, and body profile (like '
+          'height, weight, and goals) to give more tailored answers. '
+          'This is only used to answer your questions, and you can turn '
+          'it off anytime in Settings.',
+          style: TextStyle(fontSize: 14, color: WW.textSec, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Not now', style: TextStyle(color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Turn on personalization',
+              style: TextStyle(color: WW.primary, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    try {
+      await _firestore.updateUserProfile(uid, {
+        'hasSeenAiConsentPrompt': true,
+        if (turnOn == true) 'aiPersonalizationConsent': true,
+      });
+    } catch (_) {}
   }
 
   @override
@@ -75,32 +142,31 @@ class _CoachScreenState extends State<CoachScreen> {
     });
   }
 
+  // Relays through the callWiseCoachOpenAI Cloud Function instead of
+  // calling OpenAI directly — the API key now lives server-side as a
+  // Cloud Functions secret, never in the app bundle. Same system prompt,
+  // same conversation history, same model/max_tokens/temperature as
+  // before; only WHERE the OpenAI call happens has changed.
   Future<String> _sendToOpenAI(List<Map<String, String>> messages) async {
-    final response = await http.post(
-      Uri.parse('https://api.openai.com/v1/chat/completions'),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': "Bearer ${dotenv.env['OPENAI_API_KEY'] ?? ''}",
-      },
-      body: jsonEncode({
-        'model': 'gpt-4o-mini',
-        'messages': [
-          {
-            'role': 'system',
-            'content':
-                '''You are WiseCoach, an AI fitness coach inside the WiseWorkout app. \nYou are supportive, knowledgeable, and concise. \nYou help users with workout advice, exercise form, recovery, and fitness goals.\nKeep responses under 3 sentences unless the user asks for detail.\nNever give medical advice. If the user mentions injury or medical issues, \nrecommend they see a professional.\nDo not use markdown formatting — plain text only.'''
-          },
-          ...messages,
-        ],
-        'max_tokens': 300,
-        'temperature': 0.7,
-      }),
-    );
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      return data['choices'][0]['message']['content'] as String;
+    final callable =
+        FirebaseFunctions.instance.httpsCallable('callWiseCoachOpenAI');
+    final result = await callable.call<Map<String, dynamic>>({
+      'messages': [
+        {
+          'role': 'system',
+          'content':
+              '''You are WiseCoach, an AI fitness coach inside the WiseWorkout app. \nYou are supportive, knowledgeable, and concise. \nYou help users with workout advice, exercise form, recovery, and fitness goals.\nKeep responses under 3 sentences unless the user asks for detail.\nNever give medical advice. If the user mentions injury or medical issues, \nrecommend they see a professional.\nDo not use markdown formatting — plain text only.'''
+        },
+        ...messages,
+      ],
+      'maxTokens': 300,
+      'temperature': 0.7,
+    });
+    final content = result.data['content'] as String?;
+    if (content == null) {
+      throw Exception('WiseCoach function returned no content');
     }
-    throw Exception('OpenAI API error: ${response.statusCode}');
+    return content;
   }
 
   Future<void> _send([String? override]) async {

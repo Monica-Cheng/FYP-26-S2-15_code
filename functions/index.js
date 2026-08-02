@@ -12,11 +12,20 @@
 // Challenges screen and call computeChallengeProgress() itself.
 
 const {onDocumentCreated} = require("firebase-functions/v2/firestore");
+const {onCall, HttpsError} = require("firebase-functions/v2/https");
+const {defineSecret} = require("firebase-functions/params");
 const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
 
 initializeApp();
 const db = getFirestore();
+
+// Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
+// plaintext .env value — the previous approach in the Flutter app bundled
+// .env as a Flutter asset (pubspec.yaml's flutter:assets:), which ships it
+// inside every compiled APK/IPA. Set via `firebase functions:secrets:set
+// OPENAI_API_KEY` (see deployment notes); never committed to source.
+const OPENAI_API_KEY = defineSecret("OPENAI_API_KEY");
 
 /**
  * Sums this user's progress toward `challenge` over its date range, using
@@ -321,5 +330,296 @@ exports.sendAdminBroadcast = onDocumentCreated(
       }
 
       await snap.ref.update({processed: true});
+    },
+);
+
+/**
+ * Builds a compact, one-line-per-category personalization summary for
+ * uid from their body profile, injury profile, active plan, and last 5
+ * sessions — omitting any category that's empty/missing entirely rather
+ * than sending a placeholder/empty value to the LLM. Mirrors the exact
+ * shapes/defaults FirestoreService already uses client-side
+ * (getUserInjuryData()'s injuries:[]/injuryFilteringEnabled:false
+ * defaults, getSessionsPage()'s orderBy('date', desc).limit(N) shape,
+ * planProgress/{planId}'s currentDayIndex/lastCompletedDate/
+ * breakModeActive fields) — kept in sync by hand since this runs via
+ * firebase-admin instead of the Flutter client. Only ever called when
+ * aiPersonalizationConsent is already confirmed true by the caller.
+ *
+ * Deliberately sends only short summarized text, never raw documents —
+ * in particular, session docs' full `exercises` array and any
+ * `photoBase64` field are never read into this summary at all (only the
+ * headline stat per session), per this phase's scope.
+ *
+ * @param {string} uid
+ * @param {FirebaseFirestore.DocumentData} userData - the already-fetched
+ *   users/{uid} doc (avoids a second read of the same doc — body-profile
+ *   fields and trackedPlanId/trackedPlanName live on it alongside
+ *   aiPersonalizationConsent).
+ * @return {Promise<string>} non-empty categories joined by newlines, or
+ *   "" if nothing was available (brand-new user).
+ */
+async function buildPersonalizationContext(uid, userData) {
+  const lines = [];
+
+  // Body profile — only fields that are actually present are included;
+  // a missing/undefined field is omitted, never sent as a blank value.
+  const bodyParts = [];
+  if (userData.dob) bodyParts.push(`DOB ${userData.dob}`);
+  if (userData.biologicalSex) bodyParts.push(userData.biologicalSex);
+  if (typeof userData.heightCm === "number") {
+    bodyParts.push(`${userData.heightCm}cm`);
+  }
+  if (typeof userData.weightKg === "number") {
+    bodyParts.push(`${userData.weightKg}kg`);
+  }
+  if (userData.experienceLevel) bodyParts.push(userData.experienceLevel);
+  if (userData.primaryGoal) bodyParts.push(`goal: ${userData.primaryGoal}`);
+  if (bodyParts.length > 0) {
+    lines.push(`Body profile: ${bodyParts.join(", ")}.`);
+  }
+
+  // Injury profile — same shape/defaults as getUserInjuryData(): an
+  // empty/missing injuries array means "omit this category" entirely.
+  const injuries = Array.isArray(userData.injuries) ? userData.injuries : [];
+  if (injuries.length > 0) {
+    const injuryList = injuries
+        .map((i) => `${i.name || i.bodyPart || "unspecified"}` +
+            (i.severity ? ` (${i.severity})` : ""))
+        .join(", ");
+    lines.push(`Reported injuries: ${injuryList}.`);
+  }
+
+  // Active plan — trackedPlanId === '' (the same sentinel every existing
+  // client-side consumer already checks) means nothing tracked, so this
+  // category is omitted rather than fetched.
+  const trackedPlanId = userData.trackedPlanId;
+  if (typeof trackedPlanId === "string" && trackedPlanId !== "") {
+    try {
+      const progressDoc = await db
+          .collection("users")
+          .doc(uid)
+          .collection("planProgress")
+          .doc(trackedPlanId)
+          .get();
+      const progress = progressDoc.exists ? progressDoc.data() : null;
+      const planName = userData.trackedPlanName || "their tracked plan";
+      const parts = [`Currently tracking "${planName}"`];
+      if (progress) {
+        if (typeof progress.currentDayIndex === "number") {
+          parts.push(`on day ${progress.currentDayIndex}`);
+        }
+        if (progress.breakModeActive === true) {
+          parts.push("currently on a break");
+        } else if (progress.lastCompletedDate) {
+          parts.push(`last completed session ${progress.lastCompletedDate}`);
+        }
+      }
+      lines.push(`${parts.join(", ")}.`);
+    } catch (err) {
+      console.error(
+          `buildPersonalizationContext: planProgress read failed for ` +
+          `uid ${uid}:`, err,
+      );
+    }
+  }
+
+  // Recent sessions — last 5 by date, same orderBy/limit shape as
+  // getSessionsPage()'s unfiltered case (no composite index needed).
+  // Headline stat only per session — never the full exercises array or
+  // photoBase64.
+  try {
+    const sessionsSnap = await db
+        .collection("users")
+        .doc(uid)
+        .collection("sessions")
+        .orderBy("date", "desc")
+        .limit(5)
+        .get();
+    if (!sessionsSnap.empty) {
+      const summaries = sessionsSnap.docs.map((doc) => {
+        const s = doc.data();
+        const type = s.type || "session";
+        const dateStr = s.date && typeof s.date.toDate === "function" ?
+          s.date.toDate().toISOString().substring(0, 10) :
+          "unknown date";
+        const minutes = typeof s.durationSeconds === "number" ?
+          Math.round(s.durationSeconds / 60) :
+          null;
+        let stat = null;
+        if (type === "gym" && typeof s.totalVolume === "number") {
+          stat = `${Math.round(s.totalVolume)}kg volume`;
+        } else if (type === "cardio" && typeof s.distanceMeters === "number") {
+          stat = `${(s.distanceMeters / 1000).toFixed(1)}km`;
+        }
+        const bits = [dateStr, type];
+        if (minutes !== null) bits.push(`${minutes}min`);
+        if (stat !== null) bits.push(stat);
+        return bits.join(" ");
+      });
+      lines.push(`Recent sessions: ${summaries.join("; ")}.`);
+    }
+  } catch (err) {
+    console.error(
+        `buildPersonalizationContext: sessions read failed for uid ` +
+        `${uid}:`, err,
+    );
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * callWiseCoachOpenAI — server-side relay to OpenAI's chat completions
+ * endpoint, shared by both WiseCoach features that currently call OpenAI:
+ * the Coach tab chat (coach_screen.dart's _sendToOpenAI()) and the
+ * post-session AI summary (post_session_summary_screen.dart's
+ * _generateWiseCoachSummary()). Both features already assemble their own
+ * full messages array (system prompt + conversation history for chat; a
+ * single user-role prompt string for the summary) — this function is a
+ * thin relay by default: it forwards the messages/params the client
+ * assembled to OpenAI and returns the reply text unchanged. Message-limit
+ * gating and referral logic are still later phases per the PRD's Section
+ * 5.6 rollout; this phase adds only the personalization context below.
+ *
+ * One shared function rather than two separate ones: both features hit
+ * the identical OpenAI endpoint/shape (a messages array + generation
+ * params), differing only in the messages content and max_tokens the
+ * client already computes — splitting that into two near-identical
+ * relay functions would just duplicate the fetch/error-handling logic
+ * below for no behavioral benefit. Matches the PRD's own framing too
+ * ("a WiseCoach HTTPS Cloud Function", singular).
+ *
+ * Personalization (Phase 2): gated server-side on aiPersonalizationConsent
+ * — never trusted from the client, since a client-side-only gate could be
+ * bypassed by calling this function directly. request.auth.uid comes from
+ * the verified Firebase Auth ID token Cloud Functions' callable protocol
+ * attaches automatically (the cloud_functions Flutter SDK sends it for any
+ * signed-in caller) — not a client-supplied field, so it can't be spoofed
+ * to read another user's data. When consent is true, a compact context
+ * summary (see buildPersonalizationContext() above — never raw Firestore
+ * documents) is appended onto the EXISTING system-role message in the
+ * incoming array, if one exists. It's deliberately never used to inject a
+ * brand-new system message: post_session_summary_screen.dart's
+ * _generateWiseCoachSummary() sends only a single user-role prompt with no
+ * system message at all, and this is what keeps that feature's request
+ * shape (and therefore its behavior) completely untouched by this gate,
+ * without needing an explicit per-feature flag from the client. Any
+ * failure while assembling personalization (a Firestore read error, etc.)
+ * is caught and logged, never allowed to block the underlying chat reply —
+ * personalization is additive and best-effort, not a hard dependency.
+ *
+ * @param {{messages: {role: string, content: string}[], maxTokens?: number, temperature?: number}} request.data
+ * @return {Promise<{content: string}>}
+ */
+exports.callWiseCoachOpenAI = onCall(
+    {secrets: [OPENAI_API_KEY]},
+    async (request) => {
+      const data = request.data || {};
+      const messages = data.messages;
+      if (!Array.isArray(messages) || messages.length === 0) {
+        throw new HttpsError(
+            "invalid-argument",
+            "messages must be a non-empty array of {role, content}.",
+        );
+      }
+
+      const uid = request.auth && request.auth.uid;
+      // TEMPORARY DIAGNOSTIC LOGGING — added for the "personalization not
+      // reaching the LLM" investigation. Does not change any behavior,
+      // only adds visibility into the consent/injection branch, which
+      // previously had zero logging on its success path. Remove once the
+      // root cause is confirmed via a fresh on-device test + these logs.
+      console.log(`callWiseCoachOpenAI DIAGNOSTIC: uid=${uid || "none"}`);
+      if (uid) {
+        try {
+          const userDoc = await db.collection("users").doc(uid).get();
+          const userData = userDoc.exists ? userDoc.data() : {};
+          console.log(
+              "callWiseCoachOpenAI DIAGNOSTIC: userDoc.exists=" +
+              `${userDoc.exists}, aiPersonalizationConsent=` +
+              `${userData.aiPersonalizationConsent}`,
+          );
+          if (userData.aiPersonalizationConsent === true) {
+            const context = await buildPersonalizationContext(uid, userData);
+            console.log(
+                "callWiseCoachOpenAI DIAGNOSTIC: context length=" +
+                `${context ? context.length : 0}` +
+                (context ? ` content=${JSON.stringify(context)}` : ""),
+            );
+            if (context) {
+              const systemMessage = messages.find((m) => m.role === "system");
+              console.log(
+                  "callWiseCoachOpenAI DIAGNOSTIC: systemMessage found=" +
+                  `${!!systemMessage}`,
+              );
+              if (systemMessage) {
+                systemMessage.content =
+                    `${systemMessage.content}\n\nWhat you know about this ` +
+                    "user (reference this naturally where relevant, don't " +
+                    `recite it verbatim):\n${context}`;
+              }
+            }
+          }
+        } catch (err) {
+          console.error(
+              `callWiseCoachOpenAI: personalization context failed for ` +
+              `uid ${uid}:`, err,
+          );
+        }
+      }
+
+      const maxTokens =
+        typeof data.maxTokens === "number" ? data.maxTokens : 300;
+      const temperature =
+        typeof data.temperature === "number" ? data.temperature : 0.7;
+
+      let response;
+      try {
+        response = await fetch(
+            "https://api.openai.com/v1/chat/completions",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${OPENAI_API_KEY.value()}`,
+              },
+              body: JSON.stringify({
+                model: "gpt-4o-mini",
+                messages,
+                max_tokens: maxTokens,
+                temperature,
+              }),
+            },
+        );
+      } catch (err) {
+        console.error("callWiseCoachOpenAI: fetch to OpenAI failed:", err);
+        throw new HttpsError("unavailable", "Could not reach OpenAI.");
+      }
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(
+            `callWiseCoachOpenAI: OpenAI error ${response.status}: ` +
+            errText,
+        );
+        throw new HttpsError("internal", "OpenAI request failed.");
+      }
+
+      const json = await response.json();
+      const content = json.choices &&
+          json.choices[0] &&
+          json.choices[0].message &&
+          json.choices[0].message.content;
+
+      if (typeof content !== "string") {
+        console.error(
+            "callWiseCoachOpenAI: unexpected OpenAI response shape:",
+            JSON.stringify(json),
+        );
+        throw new HttpsError("internal", "Unexpected OpenAI response shape.");
+      }
+
+      return {content};
     },
 );

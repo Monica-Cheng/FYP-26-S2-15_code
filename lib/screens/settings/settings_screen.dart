@@ -31,6 +31,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   TimeOfDay _reminderTime = const TimeOfDay(hour: 7, minute: 0);
   bool _streakAlerts = true;
   bool _wiseCoachMessages = true;
+  bool _aiPersonalizationConsent = false;
   bool _leaderboardVisible = true;
   bool _prefsLoading = true;
 
@@ -58,6 +59,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _workoutReminders = profile?['workoutReminders'] as bool? ?? true;
         _streakAlerts = profile?['streakAlerts'] as bool? ?? true;
         _wiseCoachMessages = profile?['wiseCoachMessages'] as bool? ?? true;
+        _aiPersonalizationConsent =
+            profile?['aiPersonalizationConsent'] as bool? ?? false;
         _leaderboardVisible = profile?['leaderboardVisible'] as bool? ?? true;
         final savedHour = profile?['reminderHour'] as int?;
         final savedMinute = profile?['reminderMinute'] as int?;
@@ -89,6 +92,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } else {
       await NotificationService().cancelWorkoutReminder();
     }
+  }
+
+  // Saved standalone (not bundled into _savePrefs()) for the same reason
+  // as _onLeaderboardVisibilityToggle() below — also writes
+  // hasSeenAiConsentPrompt: true so coach_screen.dart's one-time consent
+  // dialog never re-prompts a user who already made this choice directly
+  // from Settings instead of from that dialog.
+  Future<void> _onAiPersonalizationToggle(bool val) async {
+    setState(() => _aiPersonalizationConsent = val);
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      await _firestore.updateUserProfile(uid, {
+        'aiPersonalizationConsent': val,
+        'hasSeenAiConsentPrompt': true,
+      });
+    } catch (_) {}
   }
 
   // Saved standalone (not bundled into _savePrefs()) so toggling this
@@ -379,6 +399,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             setState(() => _wiseCoachMessages = v);
                             _savePrefs();
                           }),
+                        ),
+                        _row(
+                          icon: Icons.psychology_rounded,
+                          iconBg: WW.lavender,
+                          title: 'WiseCoach Personalization',
+                          sub: 'Let WiseCoach use your training data',
+                          chevron: false,
+                          right: _buildToggle(
+                              _aiPersonalizationConsent,
+                              _onAiPersonalizationToggle),
                         ),
                       ]),
                     _sectionHeader('Community'),

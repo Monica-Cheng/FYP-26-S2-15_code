@@ -436,19 +436,33 @@ class _MidPlanCardioCompleteScreenState
                               borderRadius: BorderRadius.circular(16),
                               child: Stack(
                                 children: [
-                                  _pickedPhoto != null
-                                      ? Image.file(
-                                          _pickedPhoto!,
-                                          height: 160,
-                                          width: double.infinity,
-                                          fit: BoxFit.cover,
-                                        )
-                                      : Image.memory(
-                                          _existingPhotoBytes!,
-                                          height: 160,
-                                          width: double.infinity,
-                                          fit: BoxFit.cover,
-                                        ),
+                                  // maxHeight caps how tall this gets
+                                  // without cropping the photo —
+                                  // BoxFit.contain shows the whole image
+                                  // (letterboxed against WW.elevated when
+                                  // its aspect ratio doesn't fill the box),
+                                  // instead of the previous fixed
+                                  // height: 160 + BoxFit.cover, which
+                                  // cropped whatever didn't fit a
+                                  // 160px-tall strip regardless of the
+                                  // photo's real shape.
+                                  Container(
+                                    width: double.infinity,
+                                    constraints:
+                                        const BoxConstraints(maxHeight: 220),
+                                    color: WW.elevated,
+                                    child: _pickedPhoto != null
+                                        ? Image.file(
+                                            _pickedPhoto!,
+                                            width: double.infinity,
+                                            fit: BoxFit.contain,
+                                          )
+                                        : Image.memory(
+                                            _existingPhotoBytes!,
+                                            width: double.infinity,
+                                            fit: BoxFit.contain,
+                                          ),
+                                  ),
                                   Positioned(
                                     top: 8,
                                     right: 8,

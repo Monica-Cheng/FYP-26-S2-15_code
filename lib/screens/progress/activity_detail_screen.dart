@@ -1014,24 +1014,38 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
   }
 
   // ── Photo (cardio only) ─────────────────────────────────────────────────
-  // Same base64Decode + Image.memory pattern already used for stored photos
-  // elsewhere in this app (e.g. progress_screen.dart's Activities list map
-  // thumbnails) — a decode/render failure falls back to nothing rather than
-  // breaking the page.
 
-  Widget? _buildPhotoWidget() {
-    final raw = _session['photoBase64'] as String?;
+  Widget? _buildPhotoWidget() =>
+      _buildPhotoPreview(_session['photoBase64'] as String?);
+
+  // Shared by the top-level session photo above and each cardio block's own
+  // photo (see _buildCardioBlockCard) — deliberately NOT shared with
+  // _decodeCardioBlockImage below, which renders that same block's map
+  // snapshot: a map thumbnail is fine cropped at a small fixed size (same
+  // reasoning as progress_screen.dart's Activities list map thumbnail), but
+  // the user's own attached photo should always show the whole thing they
+  // actually took, not a crop. Container+maxHeight+BoxFit.contain (instead
+  // of the previous fixed height + BoxFit.cover) shows the full image,
+  // letterboxed against WW.elevated when its aspect ratio doesn't fill the
+  // box, capped at 220 so a very elongated photo still can't take over the
+  // screen. A decode/render failure falls back to nothing rather than
+  // breaking the page.
+  Widget? _buildPhotoPreview(String? raw, {double borderRadius = 16}) {
     if (raw == null || raw.isEmpty) return null;
     try {
       final bytes = base64Decode(raw);
       return ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: Image.memory(
-          bytes,
+        borderRadius: BorderRadius.circular(borderRadius),
+        child: Container(
           width: double.infinity,
-          height: 200,
-          fit: BoxFit.cover,
-          errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          constraints: const BoxConstraints(maxHeight: 220),
+          color: WW.elevated,
+          child: Image.memory(
+            bytes,
+            width: double.infinity,
+            fit: BoxFit.contain,
+            errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          ),
         ),
       );
     } catch (_) {
@@ -1288,10 +1302,10 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
     return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
-  // Same base64Decode + Image.memory pattern as _buildPhotoWidget above —
-  // duplicated rather than shared since that method reads a fixed top-level
-  // session field, while this one renders whichever base64 string a given
-  // cardioBlocks[] entry actually carries (map snapshot or photo).
+  // Map-snapshot preview only now (see _buildPhotoPreview's doc comment for
+  // why the per-block photo moved there instead) — BoxFit.cover at a small
+  // fixed height stays correct here since cropping a map thumbnail is
+  // expected/harmless, unlike cropping the user's own photo.
   Widget? _decodeCardioBlockImage(String? raw, {double height = 160}) {
     if (raw == null || raw.isEmpty) return null;
     try {
@@ -1368,7 +1382,7 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
     final mapPreviewWidget = hasMapCandidate && !isActiveMap
         ? _decodeCardioBlockImage(mapSnapshotBase64, height: 180)
         : null;
-    final photoWidget = _decodeCardioBlockImage(photoBase64);
+    final photoWidget = _buildPhotoPreview(photoBase64, borderRadius: 12);
 
     return Container(
       key: _cardioBlockKeys.putIfAbsent(index, () => GlobalKey()),

@@ -628,11 +628,24 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
                           borderRadius: BorderRadius.circular(16),
                           child: Stack(
                             children: [
-                              Image.file(
-                                _finishPickedPhoto!,
-                                height: 160,
+                              // maxHeight caps how tall this gets without
+                              // cropping the photo — BoxFit.contain shows
+                              // the whole image (letterboxed against
+                              // WW.elevated when its aspect ratio doesn't
+                              // fill the box), instead of the previous
+                              // fixed height: 160 + BoxFit.cover, which
+                              // cropped whatever didn't fit a 160px-tall
+                              // strip regardless of the photo's real shape.
+                              Container(
                                 width: double.infinity,
-                                fit: BoxFit.cover,
+                                constraints:
+                                    const BoxConstraints(maxHeight: 220),
+                                color: WW.elevated,
+                                child: Image.file(
+                                  _finishPickedPhoto!,
+                                  width: double.infinity,
+                                  fit: BoxFit.contain,
+                                ),
                               ),
                               Positioned(
                                 top: 8,

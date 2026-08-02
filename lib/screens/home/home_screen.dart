@@ -16,6 +16,7 @@ import '../../core/router.dart';
 import '../../providers/month_activity_provider.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../services/notification_service.dart';
 import '../../widgets/common/month_calendar.dart';
 import '../../widgets/quick_add_sheet.dart';
 import '../../widgets/session_resume_prompt.dart';
@@ -414,8 +415,29 @@ class _HomeTabState extends State<_HomeTab> {
           (progress['currentDayIndex'] as num?)?.toInt() ?? 1;
       final breakModeActive =
           progress['breakModeActive'] as bool? ?? false;
+      final trackedPlanStartedAt =
+          progress['trackedPlanStartedAt'] as Timestamp?;
 
       if (breakModeActive) return;
+
+      // Grace period: don't flag a plan that hasn't been tracked for a
+      // full 24h yet — e.g. the user tracked a different plan earlier
+      // today, untracked it, and just switched onto this one, which may
+      // carry stale/empty history of its own. trackPlan() stamps this
+      // fresh on every track/switch (see firestore_service.dart), so it
+      // always reflects the current tracking stint, not the plan's
+      // lifetime history. A missing value (plan tracked before this field
+      // existed) doesn't block the check — treated as long since past the
+      // grace period. Break time is excluded from this window: entering
+      // and leaving a break in plan_schedule_screen.dart shifts this
+      // timestamp forward by the break's duration, so it measures real
+      // tracked time, not wall-clock time since first tracked.
+      if (trackedPlanStartedAt != null &&
+          DateTime.now().difference(trackedPlanStartedAt.toDate()) <
+              const Duration(hours: 24)) {
+        return;
+      }
+
       if (lastCompletedDate == yesterday || lastCompletedDate == today) return;
 
       final missedDoc = await FirebaseFirestore.instance
@@ -434,6 +456,74 @@ class _HomeTabState extends State<_HomeTab> {
         _missedDayIndex = currentDayIndex;
         _showMissedBanner = true;
       });
+    } catch (_) {}
+  }
+
+  // Break-mode auto-expiry detection, duplicated from
+  // plan_schedule_screen.dart's _init() rather than sharing a helper (per
+  // this session's scope: keep this minimal, single-consumer wiring, no
+  // new shared abstraction) — this is the second and only other place a
+  // break's expiry is discovered. plan_schedule_screen.dart's own check
+  // only runs if the user reopens that specific screen; this one runs
+  // here instead on every _loadUserData() call (app cold-start, and every
+  // Quick Add/Profile-return reload), so an expired break gets resumed
+  // even if the user never revisits Plan Schedule.
+  //
+  // Safe to run alongside plan_schedule_screen.dart's own check rather
+  // than needing to prevent both from ever firing together: whichever
+  // check reads breakModeActive == true first does the write and reminder
+  // reschedule; the other reads it as already false (once the first
+  // write lands) and no-ops via the guard below. In the rare case both
+  // read the stale (still-active) state before either writes, both
+  // compute the same shift from the same source fields and both call
+  // scheduleDailyWorkoutReminder(), which itself cancels-then-reschedules
+  // — so the end state is still exactly one correctly-resumed reminder,
+  // not a duplicate or a double-shifted timestamp.
+  Future<void> _checkBreakAutoExpiry(
+    String uid,
+    String planId,
+    Map<String, dynamic>? profile,
+  ) async {
+    try {
+      final progress = await _firestoreService.getPlanProgress(uid, planId);
+      final breakActive = progress?['breakModeActive'] as bool? ?? false;
+      if (!breakActive) return;
+
+      final breakEndDate = progress?['breakEndDate'] as String?;
+      final today = DateTime.now().toString().substring(0, 10);
+      if (breakEndDate == null || breakEndDate.compareTo(today) >= 0) return;
+
+      final breakStartDate = progress?['breakStartDate'] as String?;
+      final startedAt = progress?['trackedPlanStartedAt'] as Timestamp?;
+      Timestamp? shifted;
+      if (startedAt != null && breakStartDate != null) {
+        try {
+          final start = DateTime.parse(breakStartDate);
+          final through = DateTime.parse(breakEndDate);
+          final days = through.difference(start).inDays;
+          if (days > 0) {
+            shifted =
+                Timestamp.fromDate(startedAt.toDate().add(Duration(days: days)));
+          }
+        } catch (_) {}
+      }
+
+      final updates = <String, dynamic>{
+        'breakModeActive': false,
+        'breakEndDate': null,
+        'breakStartDate': null,
+        'breakDays': null,
+      };
+      if (shifted != null) updates['trackedPlanStartedAt'] = shifted;
+      await _firestoreService.updatePlanProgress(uid, planId, updates);
+
+      final workoutRemindersOn =
+          profile?['workoutReminders'] as bool? ?? true;
+      if (!workoutRemindersOn) return;
+      final hour = (profile?['reminderHour'] as num?)?.toInt() ?? 7;
+      final minute = (profile?['reminderMinute'] as num?)?.toInt() ?? 0;
+      await NotificationService()
+          .scheduleDailyWorkoutReminder(TimeOfDay(hour: hour, minute: minute));
     } catch (_) {}
   }
 
@@ -576,6 +666,7 @@ class _HomeTabState extends State<_HomeTab> {
         // but call it immediately so the home screen isn't blank while streaming.
         _loadTodaySession(uid, _currentDayIndex);
         _checkMissedSession(uid);
+        _checkBreakAutoExpiry(uid, trackedPlanId, profile);
       }
     } catch (_) {
       if (mounted) {

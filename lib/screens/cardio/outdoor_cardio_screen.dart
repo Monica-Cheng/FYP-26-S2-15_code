@@ -2332,6 +2332,19 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   // proportioned within the frame — the actual goal of a route thumbnail
   // — even if it isn't pixel-registered against the base map's roads
   // underneath.
+  //
+  // Uses a SINGLE uniform scale for both axes (previously: two independent
+  // scale factors, lngSpan->width and mercYSpan->height, computed
+  // separately). That independent-axis version stretched the route
+  // anisotropically whenever the route's true geographic bounding-box
+  // aspect ratio didn't match this canvas's fixed 480x300 shape — which is
+  // most of the time — visibly warping the drawn line relative to its real
+  // shape. A real map camera (including the live MapLibreMap the activity
+  // detail screen renders, which looks correct) only ever has one zoom
+  // level applied identically to both axes; this now matches that by
+  // taking the smaller of the two axis-fit ratios as the one shared scale,
+  // then centering the route within whichever axis ends up with leftover
+  // room — the same idea as BoxFit.contain, not BoxFit.fill.
   void _drawRouteOnSnapshot(
     img.Image image,
     List<LatLng> allPoints,
@@ -2358,15 +2371,22 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     const paddingFraction = 0.12;
     final w = image.width.toDouble();
     final h = image.height.toDouble();
+    final drawableW = w * (1 - 2 * paddingFraction);
+    final drawableH = h * (1 - 2 * paddingFraction);
+
+    // The smaller of the two axis-fit ratios is the binding constraint —
+    // scaling by the larger one would overflow the other axis. Whichever
+    // axis isn't the binding one ends up with unused space, split evenly
+    // as a centering offset (letterboxing) rather than stretched to fill it.
+    final scale = math.min(drawableW / lngSpan, drawableH / mercYSpan);
+    final offsetX = (w - lngSpan * scale) / 2;
+    final offsetY = (h - mercYSpan * scale) / 2;
 
     ({double x, double y}) project(LatLng point) {
-      final xFrac = (point.longitude - bounds.minLng) / lngSpan;
       // North (higher lat, larger mercatorY) maps to the TOP of the image
-      // (smaller y) — hence maxY-minus-current over the span, not the
-      // other way round.
-      final yFrac = (mercMaxY - mercatorY(point.latitude)) / mercYSpan;
-      final x = paddingFraction * w + xFrac * (1 - 2 * paddingFraction) * w;
-      final y = paddingFraction * h + yFrac * (1 - 2 * paddingFraction) * h;
+      // (smaller y) — hence maxY-minus-current, not the other way round.
+      final x = offsetX + (point.longitude - bounds.minLng) * scale;
+      final y = offsetY + (mercMaxY - mercatorY(point.latitude)) * scale;
       return (x: x, y: y);
     }
 
@@ -2785,11 +2805,23 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
                       borderRadius: BorderRadius.circular(16),
                       child: Stack(
                         children: [
-                          Image.file(
-                            _pickedPhoto!,
-                            height: 160,
+                          // maxHeight caps how tall this gets without
+                          // cropping the photo — BoxFit.contain shows the
+                          // whole image (letterboxed against WW.elevated
+                          // when its aspect ratio doesn't fill the box),
+                          // instead of the previous fixed height: 160 +
+                          // BoxFit.cover, which cropped whatever didn't
+                          // fit a 160px-tall strip regardless of the
+                          // photo's real shape.
+                          Container(
                             width: double.infinity,
-                            fit: BoxFit.cover,
+                            constraints: const BoxConstraints(maxHeight: 220),
+                            color: WW.elevated,
+                            child: Image.file(
+                              _pickedPhoto!,
+                              width: double.infinity,
+                              fit: BoxFit.contain,
+                            ),
                           ),
                           Positioned(
                             top: 8,

@@ -765,46 +765,99 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
-  // Returns the [limit] most recent sessions for users/{uid}, newest first.
+  // Returns one page of sessions for users/{uid}, newest first — replaces the
+  // old getRecentSessions()/getRecentSessionsStream() pair, which had a
+  // hardcoded limit and no way to page past it (root cause of
+  // less-frequently-logged session types silently aging out of view once
+  // enough newer sessions of another type accumulated).
+  //
+  // type/manualOnly/customOnly filter server-side (not client-side after the
+  // fetch) so a filtered page always reflects [pageSize] real matches —
+  // filtering the already-limited result client-side would reintroduce the
+  // same "looks like there's only a few, but there's actually more on later
+  // pages" bug in a new shape. Only one of type/manualOnly/customOnly is
+  // ever passed at once by progress_screen.dart's single-select filter
+  // chips, matching _filteredSessions' old mutually-exclusive semantics.
+  //
+  // rangeStart/rangeEnd add an optional INCLUSIVE [rangeStart, rangeEnd]
+  // range on the same 'date' field the query already orders by — the
+  // caller (progress_screen.dart's _pickActivityDate()/_loadSessionsPage())
+  // is responsible for setting rangeEnd to 23:59:59.999 of the selected end
+  // day so activities logged later that same day aren't excluded.
+  //
+  // One-time fetch (not .snapshots()) — a live listener on a
+  // startAfterDocument()-paginated page would keep re-firing as new
+  // sessions are saved, shifting what "the last item on this page" is and
+  // desyncing from a cursor already captured from an earlier snapshot
+  // (duplicate/reordered/missing items on the next page). See
+  // progress_screen.dart's _loadSessionsPage() for the caller-side paging
+  // state (cursor, hasMore, append-on-load-more).
+  //
+  // Combining an equality filter (type/isManuallyLogged/planIsCustom) with
+  // orderBy('date') on a different field requires a composite index — see
+  // firestore.indexes.json (type+date, isManuallyLogged+date,
+  // planIsCustom+date), deployed via `firebase deploy --only
+  // firestore:indexes`. That field/order combination is unaffected by
+  // switching the date clause from isLessThan (month-exclusive) to
+  // isLessThanOrEqualTo (range-inclusive) — composite indexes key on which
+  // fields and their sort order, not the comparison operator a query uses,
+  // so no index changes were needed for that switch. The unfiltered ("All")
+  // case still needs no composite index since date is the only field
+  // involved.
   // ---------------------------------------------------------------------------
-  Future<List<Map<String, dynamic>>> getRecentSessions(
+  Future<
+      ({
+        List<Map<String, dynamic>> sessions,
+        DocumentSnapshot<Map<String, dynamic>>? lastDoc,
+        bool hasMore,
+      })> getSessionsPage(
     String uid, {
-    int limit = 10,
+    int pageSize = 20,
+    DocumentSnapshot<Map<String, dynamic>>? startAfterDoc,
+    String? type,
+    bool manualOnly = false,
+    bool customOnly = false,
+    DateTime? rangeStart,
+    DateTime? rangeEnd,
   }) async {
-    final snapshot = await _db
+    Query<Map<String, dynamic>> query = _db
         .collection(Collections.users)
         .doc(uid)
-        .collection(Collections.sessions)
-        .orderBy('date', descending: true)
-        .limit(limit)
-        .get();
+        .collection(Collections.sessions);
 
-    return snapshot.docs
-        .map((doc) => {'id': doc.id, ...doc.data()})
-        .toList();
-  }
+    if (type != null) {
+      query = query.where('type', isEqualTo: type);
+    }
+    if (manualOnly) {
+      query = query.where('isManuallyLogged', isEqualTo: true);
+    }
+    if (customOnly) {
+      query = query.where('planIsCustom', isEqualTo: true);
+    }
+    if (rangeStart != null) {
+      query = query.where(
+        'date',
+        isGreaterThanOrEqualTo: Timestamp.fromDate(rangeStart),
+      );
+    }
+    if (rangeEnd != null) {
+      query = query.where(
+        'date',
+        isLessThanOrEqualTo: Timestamp.fromDate(rangeEnd),
+      );
+    }
+    query = query.orderBy('date', descending: true).limit(pageSize);
+    if (startAfterDoc != null) {
+      query = query.startAfterDocument(startAfterDoc);
+    }
 
-  // ---------------------------------------------------------------------------
-  // Live stream of the [limit] most recent sessions for users/{uid}, newest
-  // first — same query as getRecentSessions() (kept as-is; other callers may
-  // still use the one-shot version) but reactive, so a screen listening to
-  // this updates automatically when a new session is saved elsewhere,
-  // without requiring a manual refetch/app restart.
-  // ---------------------------------------------------------------------------
-  Stream<List<Map<String, dynamic>>> getRecentSessionsStream(
-    String uid, {
-    int limit = 20,
-  }) {
-    return _db
-        .collection(Collections.users)
-        .doc(uid)
-        .collection(Collections.sessions)
-        .orderBy('date', descending: true)
-        .limit(limit)
-        .snapshots()
-        .map((snapshot) => snapshot.docs
-            .map((doc) => {'id': doc.id, ...doc.data()})
-            .toList());
+    final snapshot = await query.get();
+    return (
+      sessions:
+          snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList(),
+      lastDoc: snapshot.docs.isEmpty ? null : snapshot.docs.last,
+      hasMore: snapshot.docs.length == pageSize,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -2017,6 +2070,17 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
   // Sets the user's tracked plan. Progress is stored per-plan in the
   // planProgress subcollection; only trackedPlanId/Name live on the user doc.
+  //
+  // trackedPlanStartedAt is written unconditionally on every call (unlike
+  // initPlanProgress()'s other seed fields, which only ever get set once
+  // per plan) — it always reflects when the CURRENTLY tracked plan most
+  // recently became tracked, including re-tracks/switches, so
+  // home_screen.dart's _checkMissedSession() has a reliable anchor for its
+  // 24h grace period even when switching onto an old, previously-tracked
+  // plan with stale history. Deliberately a separate field from the
+  // existing trackingStartDate (set once, inside initPlanProgress, and
+  // otherwise unused) to avoid redefining that field's original
+  // first-ever-tracked meaning.
   // ---------------------------------------------------------------------------
   Future<void> trackPlan(
     String uid,
@@ -2029,6 +2093,9 @@ class FirestoreService {
       'savedPlanIds': FieldValue.arrayUnion([planId]),
     });
     await initPlanProgress(uid, planId);
+    await updatePlanProgress(uid, planId, {
+      'trackedPlanStartedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   // ---------------------------------------------------------------------------

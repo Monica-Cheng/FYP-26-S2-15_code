@@ -4,10 +4,9 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:go_router/go_router.dart';
-import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:share_plus/share_plus.dart';
@@ -282,28 +281,24 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
           'Keep it under 60 words. Plain text only, no markdown.';
     }
 
+    // Relays through the callWiseCoachOpenAI Cloud Function instead of
+    // calling OpenAI directly — the API key now lives server-side as a
+    // Cloud Functions secret, never in the app bundle. Same prompt, same
+    // model/max_tokens/temperature as before; only WHERE the OpenAI call
+    // happens has changed.
     try {
-      final response = await http.post(
-        Uri.parse('https://api.openai.com/v1/chat/completions'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization':
-              'Bearer ${dotenv.env['OPENAI_API_KEY'] ?? ''}',
-        },
-        body: jsonEncode({
-          'model': 'gpt-4o-mini',
-          'messages': [
-            {'role': 'user', 'content': prompt},
-          ],
-          'max_tokens': 150,
-          'temperature': 0.7,
-        }),
-      );
+      final callable =
+          FirebaseFunctions.instance.httpsCallable('callWiseCoachOpenAI');
+      final result = await callable.call<Map<String, dynamic>>({
+        'messages': [
+          {'role': 'user', 'content': prompt},
+        ],
+        'maxTokens': 150,
+        'temperature': 0.7,
+      });
       if (!mounted) return;
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        final text =
-            data['choices'][0]['message']['content'] as String;
+      final text = result.data['content'] as String?;
+      if (text != null) {
         final trimmedSummary = text.trim();
         setState(() {
           _wiseCoachSummary = trimmedSummary;
@@ -324,7 +319,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
           } catch (_) {}
         }
       } else {
-        throw Exception('${response.statusCode}');
+        throw Exception('WiseCoach function returned no content');
       }
     } catch (_) {
       if (!mounted) return;
@@ -1417,19 +1412,37 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
   // ── Photo (gym or pure cardio) — ported verbatim from
   // activity_detail_screen.dart's _buildPhotoWidget(). ─────────────────────
 
-  Widget? _buildPhotoWidget() {
-    final raw = _session['photoBase64'] as String?;
+  Widget? _buildPhotoWidget() =>
+      _buildPhotoPreview(_session['photoBase64'] as String?);
+
+  // Shared by the top-level session photo above and each cardio block's own
+  // photo (see _buildCardioBlockCard) — deliberately NOT shared with
+  // _decodeCardioBlockImage below, which renders that same block's map
+  // snapshot: a map thumbnail is fine cropped at a small fixed size (same
+  // reasoning as progress_screen.dart's Activities list map thumbnail), but
+  // the user's own attached photo should always show the whole thing they
+  // actually took, not a crop. Container+maxHeight+BoxFit.contain (instead
+  // of the previous fixed height + BoxFit.cover) shows the full image,
+  // letterboxed against WW.elevated when its aspect ratio doesn't fill the
+  // box, capped at 220 so a very elongated photo still can't take over the
+  // screen. A decode/render failure falls back to nothing rather than
+  // breaking the page.
+  Widget? _buildPhotoPreview(String? raw, {double borderRadius = 16}) {
     if (raw == null || raw.isEmpty) return null;
     try {
       final bytes = base64Decode(raw);
       return ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: Image.memory(
-          bytes,
+        borderRadius: BorderRadius.circular(borderRadius),
+        child: Container(
           width: double.infinity,
-          height: 200,
-          fit: BoxFit.cover,
-          errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          constraints: const BoxConstraints(maxHeight: 220),
+          color: WW.elevated,
+          child: Image.memory(
+            bytes,
+            width: double.infinity,
+            fit: BoxFit.contain,
+            errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          ),
         ),
       );
     } catch (_) {
@@ -1742,6 +1755,10 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
+  // Map-snapshot preview only now (see _buildPhotoPreview's doc comment for
+  // why the per-block photo moved there instead) — BoxFit.cover at a small
+  // fixed height stays correct here since cropping a map thumbnail is
+  // expected/harmless, unlike cropping the user's own photo.
   Widget? _decodeCardioBlockImage(String? raw, {double height = 160}) {
     if (raw == null || raw.isEmpty) return null;
     try {
@@ -1802,7 +1819,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     final mapPreviewWidget = hasMapCandidate && !isActiveMap
         ? _decodeCardioBlockImage(mapSnapshotBase64, height: 180)
         : null;
-    final photoWidget = _decodeCardioBlockImage(photoBase64);
+    final photoWidget = _buildPhotoPreview(photoBase64, borderRadius: 12);
 
     return Container(
       key: _cardioBlockKeys.putIfAbsent(index, () => GlobalKey()),
