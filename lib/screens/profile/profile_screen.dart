@@ -64,6 +64,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String? _hometown;
   String? _bio;
   String? _photoBase64;
+  String _role = 'user';
   bool _isLoading = true;
   bool _isUploadingPhoto = false;
   int _totalXp = 0;
@@ -122,6 +123,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           _photoBase64 = profile?['photoBase64'] as String?;
           _totalXp = (profile?['totalXp'] as num?)?.toInt() ?? 0;
           _level = (profile?['level'] as num?)?.toInt() ?? 1;
+          _role = (profile?['role'] as String?) ?? 'user';
           _isLoading = false;
         });
       }
@@ -310,6 +312,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     _buildProfileCard(),
+                    if (_role == 'coach') _buildCoachDashboardLink(),
                     _buildStatsRow(),
                     _buildBadgesSection(),
                     _buildXpCard(),
@@ -393,6 +396,44 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  // ── Coach dashboard entry point (role == 'coach' only) ────────────────────
+  // Shown for anyone who's applied as a coach, whether their application
+  // is still pending or already approved — coach_dashboard_screen.dart
+  // itself branches on isApproved to show the right state.
+
+  Widget _buildCoachDashboardLink() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: GestureDetector(
+        onTap: () => context.push(Routes.coachDashboard),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: WW.cardDecoration,
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: const BoxDecoration(color: WW.chipBg, shape: BoxShape.circle),
+                child: const Center(
+                  child: Icon(Icons.badge_rounded, color: WW.primary, size: 20),
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Coach Dashboard',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: WW.text),
+                ),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: WW.textSec),
+            ],
+          ),
+        ),
       ),
     );
   }

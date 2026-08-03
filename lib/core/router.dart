@@ -11,6 +11,8 @@ import 'package:go_router/go_router.dart';
 import '../screens/auth/forgot_password_screen.dart';
 import '../screens/auth/login_screen.dart';
 import '../screens/auth/register_screen.dart';
+import '../screens/business/coach_dashboard_screen.dart';
+import '../screens/business/coach_register_screen.dart';
 import '../screens/home/home_screen.dart';
 import '../screens/onboarding/onboarding_step1_screen.dart';
 import '../screens/onboarding/onboarding_step2_screen.dart';
@@ -96,6 +98,8 @@ class Routes {
   static const String outdoorCardioTest = '/outdoor-cardio-test';
   static const String nutritionScan = '/nutrition-scan';
   static const String midPlanCardioComplete = '/mid-plan-cardio-complete';
+  static const String coachRegister = '/coach-register';
+  static const String coachDashboard = '/coach-dashboard';
 }
 
 // Cache for gymSession's pageBuilder key — see that GoRoute's own doc
@@ -120,6 +124,22 @@ class Routes {
 String? _lastGymSessionIdentity;
 ValueKey<String>? _lastGymSessionKey;
 
+// Set by coach_register_screen.dart's "sign in first" gate (its Create
+// Account / I already have an account buttons) so the redirect below can
+// route to coach registration instead of Home once auth genuinely
+// completes — for an EXISTING account that's login_screen.dart's own
+// context.go(Routes.home); for a BRAND-NEW account that's several steps
+// later, after onboarding_step3_screen.dart's own context.go(Routes.home)
+// (registering doesn't skip onboarding — a coach account still needs a
+// normal body profile like any other account). Intercepting in the
+// router's redirect is a single choke point that covers both paths (plus
+// both email/password and Google sign-in within each) without threading
+// an `extra` param through 5 different screens individually. Deliberately
+// a plain in-memory flag, not persisted — it only needs to survive one
+// attempt within the current app session, and is cleared the moment it's
+// consumed so it can never hijack an unrelated later "go home" navigation.
+bool pendingCoachRegistration = false;
+
 final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     initialLocation: Routes.splash,
@@ -128,16 +148,31 @@ final routerProvider = Provider<GoRouter>((ref) {
       final location = state.matchedLocation;
 
       // Public routes — always allow.
+      // coachRegister is public because it's linked from the pre-auth
+      // login screen ("Register as Professional") — the screen itself
+      // gates on FirebaseAuth.instance.currentUser and shows a "sign in
+      // first" prompt rather than the actual form when unauthenticated,
+      // since the registration write needs a real uid.
       final isPublicRoute = location == Routes.splash ||
           location == Routes.walkthrough ||
           location == Routes.login ||
           location == Routes.register ||
-          location == Routes.forgotPassword;
+          location == Routes.forgotPassword ||
+          location == Routes.coachRegister;
       if (isPublicRoute) return null;
 
       // Onboarding routes — allow only while logged in.
       // (Splash already sent unauthenticated users to login.)
       if (user == null) return Routes.login;
+
+      // Redirect to coach registration instead of Home, exactly once,
+      // if the user got here via coach_register_screen.dart's sign-in
+      // gate — see pendingCoachRegistration's own doc comment above.
+      if (pendingCoachRegistration && location == Routes.home) {
+        pendingCoachRegistration = false;
+        return Routes.coachRegister;
+      }
+
       return null;
     },
     routes: [
@@ -441,6 +476,14 @@ final routerProvider = Provider<GoRouter>((ref) {
             challengeId: extra?['challengeId'] as String? ?? '',
           );
         },
+      ),
+      GoRoute(
+        path: Routes.coachRegister,
+        builder: (context, state) => const CoachRegisterScreen(),
+      ),
+      GoRoute(
+        path: Routes.coachDashboard,
+        builder: (context, state) => const CoachDashboardScreen(),
       ),
       // Add more routes here as you build each screen
     ],

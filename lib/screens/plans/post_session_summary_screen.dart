@@ -16,6 +16,7 @@ import '../../core/router.dart';
 import '../../core/share_card_gradients.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../utils/image_encode.dart';
 import '../../utils/widget_capture.dart';
 import '../../widgets/caption_sheet.dart';
 import '../../widgets/photo_background_share_card.dart';
@@ -447,6 +448,10 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     final distanceMeters = (_session['distanceMeters'] as num?)?.toDouble() ?? 0;
     final mapSnapshotBase64 = _session['mapSnapshotBase64'] as String?;
 
+    debugPrint('[RouteOverlay] _routePoints.length=${_routePoints.length}'
+        '${_routePoints.isNotEmpty ? ' first=${_routePoints.first.latitude},${_routePoints.first.longitude} last=${_routePoints.last.latitude},${_routePoints.last.longitude}' : ''}'
+        ' hasSnapshot=${mapSnapshotBase64?.isNotEmpty ?? false} isCardio=$_isCardio');
+
     final cards = <ShareCardOption>[];
 
     if (_isCardio &&
@@ -504,7 +509,6 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       ));
     }
 
-    debugPrint('color card route points: ${_routePoints.length}');
     cards.add(ShareCardOption(
       label: 'Color',
       supportsColorPicker: true,
@@ -549,6 +553,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         card.builder(context),
         size: const Size(360, 640),
       );
+      debugPrint('[ShareCard] label=${card.label} captured bytes=${bytes?.length}');
       if (bytes == null) {
         _snack('Could not generate share card.');
         return;
@@ -692,7 +697,26 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         card.builder(context),
         size: const Size(360, 640),
       );
-      final imageBase64 = pngBytes != null ? base64Encode(pngBytes) : null;
+      debugPrint('[PostToFeed] label=${card.label} captured bytes=${pngBytes?.length}');
+      // Downscaled before base64-encoding for Firestore specifically — the
+      // raw capture is full-resolution (1080x1920 real pixels @
+      // pixelRatio 3.0) PNG, and PNG compresses photographic/map content
+      // poorly enough that a Map/Photo card's full-res capture can exceed
+      // Firestore's ~1 MiB per-document limit once base64-encoded
+      // (verified via test/capture_size_test.dart — a worst-case captured
+      // background landed at ~8.8MB base64; only got safely under the
+      // limit once downscaled). This is exactly what was causing the
+      // "posting to Feed" invalid-argument regression once the async-
+      // image capture race (see widget_capture.dart) was fixed and these
+      // cards started actually capturing real image content instead of a
+      // blank canvas. Share (native OS share sheet) has no such
+      // constraint and stays full-resolution — only this Post-to-Feed
+      // path downscales.
+      final imageBase64 = pngBytes != null
+          ? await encodeImageBytesBase64(pngBytes)
+          : null;
+      debugPrint('[PostToFeed] label=${card.label} downscaled imageBase64 '
+          'length=${imageBase64?.length}');
 
       await FirestoreService().createFeedPost(
         uid: uid,

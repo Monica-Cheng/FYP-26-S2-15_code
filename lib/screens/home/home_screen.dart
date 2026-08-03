@@ -20,6 +20,7 @@ import '../../services/notification_service.dart';
 import '../../widgets/common/month_calendar.dart';
 import '../../widgets/quick_add_sheet.dart';
 import '../../widgets/session_resume_prompt.dart';
+import '../business/coach_dashboard_screen.dart';
 import '../plans/plans_screen.dart';
 import '../coach/coach_screen.dart';
 import '../club/club_screen.dart';
@@ -38,6 +39,8 @@ class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
   int _clubInitialSubtab = 0;
   final _homeTabKey = GlobalKey<_HomeTabState>();
+  final _authService = AuthService();
+  final _firestoreService = FirestoreService();
 
   static const List<_TabItem> _tabItems = [
     _TabItem(label: 'Home', icon: Icons.home_rounded),
@@ -46,6 +49,14 @@ class _HomeScreenState extends State<HomeScreen> {
     _TabItem(label: 'Club', icon: Icons.people_rounded),
     _TabItem(label: 'Progress', icon: Icons.bar_chart_rounded),
   ];
+
+  // Not one of the 5 real bottom-nav destinations above (no icon points
+  // here, matching the earlier decision to keep the business-coach system
+  // out of the shared bottom nav) — only ever reached by _checkCoachLanding()
+  // setting _selectedIndex here directly, right after this shell first
+  // mounts. Tapping any of the 5 real nav items below always overrides it
+  // via _onTabTap, same as switching between any other two tabs.
+  static const int _kCoachDashboardIndex = 5;
 
   List<Widget> get _tabs => [
         _HomeTab(
@@ -57,7 +68,52 @@ class _HomeScreenState extends State<HomeScreen> {
         const CoachScreen(),
         ClubScreen(initialSubtab: _clubInitialSubtab),
         const ProgressScreen(),
+        const CoachDashboardScreen(embedded: true),
       ];
+
+  @override
+  void initState() {
+    super.initState();
+    _checkCoachLanding();
+  }
+
+  // Decides the post-login landing tab based on role — this is the single
+  // choke point for "coach account feels different immediately after
+  // logging in": this shell (Routes.home) is only ever freshly mounted at
+  // the start of a session (explicit login, post-onboarding for a brand
+  // new account, or splash_screen.dart's silent auto-resume for an
+  // already-authenticated user reopening the app) — go_router's default
+  // (non-custom-keyed) behavior for this route disposes and recreates
+  // HomeScreen on each fresh navigation to it rather than reusing a
+  // buried instance, so initState() reliably re-runs each time, not just
+  // once per app install. Runs exactly once per mount (initState, not
+  // build), so switching tabs afterwards — including tapping Home to
+  // reach normal Home content — is never fought or overridden by this
+  // check firing again.
+  //
+  // Deliberately does NOT touch router.dart's pendingCoachRegistration
+  // flag/redirect — that one fires (if at all) BEFORE Routes.home is ever
+  // reached, redirecting straight to coachRegister instead, so this
+  // check simply never runs that cycle. The two mechanisms operate at
+  // different layers and can't double-fire against each other.
+  Future<void> _checkCoachLanding() async {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final profile = await _firestoreService.getUserProfile(uid);
+      if (!mounted) return;
+      final role = (profile?['role'] as String?) ?? 'user';
+      // Approved vs pending both land here — CoachDashboardScreen itself
+      // branches on isApproved to show the right state, same as the
+      // standalone routed version.
+      if (role == 'coach') {
+        setState(() => _selectedIndex = _kCoachDashboardIndex);
+      }
+    } catch (_) {
+      // Fails soft — worst case a coach lands on normal Home same as
+      // before this feature existed, not a broken shell.
+    }
+  }
 
   void _onTabTap(int index) => setState(() => _selectedIndex = index);
 
