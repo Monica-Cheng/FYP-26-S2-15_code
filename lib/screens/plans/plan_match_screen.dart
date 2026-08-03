@@ -43,42 +43,6 @@ const _kSportOptions = ['Gym only', 'Running only', 'Both'];
 const _kEquipmentOptions = ['Home (bodyweight)', 'Gym with weights', 'Outdoor', 'Both'];
 const _kDayOptions = [2, 3, 4, 5, 6];
 
-const List<Map<String, dynamic>> _kPreviewGym = [
-  {
-    'day': 'Mon',
-    'session': 'Push A',
-    'exercises': ['Bench Press 4×8', 'Overhead Press 3×10', 'Tricep Pushdown 3×12'],
-  },
-  {
-    'day': 'Wed',
-    'session': 'Pull A',
-    'exercises': ['Pull-ups 4×8', 'Barbell Row 3×10', 'Face Pull 3×15'],
-  },
-  {
-    'day': 'Fri',
-    'session': 'Legs A',
-    'exercises': ['Squat 4×8', 'Romanian Deadlift 3×10', 'Leg Press 3×12'],
-  },
-];
-
-const List<Map<String, dynamic>> _kPreviewRun = [
-  {
-    'day': 'Tue',
-    'session': 'Easy Run',
-    'exercises': ['20–30 min easy pace'],
-  },
-  {
-    'day': 'Thu',
-    'session': 'Intervals',
-    'exercises': ['6×400m at 5K pace'],
-  },
-  {
-    'day': 'Sat',
-    'session': 'Long Run',
-    'exercises': ['45–60 min easy pace'],
-  },
-];
-
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 class PlanMatchScreen extends StatefulWidget {
@@ -851,8 +815,7 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
     final level = plan['level'] as String? ?? _level;
     final daysPerWeek = (plan['daysPerWeek'] as num?)?.toInt() ?? _days;
     final durationWeeks = (plan['durationWeeks'] as num?)?.toInt() ?? 8;
-    final isRunning = type.toLowerCase().contains('run');
-    final previewWeek = isRunning ? _kPreviewRun : _kPreviewGym;
+    final previewWeek = _buildRealPreviewWeek(plan);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1164,6 +1127,61 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
         ),
       ],
     );
+  }
+
+  // Derives a real "what a typical week looks like" preview directly from
+  // the matched plan's own sessions[] — replaces the old hardcoded
+  // _kPreviewGym/_kPreviewRun sample data entirely. Every non-rest session
+  // in the plan is included (not just the first one) so the preview shows
+  // the plan's actual real week, matching _buildPreviewSection's existing
+  // multi-card visual format (originally 3 cards of invented sample
+  // text — now however many real training days this specific plan
+  // actually has). Output shape matches exactly what _PreviewDayCard
+  // already expects ({day, session, exercises: List<String>}), so that
+  // widget itself needed no changes.
+  List<Map<String, dynamic>> _buildRealPreviewWeek(Map<String, dynamic> plan) {
+    final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
+    return sessions
+        .whereType<Map>()
+        .where((s) => s['isRestDay'] != true)
+        .map((s) {
+      final rawExercises = (s['exercises'] as List<dynamic>?) ?? [];
+      final exerciseLines = rawExercises
+          .whereType<Map>()
+          .map((e) => _formatPreviewExercise(Map<String, dynamic>.from(e)))
+          .toList();
+      return <String, dynamic>{
+        'day': s['day'] as String? ?? '',
+        'session': s['name'] as String? ?? 'Session',
+        'exercises':
+            exerciseLines.isNotEmpty ? exerciseLines : <String>['Rest'],
+      };
+    }).toList();
+  }
+
+  // "ExerciseName SxR" for a normal strength exercise (matching the old
+  // fake data's "Bench Press 4×8" format), or "Activity — N min" for a
+  // cardio block — falls back gracefully to just the exercise name if
+  // sets/reps aren't present in a parseable shape. sets can be either a
+  // plain int (seeded plan templates) or a List of per-set maps (custom
+  // routines) — both are handled, matching the same ambiguity
+  // FirestoreService.parseExerciseSets() already accounts for elsewhere.
+  String _formatPreviewExercise(Map<String, dynamic> ex) {
+    final name = ex['name'] as String? ?? 'Exercise';
+    if (ex['isCardio'] == true) {
+      final activity = ex['cardioActivity'] as String? ?? 'Cardio';
+      final minutes = (ex['cardioMinutes'] as num?)?.toInt();
+      return minutes != null ? '$activity — $minutes min' : activity;
+    }
+    final rawSets = ex['sets'];
+    final setsCount =
+        rawSets is List ? rawSets.length : (rawSets as num?)?.toInt() ?? 0;
+    final reps = (ex['reps'] as num?)?.toInt();
+    if (setsCount > 0 && reps != null && reps > 0) {
+      return '$name $setsCount×$reps';
+    }
+    if (setsCount > 0) return '$name — $setsCount sets';
+    return name;
   }
 
   Widget _buildPreviewSection(List<Map<String, dynamic>> week) {

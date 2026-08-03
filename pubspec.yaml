@@ -28,14 +28,25 @@ dependencies:
   intl: ^0.19.0
   google_sign_in: ^6.2.1
   http: ^1.2.0
-  health: ^12.0.0
   flutter_local_notifications: ^18.0.0
   timezone: ^0.10.1
-  flutter_timezone: ^1.0.8
+  flutter_timezone: ^5.1.0
+  health: ^12.0.0
   share_plus: ^10.1.4
   path_provider: ^2.1.5
   flutter_dotenv: ^5.1.0
   url_launcher: ^6.3.0
+  image_picker: ^1.1.2
+  camera: ^0.11.1
+  mobile_scanner: ^6.0.2
+  # Outdoor cardio (GPS tracking + map rendering)
+  geolocator: ^14.0.2
+  maplibre_gl: ^0.26.2
+  # Indoor cardio (accelerometer-based motion-presence accrual gate)
+  sensors_plus: ^6.0.1
+  # JPEG encoding for session photos (see outdoor_cardio_screen.dart's
+  # _encodeImageForSession) — dart:ui has no JPEG encoder of its own.
+  image: ^4.9.1
 
 dev_dependencies:
   flutter_test:

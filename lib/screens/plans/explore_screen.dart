@@ -7,143 +7,6 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/firestore_service.dart';
 
-// ── Hardcoded catalog plans (coming soon — not yet in Firestore) ──────────────
-
-const _kCatalogPlans = <Map<String, dynamic>>[
-  // ── Gym ──
-  {
-    'id': 'catalog_fat_loss_circuit',
-    'name': 'Fat Loss Circuit',
-    'level': 'Beginner',
-    'sport': 'Gym',
-    'goal': 'Lose Weight',
-    'daysPerWeek': 3,
-    'totalWeeks': 8,
-    'description': 'High-intensity circuits combining strength and cardio.',
-    'coach': 'WiseWorkout',
-    'saves': 143,
-    'isCatalogOnly': true,
-  },
-  {
-    'id': 'catalog_advanced_powerlifting',
-    'name': 'Advanced Powerlifting',
-    'level': 'Advanced',
-    'sport': 'Gym',
-    'goal': 'Build Strength',
-    'daysPerWeek': 4,
-    'totalWeeks': 12,
-    'description': 'Periodised strength block for competitive lifters.',
-    'coach': 'WiseWorkout',
-    'saves': 38,
-    'isCatalogOnly': true,
-  },
-  {
-    'id': 'catalog_home_dumbbell',
-    'name': 'Home Dumbbell Strength',
-    'level': 'Beginner',
-    'sport': 'Gym',
-    'goal': 'Build Muscle',
-    'daysPerWeek': 3,
-    'totalWeeks': 8,
-    'description': 'Build strength from home with just a set of dumbbells.',
-    'coach': 'WiseWorkout',
-    'saves': 88,
-    'isCatalogOnly': true,
-  },
-  {
-    'id': 'catalog_bodyweight_burn',
-    'name': '30-Day Bodyweight Burn',
-    'level': 'Intermediate',
-    'sport': 'Gym',
-    'goal': 'Lose Weight',
-    'daysPerWeek': 5,
-    'totalWeeks': 5,
-    'description': 'No-equipment HIIT that burns fat fast anywhere.',
-    'coach': 'WiseWorkout',
-    'saves': 199,
-    'isCatalogOnly': true,
-  },
-  {
-    'id': 'catalog_hiit_abs',
-    'name': 'HIIT & Abs',
-    'level': 'Intermediate',
-    'sport': 'Gym',
-    'goal': 'Lose Weight',
-    'daysPerWeek': 4,
-    'totalWeeks': 6,
-    'description': 'Intense full-body HIIT sessions with core finishers.',
-    'coach': 'WiseWorkout',
-    'saves': 115,
-    'isCatalogOnly': true,
-  },
-  // ── Running ──
-  {
-    'id': 'catalog_5k_speed',
-    'name': '5K Speed Builder',
-    'level': 'Intermediate',
-    'sport': 'Running',
-    'goal': 'Endurance',
-    'daysPerWeek': 4,
-    'totalWeeks': 6,
-    'description': 'Tempo runs and intervals to break your 5K PB.',
-    'coach': 'WiseWorkout',
-    'saves': 156,
-    'isCatalogOnly': true,
-  },
-  {
-    'id': 'catalog_10k_plan',
-    'name': '10K Structured Plan',
-    'level': 'Intermediate',
-    'sport': 'Running',
-    'goal': 'Endurance',
-    'daysPerWeek': 5,
-    'totalWeeks': 10,
-    'description': 'Structured mileage build to complete your first 10K.',
-    'coach': 'WiseWorkout',
-    'saves': 76,
-    'isCatalogOnly': true,
-  },
-  {
-    'id': 'catalog_half_marathon',
-    'name': 'Half Marathon Prep',
-    'level': 'Intermediate',
-    'sport': 'Running',
-    'goal': 'Endurance',
-    'daysPerWeek': 5,
-    'totalWeeks': 16,
-    'description': '16-week build to cross your first half marathon finish line.',
-    'coach': 'WiseWorkout',
-    'saves': 55,
-    'isCatalogOnly': true,
-  },
-  {
-    'id': 'catalog_marathon',
-    'name': 'Marathon Ready',
-    'level': 'Advanced',
-    'sport': 'Running',
-    'goal': 'Endurance',
-    'daysPerWeek': 6,
-    'totalWeeks': 20,
-    'description': 'Advanced plan for the 42.2 km ultimate challenge.',
-    'coach': 'WiseWorkout',
-    'saves': 44,
-    'isCatalogOnly': true,
-  },
-  {
-    'id': 'catalog_recovery_runs',
-    'name': 'Easy Recovery Runs',
-    'level': 'Beginner',
-    'sport': 'Running',
-    'goal': 'General Fitness',
-    'daysPerWeek': 3,
-    'totalWeeks': 4,
-    'description': 'Low-intensity runs to build habit and aerobic base.',
-    'coach': 'WiseWorkout',
-    'saves': 89,
-    'isCatalogOnly': true,
-  },
-];
-
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
 class ExploreScreen extends StatefulWidget {
@@ -194,17 +57,10 @@ class _ExploreScreenState extends State<ExploreScreen> {
     }
   }
 
-  // All plans: non-custom Firestore first, then catalog extras (deduped by name).
-  List<Map<String, dynamic>> get _allPlans {
-    final nonCustom = _firestorePlans
-        .where((p) => p['isCustom'] != true)
-        .toList();
-    final firestoreNames = nonCustom.map((p) => p['name']).toSet();
-    final extras = _kCatalogPlans
-        .where((p) => !firestoreNames.contains(p['name']))
-        .toList();
-    return [...nonCustom, ...extras];
-  }
+  // All plans: real non-custom Firestore plans only — the "coming soon"
+  // catalog filler (_kCatalogPlans) has been removed.
+  List<Map<String, dynamic>> get _allPlans =>
+      _firestorePlans.where((p) => p['isCustom'] != true).toList();
 
   bool get _hasActiveFilter =>
       _searchQuery.isNotEmpty ||
@@ -250,7 +106,9 @@ class _ExploreScreenState extends State<ExploreScreen> {
         return sport == 'running';
       }).toList();
 
-  // Featured: first 3 gym plans from Firestore, then fill with catalog.
+  // Featured: first 3 gym/running plans from Firestore (up to 2 gym + 1
+  // running) — degrades gracefully to fewer than 3 if there aren't enough
+  // real plans yet (.take() never throws on a shorter list).
   List<Map<String, dynamic>> get _featuredPlans {
     final gym = _gymPlans.take(2).toList();
     final run = _runningPlans.take(1).toList();
@@ -269,26 +127,11 @@ class _ExploreScreenState extends State<ExploreScreen> {
     }
   }
 
-  void _snack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: WW.primaryDark,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ),
-    );
-  }
-
   void _onPlanTap(Map<String, dynamic> plan) {
-    if (plan['isCatalogOnly'] == true) {
-      _snack('This plan is coming soon to WiseWorkout!');
-    } else {
-      context.push(Routes.planDetail, extra: {
-        ...plan,
-        'fromExplore': true,
-      });
-    }
+    context.push(Routes.planDetail, extra: {
+      ...plan,
+      'fromExplore': true,
+    });
   }
 
   void _clearFilters() {
@@ -773,7 +616,6 @@ class _FeaturedCard extends StatelessWidget {
     final days = (plan['daysPerWeek'] as num?)?.toInt() ?? 0;
     final weeks = (plan['totalWeeks'] as num?)?.toInt() ?? 0;
     final desc = plan['description'] as String? ?? '';
-    final isCatalog = plan['isCatalogOnly'] == true;
 
     return GestureDetector(
       onTap: onTap,
@@ -819,25 +661,6 @@ class _FeaturedCard extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (isCatalog) ...[
-                  const SizedBox(width: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: const Text(
-                      'COMING SOON',
-                      style: TextStyle(
-                        fontSize: 9,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                  ),
-                ],
               ],
             ),
             const SizedBox(height: 8),
@@ -946,6 +769,26 @@ class _PlanCard extends StatelessWidget {
     required this.onTap,
   });
 
+  // Same plan['sport']/plan['type'] field and three-way branching structure
+  // (running/gym/default) as _ExploreScreenState's own _accentColor(), kept
+  // consistent so the icon and accent color always agree about a plan's
+  // category. Icons.fitness_center_rounded matches this app's own
+  // established gym icon elsewhere (e.g. gym_session_screen.dart's
+  // exercises-empty state, activity_detail_screen.dart's _headerIcon).
+  // Icons.sports_rounded is a neutral "other/unspecified" fallback — not
+  // tied to any particular sport, mirroring _accentColor()'s own neutral
+  // WW.lavender default.
+  IconData _sportIcon(String sport) {
+    switch (sport.toLowerCase()) {
+      case 'running':
+        return Icons.directions_run_rounded;
+      case 'gym':
+        return Icons.fitness_center_rounded;
+      default:
+        return Icons.sports_rounded;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final name = plan['name'] as String? ?? '';
@@ -956,7 +799,6 @@ class _PlanCard extends StatelessWidget {
     final coach = plan['coach'] as String? ?? 'WiseWorkout';
     final saves = (plan['saves'] as num?)?.toInt() ?? 0;
     final goal = plan['goal'] as String? ?? '';
-    final isCatalog = plan['isCatalogOnly'] == true;
 
     return GestureDetector(
       onTap: onTap,
@@ -996,25 +838,6 @@ class _PlanCard extends StatelessWidget {
                               ),
                             ),
                           ),
-                          if (isCatalog) ...[
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 7, vertical: 3),
-                              decoration: BoxDecoration(
-                                color: WW.elevated,
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: const Text(
-                                'Coming soon',
-                                style: TextStyle(
-                                  fontSize: 9,
-                                  fontWeight: FontWeight.w600,
-                                  color: WW.textSec,
-                                ),
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                       const SizedBox(height: 7),
@@ -1026,7 +849,18 @@ class _PlanCard extends StatelessWidget {
                           if (level.isNotEmpty)
                             _Chip(label: level, bg: WW.chipBg, textColor: WW.primary),
                           if (sport.isNotEmpty)
-                            _Chip(label: sport, bg: WW.elevated, textColor: WW.textSec),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(_sportIcon(sport),
+                                    size: 12, color: WW.textSec),
+                                const SizedBox(width: 3),
+                                _Chip(
+                                    label: sport,
+                                    bg: WW.elevated,
+                                    textColor: WW.textSec),
+                              ],
+                            ),
                           if (days > 0)
                             _Chip(label: '$days d/wk', bg: WW.elevated, textColor: WW.textSec),
                           if (goal.isNotEmpty)

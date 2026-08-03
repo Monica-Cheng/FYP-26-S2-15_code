@@ -2,6 +2,7 @@
 
 import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -9,6 +10,8 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../services/notification_service.dart';
+import '../../widgets/session_resume_prompt.dart';
 
 class PlanScheduleScreen extends StatefulWidget {
   const PlanScheduleScreen({super.key});
@@ -25,8 +28,20 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
   String? _planId;
   int _currentDayIndex = 1;
   bool _breakModeActive = false;
+  String? _breakStartDate;
   String? _breakEndDate;
   int _breakDays = 3;
+  // Anchor for home_screen.dart's _checkMissedSession() 24h grace period —
+  // loaded here (not just written) so _endBreak() can shift it forward by
+  // the break's duration when the user ends a break early. See
+  // _breakShiftedStart() below for why.
+  Timestamp? _trackedPlanStartedAt;
+  // Lifetime per-day completion ledger — captured from the same
+  // getPlanProgress() call _init() already makes for _currentDayIndex,
+  // just reading one more field off the same result. Used by _statusOf()
+  // for a real, persistent completed check instead of inferring it from
+  // index position (see that method's own comment).
+  Set<int> _completedDayIndices = {};
 
   int _selectedWeekIdx = 0;
   bool _isLoading = true;
@@ -91,18 +106,33 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
         final progress = await _fs.getPlanProgress(_uid!, planId);
         if (!mounted) return;
 
+        final rawBreakStart = progress?['breakStartDate'] as String?;
         final rawBreakEnd = progress?['breakEndDate'] as String?;
         final today = DateTime.now().toString().substring(0, 10);
         bool breakActive = progress?['breakModeActive'] as bool? ?? false;
+        Timestamp? startedAt =
+            progress?['trackedPlanStartedAt'] as Timestamp?;
 
         if (breakActive && rawBreakEnd != null && rawBreakEnd.compareTo(today) < 0) {
           breakActive = false;
-          await _fs.updatePlanProgress(_uid!, planId, {
+          // Shift by the break's originally-scheduled length (start →
+          // scheduled end), not by however long it's been since then —
+          // extra idle time after the break was due to end is real
+          // elapsed time again, not break time, even though this auto-
+          // expiry check only runs lazily whenever this screen next loads.
+          final shifted = _breakShiftedStart(startedAt, rawBreakStart, rawBreakEnd);
+          final updates = <String, dynamic>{
             'breakModeActive': false,
             'breakEndDate': null,
             'breakStartDate': null,
             'breakDays': null,
-          });
+          };
+          if (shifted != null) {
+            updates['trackedPlanStartedAt'] = shifted;
+            startedAt = shifted;
+          }
+          await _fs.updatePlanProgress(_uid!, planId, updates);
+          await _resumeWorkoutReminder();
         }
 
         final currentDay = (progress?['currentDayIndex'] as num?)?.toInt() ?? 1;
@@ -114,11 +144,21 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
               rawCompressedDays.map((d) => (d as num).toInt()).toSet();
         }
 
+        final rawCompletedDayIndices = progress?['completedDayIndices'];
+        Set<int> loadedCompletedDayIndices = {};
+        if (rawCompletedDayIndices is List) {
+          loadedCompletedDayIndices =
+              rawCompletedDayIndices.map((d) => (d as num).toInt()).toSet();
+        }
+
         setState(() {
           _currentDayIndex = currentDay;
           _breakModeActive = breakActive;
+          _breakStartDate = rawBreakStart;
           _breakEndDate = rawBreakEnd;
+          _trackedPlanStartedAt = startedAt;
           _compressedDays = loadedCompressedDays;
+          _completedDayIndices = loadedCompletedDayIndices;
           _isLoading = false;
           if (_sessions.isNotEmpty) {
             _selectedWeekIdx = ((currentDay - 1) ~/ 7).clamp(0, _totalWeeks - 1);
@@ -143,11 +183,46 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
 
   int _dayIndexOf(int weekIdx, int posInWeek) => weekIdx * 7 + posInWeek + 1;
 
+  // dayIndex < _currentDayIndex used to be the only way this reported
+  // 'completed' — a pure index-position inference, wrong whenever a day
+  // was skipped rather than genuinely done (it would still show
+  // "completed" for anything before the current day). Now checks the real
+  // lifetime completedDayIndices ledger (see markSessionComplete()) instead
+  // — this also naturally covers the "today, already done" case a separate
+  // lastCompletedDate check used to be needed for: markSessionComplete()
+  // adds to the ledger in the same write it sets lastCompletedDate, so a
+  // day that's genuinely just been completed today is already in
+  // _completedDayIndices by the time this runs, with no extra check
+  // required. The ledger check runs first, ahead of the 'today' check, so
+  // an already-completed "today" still correctly resolves to 'completed'
+  // rather than 'today'.
   String _statusOf(int dayIndex, bool isRest) {
     if (isRest) return 'rest';
-    if (dayIndex < _currentDayIndex) return 'completed';
+    if (_completedDayIndices.contains(dayIndex)) return 'completed';
     if (dayIndex == _currentDayIndex) return 'today';
     return 'upcoming';
+  }
+
+  // Wired to _ScheduleDayCard's Start Session button instead of that card
+  // navigating straight to Routes.gymSession — routes through the shared
+  // discovery-and-prompt step (see widgets/session_resume_prompt.dart)
+  // first, so an already-abandoned in-progress session for this
+  // planId+dayIndex offers Resume/Start Over instead of silently being
+  // orphaned by a brand-new one. This button only ever renders for
+  // status == 'today' (see _buildDayCards' showTodayActions), and
+  // _statusOf() above already excludes an already-completed "today" from
+  // that status, so no separate completed check is needed here.
+  Future<void> _handleStartSession(int dayIndex) async {
+    final uid = _uid;
+    final planId = _planId;
+    if (uid == null || planId == null || planId.isEmpty) return;
+    await startOrResumeTrackedSession(
+      context: context,
+      uid: uid,
+      planId: planId,
+      dayIndex: dayIndex,
+      startFresh: () async => context.push(Routes.gymSession),
+    );
   }
 
   void _snack(String msg) {
@@ -161,19 +236,80 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
     );
   }
 
+  // Shifts trackedPlanStartedAt forward by the number of days between
+  // [breakStartStr] and [breakThroughStr], so the days a plan spent on a
+  // break don't count toward home_screen.dart's _checkMissedSession() 24h
+  // grace period — a true pause rather than merely hiding the banner while
+  // breakModeActive is true (which alone wouldn't help once the break
+  // ends: by then the clock would already read >=24h and the banner could
+  // fire immediately on return). Written back to the stored timestamp
+  // itself, so it stacks correctly across repeated breaks. Returns null if
+  // there's nothing to shift (no stored start yet, no break-start date, or
+  // an unparseable/non-positive range).
+  Timestamp? _breakShiftedStart(
+      Timestamp? current, String? breakStartStr, String breakThroughStr) {
+    if (current == null || breakStartStr == null) return null;
+    try {
+      final breakStart = DateTime.parse(breakStartStr);
+      final breakThrough = DateTime.parse(breakThroughStr);
+      final days = breakThrough.difference(breakStart).inDays;
+      if (days <= 0) return null;
+      return Timestamp.fromDate(current.toDate().add(Duration(days: days)));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Re-schedules the daily workout reminder using the user's actual saved
+  // time (never a hardcoded default) — reads reminderHour/reminderMinute/
+  // workoutReminders straight off the user profile rather than assuming
+  // settings_screen.dart's widget state, since this screen has no access
+  // to that. Respects workoutReminders == false (the user's own opt-out)
+  // by not rescheduling at all, matching _savePrefs()'s own gating in
+  // settings_screen.dart — resuming a break must not silently re-enable a
+  // reminder the user deliberately turned off.
+  //
+  // Safe to call more than once in a row (e.g. if this screen's own
+  // auto-expiry check and home_screen.dart's races against the same
+  // expired break): scheduleDailyWorkoutReminder() already cancels any
+  // existing scheduled notification with the same id before scheduling
+  // the new one, so repeat calls just re-cancel-and-reschedule the same
+  // single reminder rather than stacking duplicates.
+  Future<void> _resumeWorkoutReminder() async {
+    if (_uid == null) return;
+    try {
+      final profile = await _fs.getUserProfile(_uid!);
+      final workoutRemindersOn =
+          profile?['workoutReminders'] as bool? ?? true;
+      if (!workoutRemindersOn) return;
+      final hour = (profile?['reminderHour'] as num?)?.toInt() ?? 7;
+      final minute = (profile?['reminderMinute'] as num?)?.toInt() ?? 0;
+      await NotificationService()
+          .scheduleDailyWorkoutReminder(TimeOfDay(hour: hour, minute: minute));
+    } catch (_) {}
+  }
+
   Future<void> _endBreak() async {
     if (_uid == null || _planId == null) return;
     try {
-      await _fs.updatePlanProgress(_uid!, _planId!, {
+      final today = DateTime.now().toString().substring(0, 10);
+      final shifted =
+          _breakShiftedStart(_trackedPlanStartedAt, _breakStartDate, today);
+      final updates = <String, dynamic>{
         'breakModeActive': false,
         'breakEndDate': null,
         'breakStartDate': null,
         'breakDays': null,
-      });
+      };
+      if (shifted != null) updates['trackedPlanStartedAt'] = shifted;
+      await _fs.updatePlanProgress(_uid!, _planId!, updates);
+      await _resumeWorkoutReminder();
       if (mounted) {
         setState(() {
           _breakModeActive = false;
           _breakEndDate = null;
+          _breakStartDate = null;
+          if (shifted != null) _trackedPlanStartedAt = shifted;
         });
         _snack('Break ended. Welcome back! 💪');
       }
@@ -223,9 +359,11 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
         'breakEndDate': endStr,
         'breakDays': _breakDays,
       });
+      await NotificationService().cancelWorkoutReminder();
       if (!mounted) return;
       setState(() {
         _breakModeActive = true;
+        _breakStartDate = startStr;
         _breakEndDate = endStr;
       });
       _snack('Break mode activated! 🌟');
@@ -314,18 +452,18 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
     }
   }
 
+  // Delegates the actual field reset to FirestoreService().resetPlanProgress()
+  // — shared with plan_detail_screen.dart's own Restart Program action —
+  // rather than listing the fields here, so the two screens can't drift
+  // out of sync on what "restart" actually resets.
   Future<void> _restartPlan() async {
     if (_uid == null || _planId == null) return;
-    await _fs.updatePlanProgress(_uid!, _planId!, {
-      'currentDayIndex': 1,
-      'lastCompletedDate': '',
-      'lastCompletedDayIndex': 0,
-      'compressedDays': [],
-    });
+    await _fs.resetPlanProgress(_uid!, _planId!);
     if (!mounted) return;
     setState(() {
       _currentDayIndex = 1;
       _compressedDays = {};
+      _completedDayIndices = {};
       _selectedWeekIdx = 0;
     });
     _snack('Plan restarted from Day 1.');
@@ -365,7 +503,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
                   child: const Text(
                     'Restart',
                     style: TextStyle(
-                        color: Color(0xFFEF4444),
+                        color: WW.primary,
                         fontWeight: FontWeight.w700),
                   ),
                 ),
@@ -375,8 +513,8 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
           if (confirmed == true) await _restartPlan();
         },
         style: OutlinedButton.styleFrom(
-          side: const BorderSide(color: Color(0xFFEF4444), width: 1.5),
-          foregroundColor: const Color(0xFFEF4444),
+          side: const BorderSide(color: WW.primary, width: 1.5),
+          foregroundColor: WW.primary,
           shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(13)),
         ),
@@ -385,7 +523,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
           style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w600,
-              color: Color(0xFFEF4444)),
+              color: WW.primary),
         ),
       ),
     );
@@ -524,15 +662,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
             ],
           ),
           const SizedBox(height: 8),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: progress.clamp(0.0, 1.0),
-              backgroundColor: WW.elevated,
-              valueColor: const AlwaysStoppedAnimation<Color>(WW.primary),
-              minHeight: 8,
-            ),
-          ),
+          PlanProgressBar(progress: progress),
           const SizedBox(height: 10),
           Wrap(
             spacing: 6,
@@ -606,7 +736,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
           isCompressed: isCompressed,
           showTodayActions: status == 'today',
           showCompress: hasAccessory && !isCompressed,
-          onStartSession: () => context.push(Routes.gymSession),
+          onStartSession: () => _handleStartSession(dayIndex),
           onCompress: () => _showCompressSheet(session, dayIndex),
           onRestore: () => _restoreDaySession(dayIndex),
         ),
@@ -620,9 +750,9 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
       return Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: const Color(0xFFFEF3C7),
+          color: WW.elevated,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: WW.gold, width: 1),
+          border: Border.all(color: WW.border, width: 1),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -635,7 +765,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
                   'Break active until ${_breakEndDate ?? ''}',
                   style: const TextStyle(
                     fontWeight: FontWeight.w700,
-                    color: Color(0xFF92400E),
+                    color: WW.text,
                   ),
                 ),
               ],
@@ -646,8 +776,8 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
               child: OutlinedButton(
                 onPressed: _endBreak,
                 style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Color(0xFF92400E)),
-                  foregroundColor: const Color(0xFF92400E),
+                  side: const BorderSide(color: WW.primary),
+                  foregroundColor: WW.primary,
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(10)),
                 ),
@@ -664,7 +794,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
       decoration: BoxDecoration(
         color: WW.card,
         borderRadius: BorderRadius.circular(12),
-        border: Border(left: BorderSide(color: WW.gold, width: 3)),
+        border: Border.all(color: WW.border, width: 1),
         boxShadow: WW.shadow,
       ),
       child: Column(
@@ -697,7 +827,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
                     margin: const EdgeInsets.only(right: 8),
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     decoration: BoxDecoration(
-                      color: selected ? WW.gold : WW.elevated,
+                      color: selected ? WW.primary : WW.elevated,
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Text(
@@ -705,7 +835,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
-                        color: selected ? const Color(0xFF92400E) : WW.textSec,
+                        color: selected ? Colors.white : WW.text,
                       ),
                     ),
                   ),
@@ -718,8 +848,8 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
             width: double.infinity,
             child: ElevatedButton(
               style: ElevatedButton.styleFrom(
-                backgroundColor: WW.gold,
-                foregroundColor: const Color(0xFF92400E),
+                backgroundColor: WW.primary,
+                foregroundColor: Colors.white,
                 minimumSize: const Size(double.infinity, 48),
                 elevation: 0,
                 shape: RoundedRectangleBorder(
@@ -749,6 +879,36 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+// ── Plan progress bar ─────────────────────────────────────────────────────────
+// Public (not the usual leading-underscore private convention for a
+// single-file widget) so plans_screen.dart's Current Plan card can reuse this
+// exact bar instead of duplicating a second copy of it — the only two places
+// in the app that show plan-progress as a bar.
+
+class PlanProgressBar extends StatelessWidget {
+  final double progress;
+  final double height;
+
+  const PlanProgressBar({
+    super.key,
+    required this.progress,
+    this.height = 8,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(4),
+      child: LinearProgressIndicator(
+        value: progress.clamp(0.0, 1.0),
+        backgroundColor: WW.elevated,
+        valueColor: const AlwaysStoppedAnimation<Color>(WW.primary),
+        minHeight: height,
       ),
     );
   }
@@ -815,6 +975,22 @@ class _ScheduleDayCard extends StatelessWidget {
     }
   }
 
+  // Same Run/Walk/Cycle icon mapping already used by cardio_setup_screen.dart's
+  // _kActivities and activity_detail_screen.dart's _headerIcon — reused here
+  // (duplicated, not imported, since those are private to their own files)
+  // rather than inventing a new mapping. Run/unrecognized falls back to the
+  // running icon, matching both of those files' own default.
+  IconData _cardioIcon(String activity) {
+    switch (activity) {
+      case 'Walk':
+        return Icons.directions_walk_rounded;
+      case 'Cycle':
+        return Icons.directions_bike_rounded;
+      default:
+        return Icons.directions_run_rounded;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isRest = status == 'rest';
@@ -876,9 +1052,28 @@ class _ScheduleDayCard extends StatelessWidget {
                               ],
                               if (isRest) ...[
                                 const SizedBox(height: 2),
-                                const Text(
-                                  'Rest Day',
-                                  style: TextStyle(fontSize: 12, color: WW.textSec),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Container(
+                                      width: 18,
+                                      height: 18,
+                                      decoration: BoxDecoration(
+                                        color: WW.chipBg,
+                                        borderRadius: BorderRadius.circular(5),
+                                      ),
+                                      child: const Icon(
+                                        Icons.nightlight_round,
+                                        size: 11,
+                                        color: WW.border,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 5),
+                                    const Text(
+                                      'Rest Day',
+                                      style: TextStyle(fontSize: 12, color: WW.textSec),
+                                    ),
+                                  ],
                                 ),
                               ],
                               // FIX 2: compressed chip + restore button in header
@@ -946,11 +1141,16 @@ class _ScheduleDayCard extends StatelessWidget {
                       child: Column(
                         children: List.generate(displayExercises.length, (i) {
                           final ex = displayExercises[i];
-                          final name = ex['name'] as String? ?? 'Exercise';
+                          final isCardio = ex['isCardio'] == true;
+                          final name = isCardio
+                              ? (ex['cardioActivity'] as String? ?? 'Cardio')
+                              : (ex['name'] as String? ?? 'Exercise');
                           final sets = (ex['sets'] is List)
                               ? (ex['sets'] as List).length
                               : (ex['sets'] as num?)?.toInt() ?? 3;
                           final reps = (ex['reps'] as num?)?.toInt() ?? 0;
+                          final cardioMinutes =
+                              (ex['cardioMinutes'] as num?)?.toInt();
                           final tag = ex['tag'] as String? ?? '';
                           final isAccessory = tag == 'Accessory';
 
@@ -964,14 +1164,16 @@ class _ScheduleDayCard extends StatelessWidget {
                             ),
                             child: Row(
                               children: [
-                                Container(
-                                  width: 5,
-                                  height: 5,
-                                  decoration: BoxDecoration(
-                                    color: WW.primary,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
+                                isCardio
+                                    ? Icon(_cardioIcon(name), size: 12, color: WW.primary)
+                                    : Container(
+                                        width: 5,
+                                        height: 5,
+                                        decoration: BoxDecoration(
+                                          color: WW.primary,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Text(
@@ -984,7 +1186,11 @@ class _ScheduleDayCard extends StatelessWidget {
                                   ),
                                 ),
                                 Text(
-                                  '$sets×$reps',
+                                  isCardio
+                                      ? (cardioMinutes != null && cardioMinutes > 0
+                                          ? '$cardioMinutes min'
+                                          : '')
+                                      : '$sets×$reps',
                                   style: const TextStyle(fontSize: 11, color: WW.textSec),
                                 ),
                                 if (tag.isNotEmpty) ...[

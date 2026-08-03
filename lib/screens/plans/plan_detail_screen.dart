@@ -9,6 +9,23 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../widgets/session_resume_prompt.dart';
+
+// Same Running/Gym icon mapping already established elsewhere in this app
+// (explore_screen.dart's _PlanCard._sportIcon(), plans_screen.dart's
+// RecentPlanRow._typeIcon) — duplicated here, not imported, since those are
+// private to their own files. Used by the hero's type stat pill (see
+// _buildHero).
+IconData _planTypeIcon(String type) {
+  switch (type.toLowerCase()) {
+    case 'running':
+      return Icons.directions_run_rounded;
+    case 'gym':
+      return Icons.fitness_center_rounded;
+    default:
+      return Icons.sports_rounded;
+  }
+}
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
@@ -27,6 +44,13 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
   bool _fromExplore = false;
   Map<String, dynamic>? _planData;
   StreamSubscription<Map<String, dynamic>?>? _planStreamSub;
+  // Lifetime per-day completion ledger + current day, both fetched in
+  // _checkCompletionState() from the same planProgress doc. Empty/1 until
+  // that fetch resolves (fails soft, matching _checkTrackedState()'s own
+  // try/catch-and-do-nothing convention) — _isDayCompleted() and
+  // _hasAnyProgress correctly read as "nothing yet" in that window.
+  Set<int> _completedDayIndices = {};
+  int _currentDayIndex = 1;
 
   @override
   void initState() {
@@ -49,6 +73,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
       }
       _checkTrackedState();
       _checkSavedState();
+      _checkCompletionState();
     });
   }
 
@@ -71,6 +96,42 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     } catch (_) {}
   }
 
+  Future<void> _checkCompletionState() async {
+    final planId = _planData?['id'] as String?;
+    if (planId == null || planId.isEmpty) return;
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final progress = await FirestoreService().getPlanProgress(uid, planId);
+      if (!mounted) return;
+      final rawCompletedDayIndices = progress?['completedDayIndices'];
+      final loadedCompletedDayIndices = rawCompletedDayIndices is List
+          ? rawCompletedDayIndices.map((d) => (d as num).toInt()).toSet()
+          : <int>{};
+      setState(() {
+        _completedDayIndices = loadedCompletedDayIndices;
+        _currentDayIndex =
+            (progress?['currentDayIndex'] as num?)?.toInt() ?? 1;
+      });
+    } catch (_) {}
+  }
+
+  // Real, persistent check against the lifetime completedDayIndices ledger
+  // (see markSessionComplete()) — replaces the old "only the single most
+  // recently completed day, and only if that happened today" check, which
+  // meant every OTHER genuinely-completed day showed no completion state
+  // at all. Every day ever completed for this plan now shows as completed,
+  // regardless of when.
+  bool _isDayCompleted(int dayIndex) => _completedDayIndices.contains(dayIndex);
+
+  // Whether this plan has any progress worth offering to reset — shown
+  // regardless of current tracked/saved/custom status (see
+  // _buildSessionSchedule's Restart Program link), since the whole point
+  // is covering the case where a plan still has stale completed-day state
+  // visible even after the user has moved on to tracking a different plan.
+  bool get _hasAnyProgress =>
+      _currentDayIndex > 1 || _completedDayIndices.isNotEmpty;
+
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -82,6 +143,10 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     );
   }
 
+  // Tracking a fresh (non-switching) plan is now immediate, no confirmation —
+  // per the save/track redesign, only switching away from a different
+  // already-tracked plan still confirms first (a more consequential action,
+  // since it silently stops tracking that other plan too).
   Future<void> _handleTrackPlan(Map<String, dynamic> plan) async {
     final uid = AuthService().getCurrentUser()?.uid;
     if (uid == null) return;
@@ -99,45 +164,45 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
 
     final isSwitching = currentTrackedName != null && currentTrackedName.isNotEmpty;
 
-    if (!mounted) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: WW.card,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Text(
-          isSwitching ? 'Switch to this plan?' : 'Track this plan?',
-          style: const TextStyle(
-            fontSize: 17,
-            fontWeight: FontWeight.w700,
-            color: WW.text,
-          ),
-        ),
-        content: Text(
-          isSwitching
-              ? 'You are currently tracking "$currentTrackedName". Switching will stop tracking it, but your progress will be saved.'
-              : 'This plan will be added to My Plans and tracked as your active plan.',
-          style: const TextStyle(fontSize: 14, color: WW.textSec),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel', style: TextStyle(color: WW.textSec)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(
-              isSwitching ? 'Switch' : 'Track',
-              style: const TextStyle(
-                color: WW.primary,
-                fontWeight: FontWeight.w700,
-              ),
+    if (isSwitching) {
+      if (!mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: WW.card,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text(
+            'Switch to this plan?',
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w700,
+              color: WW.text,
             ),
           ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
+          content: Text(
+            'You are currently tracking "$currentTrackedName". Switching will stop tracking it, but your progress will be saved.',
+            style: const TextStyle(fontSize: 14, color: WW.textSec),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel', style: TextStyle(color: WW.textSec)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text(
+                'Switch',
+                style: TextStyle(
+                  color: WW.primary,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
 
     setState(() => _isTracking = true);
     try {
@@ -162,7 +227,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
         backgroundColor: WW.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text(
-          'Stop tracking this plan?',
+          'Untrack this plan?',
           style: TextStyle(
             fontSize: 17,
             fontWeight: FontWeight.w700,
@@ -170,7 +235,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
           ),
         ),
         content: const Text(
-          'Your progress will be saved but this plan will no longer be tracked.',
+          'Your progress is saved and you can track it again anytime.',
           style: TextStyle(fontSize: 14, color: WW.textSec),
         ),
         actions: [
@@ -251,63 +316,20 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     );
     if (confirm != true || !mounted) return;
 
-    await FirestoreService().deleteCustomPlan(uid, planId, planName);
+    // No try/catch previously existed around this call at all (unlike
+    // _saveRoutine()'s own catch in build_routine_screen.dart) — a genuine
+    // Firestore error here (permission, network) failed completely
+    // silently: the confirm dialog had already closed, then nothing
+    // further happened. Now surfaces a real error message instead of
+    // leaving the user on an unchanged screen with no feedback.
+    try {
+      await FirestoreService().deleteCustomPlan(uid, planId, planName);
+    } catch (e) {
+      if (mounted) _snack('Failed to delete routine. Please try again.');
+      return;
+    }
     if (!mounted) return;
     _snack('Routine deleted.');
-    await Future.delayed(const Duration(milliseconds: 600));
-    if (!mounted) return;
-    context.pop();
-  }
-
-  Future<void> _handleUnsaveExplorePlan(
-      Map<String, dynamic> plan) async {
-    final uid = AuthService().getCurrentUser()?.uid;
-    if (uid == null) return;
-    final planId = plan['id'] as String? ?? '';
-    if (planId.isEmpty) return;
-
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: WW.card,
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16)),
-        title: const Text(
-          'Remove from My Plans?',
-          style: TextStyle(
-              fontSize: 17,
-              fontWeight: FontWeight.w700,
-              color: WW.text),
-        ),
-        content: const Text(
-          'This plan will be removed from your saved plans.',
-          style: TextStyle(fontSize: 14, color: WW.textSec),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel',
-                style: TextStyle(color: WW.textSec)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text(
-              'Remove',
-              style: TextStyle(
-                color: Color(0xFFEF4444),
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-    if (confirm != true || !mounted) return;
-
-    await FirestoreService().unsaveExplorePlan(uid, planId);
-    if (!mounted) return;
-    setState(() => _isSaved = false);
-    _snack('Removed from My Plans.');
     await Future.delayed(const Duration(milliseconds: 600));
     if (!mounted) return;
     context.pop();
@@ -328,15 +350,30 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     setState(() => _isSaved = ids.contains(planId));
   }
 
-  Future<void> _handleSavePlan(Map<String, dynamic> plan) async {
+  // Single instant toggle — no confirmation dialog either direction (both
+  // are reversible, low-stakes), replacing the old separate
+  // save/"Saved ✓"/"Remove from My Plans" controls. Optimistically flips
+  // _isSaved before the write resolves, same instant-feedback pattern as
+  // most icon toggles elsewhere in this app; rolled back if the write fails.
+  Future<void> _handleToggleSave(Map<String, dynamic> plan) async {
     final uid = AuthService().getCurrentUser()?.uid;
     if (uid == null) return;
     final planId = plan['id'] as String? ?? '';
     if (planId.isEmpty) return;
-    await FirestoreService().saveExplorePlan(uid, planId);
+    final wasSaved = _isSaved;
+    setState(() => _isSaved = !wasSaved);
+    try {
+      if (wasSaved) {
+        await FirestoreService().unsaveExplorePlan(uid, planId);
+      } else {
+        await FirestoreService().saveExplorePlan(uid, planId);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isSaved = wasSaved);
+      return;
+    }
     if (!mounted) return;
-    setState(() => _isSaved = true);
-    _snack('Plan saved to My Plans.');
+    _snack(wasSaved ? 'Removed from My Plans.' : 'Plan saved to My Plans.');
   }
 
   Future<void> _onStartDay(int dayIndex) async {
@@ -344,9 +381,79 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     if (uid == null) return;
     final planId = _planData?['id'] as String? ?? '';
     if (planId.isEmpty) return;
-    await FirestoreService().setOverrideDayIndex(uid, planId, dayIndex);
+    // Routes through the shared discovery-and-prompt step (see
+    // widgets/session_resume_prompt.dart) — an already-abandoned
+    // in-progress session for this exact planId+dayIndex offers Resume/
+    // Start Over instead of silently being orphaned by a brand-new one.
+    // _DayCard already hides this tap entirely for a day
+    // _isDayCompleted() reports as completed (see _buildSessionSchedule),
+    // so no separate completed check is needed here. The fresh-start path
+    // itself (setOverrideDayIndex + push) is
+    // unchanged from before this feature.
+    await startOrResumeTrackedSession(
+      context: context,
+      uid: uid,
+      planId: planId,
+      dayIndex: dayIndex,
+      startFresh: () async {
+        await FirestoreService().setOverrideDayIndex(uid, planId, dayIndex);
+        if (!mounted) return;
+        context.push(Routes.gymSession, extra: {'readOnly': true});
+      },
+    );
+  }
+
+  // Same confirmation copy/style as plan_schedule_screen.dart's own
+  // existing Restart Plan action, and delegates to the same shared
+  // FirestoreService().resetPlanProgress() that action now also uses — see
+  // that method's own doc comment for why the field list lives there
+  // instead of being duplicated per-screen. Available regardless of
+  // tracked/saved/custom state (see _hasAnyProgress).
+  Future<void> _handleRestartProgram() async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    final planId = _planData?['id'] as String?;
+    if (uid == null || planId == null || planId.isEmpty) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Restart Plan?',
+          style: TextStyle(
+              fontSize: 17, fontWeight: FontWeight.w700, color: WW.text),
+        ),
+        content: const Text(
+          'This will reset your progress back to Day 1. Your session history will not be deleted.',
+          style: TextStyle(fontSize: 14, color: WW.textSec),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child:
+                const Text('Cancel', style: TextStyle(color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Restart',
+              style: TextStyle(
+                  color: Color(0xFFEF4444), fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    await FirestoreService().resetPlanProgress(uid, planId);
     if (!mounted) return;
-    context.push(Routes.gymSession);
+    setState(() {
+      _currentDayIndex = 1;
+      _completedDayIndices = {};
+    });
+    _snack('Plan restarted from Day 1.');
   }
 
   @override
@@ -468,16 +575,17 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
 
   // ── Hero ───────────────────────────────────────────────────────────────────
 
+  // Light header — matches the app's base WW.bg background (same token
+  // plans_screen.dart's own Scaffold uses), replacing the old purple/blue
+  // gradient block. Title and icon buttons switched from white-on-purple to
+  // dark-on-light; stat pills and the Custom Routine badge switched to the
+  // soft lavender treatment (WW.lavenderBg/WW.lavenderText) used for item 2
+  // below, so the whole header reads as one coherent light surface instead
+  // of mixing translucent-white accents into a now-light background.
   Widget _buildHero(String name, String type, String level, int daysPerWeek,
       int durationWeeks, {required bool isCustom, required Map<String, dynamic> plan}) {
     return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [WW.primaryDark, Color(0xFF4a4ea8)],
-        ),
-      ),
+      color: WW.bg,
       child: SafeArea(
         bottom: false,
         child: Column(
@@ -488,70 +596,45 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  GestureDetector(
+                  _heroIconButton(
+                    icon: Icons.chevron_left_rounded,
+                    color: WW.primaryDark,
+                    size: 22,
                     onTap: () => context.pop(),
-                    child: Container(
-                      width: 34,
-                      height: 34,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.18),
-                        borderRadius: BorderRadius.circular(17),
-                      ),
-                      child: const Center(
-                        child: Icon(Icons.chevron_left_rounded,
-                            color: Colors.white, size: 22),
-                      ),
-                    ),
                   ),
-                  if (_fromExplore)
-                    GestureDetector(
-                      onTap: isCustom
-                          ? () => _handleEditRoutine(plan)
-                          : (_isSaved ? null : () => _handleSavePlan(plan)),
-                      child: Container(
-                        width: 34,
-                        height: 34,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.18),
-                          borderRadius: BorderRadius.circular(17),
+                  // Top-right actions — always in this exact spot. Custom
+                  // routines have no real "saved" state (they're owned, not
+                  // bookmarked), so instead of the save toggle they show two
+                  // icon-only buttons: Edit and Delete (previously Delete
+                  // lived as a separate text link at the bottom of the
+                  // screen — moved up here, same _handleDeleteCustomPlan
+                  // confirm dialog, unchanged). Every other plan keeps the
+                  // single save/bookmark toggle.
+                  if (isCustom)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _heroIconButton(
+                          icon: Icons.edit_rounded,
+                          color: WW.primaryDark,
+                          onTap: () => _handleEditRoutine(plan),
                         ),
-                        child: Center(
-                          child: Icon(
-                            isCustom
-                                ? Icons.edit_rounded
-                                : (_isSaved ? Icons.bookmark_rounded : Icons.bookmark_border_rounded),
-                            color: Colors.white,
-                            size: 18,
-                          ),
+                        const SizedBox(width: 8),
+                        _heroIconButton(
+                          icon: Icons.delete_outline_rounded,
+                          color: const Color(0xFFEF4444),
+                          onTap: () => _handleDeleteCustomPlan(plan),
                         ),
-                      ),
-                    )
-                  else if (!_isTracked && !isCustom)
-                    GestureDetector(
-                      onTap: _isTracking
-                          ? null
-                          : () => _handleTrackPlan(plan),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          border: Border.all(
-                              color: Colors.white.withOpacity(0.6),
-                              width: 1.5),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: const Text(
-                          'Track',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
+                      ],
                     )
                   else
-                    const SizedBox(width: 34),
+                    _heroIconButton(
+                      icon: _isSaved
+                          ? Icons.bookmark_rounded
+                          : Icons.bookmark_border_rounded,
+                      color: WW.primaryDark,
+                      onTap: () => _handleToggleSave(plan),
+                    ),
                 ],
               ),
             ),
@@ -565,7 +648,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                 style: const TextStyle(
                   fontSize: 22,
                   fontWeight: FontWeight.w800,
-                  color: Colors.white,
+                  color: WW.primaryDark,
                   letterSpacing: -0.5,
                   height: 1.2,
                 ),
@@ -576,15 +659,17 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.2),
+                  color: WW.lavenderBg,
                   borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                      color: WW.lavender.withValues(alpha: 0.25), width: 0.5),
                 ),
                 child: const Text(
                   'Custom Routine',
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
-                    color: Colors.white,
+                    color: WW.lavenderText,
                   ),
                 ),
               ),
@@ -598,13 +683,13 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                   Container(
                     width: 22,
                     height: 22,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.25),
+                    decoration: const BoxDecoration(
+                      color: WW.lavenderBg,
                       shape: BoxShape.circle,
                     ),
                     child: const Center(
                       child: Icon(Icons.verified_rounded,
-                          color: Colors.white, size: 12),
+                          color: WW.lavender, size: 12),
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -613,13 +698,15 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                     style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
-                      color: Colors.white70,
+                      color: WW.textSec,
                     ),
                   ),
                 ],
               ),
               const SizedBox(height: 14),
-              // Tag chips
+              // Tag chips — soft lavender pill + icon + dark text, sitting
+              // directly on the light header (replaces the old translucent-
+              // white-on-purple treatment).
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 child: Wrap(
@@ -627,16 +714,42 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
                   spacing: 6,
                   runSpacing: 6,
                   children: [
-                    _HeroChip('$daysPerWeek days/wk'),
-                    _HeroChip('${durationWeeks}w programme'),
-                    _HeroChip(level),
-                    _HeroChip(type),
+                    _HeroChip(Icons.calendar_today_rounded, '$daysPerWeek days/wk'),
+                    _HeroChip(Icons.date_range_rounded, '${durationWeeks}w programme'),
+                    _HeroChip(Icons.trending_up_rounded, level),
+                    _HeroChip(_planTypeIcon(type), type),
                   ],
                 ),
               ),
               const SizedBox(height: 20),
             ],
           ],
+        ),
+      ),
+    );
+  }
+
+  // Shared 34×34 light circular icon button used by every hero top-row
+  // action (back, save/bookmark toggle, and the custom-routine Edit/Delete
+  // pair) — same WW.elevated container for all of them; only icon/color/
+  // size/tap handler vary per caller.
+  Widget _heroIconButton({
+    required IconData icon,
+    required Color color,
+    required VoidCallback onTap,
+    double size = 18,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 34,
+        height: 34,
+        decoration: BoxDecoration(
+          color: WW.elevated,
+          borderRadius: BorderRadius.circular(17),
+        ),
+        child: Center(
+          child: Icon(icon, color: color, size: size),
         ),
       ),
     );
@@ -887,14 +1000,34 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Plan Schedule',
-          style: TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w800,
-            color: WW.primaryDark,
-            letterSpacing: -0.2,
-          ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              'Plan Schedule',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w800,
+                color: WW.primaryDark,
+                letterSpacing: -0.2,
+              ),
+            ),
+            // Shown regardless of tracked/saved/custom state — see
+            // _hasAnyProgress's own doc comment for why this can't live in
+            // _buildStickyBar's tracked/saved/custom branches instead.
+            if (_hasAnyProgress)
+              GestureDetector(
+                onTap: _handleRestartProgram,
+                child: const Text(
+                  'Restart Program',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFFEF4444),
+                  ),
+                ),
+              ),
+          ],
         ),
         const SizedBox(height: 10),
         ...sessions.asMap().entries.map((entry) {
@@ -902,10 +1035,11 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
           final s = entry.value;
           final dayNumber =
               (s['dayNumber'] as num?)?.toInt() ?? (idx + 1);
+          final isCompleted = _isDayCompleted(dayNumber);
           return _DayCard(
             sessionData: s,
-            showStartButton: !_fromExplore,
-            onStart: _fromExplore ? null : () => _onStartDay(dayNumber),
+            isCompleted: isCompleted,
+            onPreview: isCompleted ? null : () => _onStartDay(dayNumber),
           );
         }),
       ],
@@ -986,283 +1120,80 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
 
   // ── Sticky bottom bar ──────────────────────────────────────────────────────
 
+  // Single Track toggle, always present in this exact bottom-of-screen
+  // position regardless of state — replaces the old State A/B/C branching
+  // (a "Remove from My Plans" link, a "Currently Tracking" button + separate
+  // "Untrack Plan" link, and a Save/Saved/Edit + "Track This Plan" row).
+  // Save state lives in the hero's top-right toggle; for custom routines,
+  // Edit and Delete now live there too (see _buildHero/_heroIconButton) —
+  // this bar is identical for every plan, custom or not, just the one
+  // button.
   Widget _buildStickyBar(Map<String, dynamic> plan) {
     final bottomPad = MediaQuery.of(context).padding.bottom;
-    final isCustom = plan['isCustom'] == true;
 
-    // State A — saved Explore plan viewed from Plans tab (not fromExplore,
-    // not custom, not tracked): show "Remove from My Plans" link.
-    if (!_fromExplore && !isCustom && !_isTracked) {
-      if (!_isSaved) return const SizedBox.shrink();
-      return Container(
-        padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPad + 12),
-        decoration: const BoxDecoration(
-          color: WW.card,
-          border: Border(top: BorderSide(color: WW.border, width: 0.5)),
-        ),
-        child: GestureDetector(
-          onTap: () => _handleUnsaveExplorePlan(plan),
-          child: const Center(
-            child: Text(
-              'Remove from My Plans',
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: Color(0xFFEF4444),
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-
-    // State B — currently tracked.
-    if (_isTracked) {
-      return Container(
-        padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPad + 12),
-        decoration: const BoxDecoration(
-          color: WW.card,
-          border: Border(top: BorderSide(color: WW.border, width: 0.5)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: double.infinity,
-              height: 50,
-              decoration: BoxDecoration(
-                color: WW.teal,
-                borderRadius: BorderRadius.circular(13),
-                boxShadow: [
-                  BoxShadow(
-                    color: WW.teal.withOpacity(0.3),
-                    blurRadius: 14,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: const Center(
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.check_circle_rounded,
-                        color: Colors.white, size: 18),
-                    SizedBox(width: 8),
-                    Text(
-                      'Currently Tracking',
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white,
-                        letterSpacing: -0.2,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
-            GestureDetector(
-              onTap: _handleUntrackPlan,
-              child: const Text(
-                'Untrack Plan',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFFEF4444),
-                ),
-              ),
-            ),
-            if (isCustom) ...[
-              const SizedBox(height: 8),
-              GestureDetector(
-                onTap: () => _handleDeleteCustomPlan(plan),
-                child: const Text(
-                  'Delete Routine',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFFEF4444),
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      );
-    }
-
-    // State C — not tracked; either fromExplore or isCustom.
     return Container(
       padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPad + 12),
       decoration: const BoxDecoration(
         color: WW.card,
         border: Border(top: BorderSide(color: WW.border, width: 0.5)),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: _fromExplore && !isCustom
-                    ? (_isSaved
-                        ? Container(
-                            height: 50,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(13),
-                              border:
-                                  Border.all(color: WW.border, width: 1.5),
-                            ),
-                            child: const Center(
-                              child: Text(
-                                'Saved ✓',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                  color: WW.textSec,
-                                ),
-                              ),
-                            ),
-                          )
-                        : GestureDetector(
-                            onTap: () => _handleSavePlan(plan),
-                            child: Container(
-                              height: 50,
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(13),
-                                border: Border.all(
-                                    color: WW.primary, width: 1.5),
-                              ),
-                              child: const Center(
-                                child: Text(
-                                  'Save to My Plans',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w700,
-                                    color: WW.primary,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ))
-                    : GestureDetector(
-                        onTap: isCustom
-                            ? () => _handleEditRoutine(plan)
-                            : (_isSaved ? null : () => _handleSavePlan(plan)),
-                        child: Container(
-                          height: 50,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(13),
-                            border:
-                                Border.all(color: WW.primary, width: 1.5),
-                          ),
-                          child: Center(
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  isCustom
-                                      ? Icons.edit_rounded
-                                      : (_isSaved ? Icons.bookmark_rounded : Icons.bookmark_border_rounded),
-                                  color: WW.primary,
-                                  size: 16,
-                                ),
-                                const SizedBox(width: 6),
-                                Text(
-                                  isCustom ? 'Edit Routine' : (_isSaved ? 'Saved' : 'Save'),
-                                  style: const TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w700,
-                                    color: WW.primary,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
+      child: GestureDetector(
+        onTap: _isTracking
+            ? null
+            : (_isTracked ? _handleUntrackPlan : () => _handleTrackPlan(plan)),
+        child: Container(
+          width: double.infinity,
+          height: 50,
+          decoration: BoxDecoration(
+            color: _isTracked ? Colors.transparent : WW.primary,
+            borderRadius: BorderRadius.circular(13),
+            border: _isTracked
+                ? Border.all(color: WW.teal, width: 1.5)
+                : null,
+            boxShadow: _isTracked
+                ? null
+                : [
+                    BoxShadow(
+                      color: WW.primary.withOpacity(0.35),
+                      blurRadius: 14,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+          ),
+          child: Center(
+            child: _isTracking
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                        color: Colors.white, strokeWidth: 2),
+                  )
+                : Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _isTracked
+                            ? Icons.check_circle_rounded
+                            : Icons.play_arrow_rounded,
+                        color: _isTracked ? WW.teal : Colors.white,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _isTracked
+                            ? 'Currently Tracking'
+                            : 'Track This Plan',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                          color: _isTracked ? WW.teal : Colors.white,
+                          letterSpacing: -0.2,
                         ),
                       ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                flex: 2,
-                child: GestureDetector(
-                  onTap: _isTracking ? null : () => _handleTrackPlan(plan),
-                  child: Container(
-                    height: 50,
-                    decoration: BoxDecoration(
-                      color: WW.primary,
-                      borderRadius: BorderRadius.circular(13),
-                      boxShadow: [
-                        BoxShadow(
-                          color: WW.primary.withOpacity(0.35),
-                          blurRadius: 14,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Center(
-                      child: _isTracking
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                  color: Colors.white, strokeWidth: 2),
-                            )
-                          : const Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.play_arrow_rounded,
-                                    color: Colors.white, size: 18),
-                                SizedBox(width: 6),
-                                Text(
-                                  'Track This Plan',
-                                  style: TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w800,
-                                    color: Colors.white,
-                                    letterSpacing: -0.2,
-                                  ),
-                                ),
-                              ],
-                            ),
-                    ),
+                    ],
                   ),
-                ),
-              ),
-            ],
           ),
-          // Delete link for custom routines
-          if (isCustom) ...[
-            const SizedBox(height: 10),
-            GestureDetector(
-              onTap: () => _handleDeleteCustomPlan(plan),
-              child: const Text(
-                'Delete Routine',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFFEF4444),
-                ),
-              ),
-            ),
-          ],
-          // Remove link when viewing a saved Explore plan from Explore
-          if (_fromExplore && !isCustom && _isSaved) ...[
-            const SizedBox(height: 10),
-            GestureDetector(
-              onTap: () => _handleUnsaveExplorePlan(plan),
-              child: const Text(
-                'Remove from My Plans',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFFEF4444),
-                ),
-              ),
-            ),
-          ],
-        ],
+        ),
       ),
     );
   }
@@ -1271,26 +1202,34 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
 // ── Hero chip ─────────────────────────────────────────────────────────────────
 
 class _HeroChip extends StatelessWidget {
+  final IconData icon;
   final String label;
-  const _HeroChip(this.label);
+  const _HeroChip(this.icon, this.label);
 
   @override
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.18),
+        color: WW.lavenderBg,
         borderRadius: BorderRadius.circular(20),
-        border:
-            Border.all(color: Colors.white.withOpacity(0.3), width: 0.5),
+        border: Border.all(
+            color: WW.lavender.withValues(alpha: 0.25), width: 0.5),
       ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-          color: Colors.white,
-        ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: WW.lavenderText),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: WW.lavenderText,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1334,11 +1273,24 @@ class _DayCard extends StatefulWidget {
   final Map<String, dynamic> sessionData;
   final bool showStartButton;
   final VoidCallback? onStart;
+  final VoidCallback? onPreview;
+  // True when this day is in the lifetime completedDayIndices ledger (see
+  // _isDayCompleted()) — shows a small teal "Completed" pill (same
+  // color/icon convention as home_screen.dart's
+  // own completed state, and identical to plan_schedule_screen.dart's own
+  // _StatusBadge 'completed' case, just sized for this compact list-row
+  // context) instead of a tappable preview row. Callers are expected to
+  // also pass onPreview: null when this is true (see
+  // _buildSessionSchedule) — this widget doesn't re-derive that itself,
+  // just reflects it visually.
+  final bool isCompleted;
 
   const _DayCard({
     required this.sessionData,
     this.showStartButton = false,
     this.onStart,
+    this.onPreview,
+    this.isCompleted = false,
   });
 
   @override
@@ -1366,7 +1318,7 @@ class _DayCardState extends State<_DayCard> {
     if (isRest) {
       return Container(
         margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: WW.elevated,
           borderRadius: BorderRadius.circular(12),
@@ -1379,7 +1331,7 @@ class _DayCardState extends State<_DayCard> {
               height: 36,
               decoration: BoxDecoration(
                 color: WW.border.withValues(alpha: 0.4),
-                borderRadius: BorderRadius.circular(9),
+                shape: BoxShape.circle,
               ),
               child: const Center(
                 child: Text('💤', style: TextStyle(fontSize: 16)),
@@ -1422,81 +1374,134 @@ class _DayCardState extends State<_DayCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _expanded = !_expanded),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: WW.chipBg,
-                      borderRadius: BorderRadius.circular(9),
-                    ),
-                    child: Center(
-                      child: Text(
-                        badge,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                          color: WW.primary,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+          // The preview tap target (badge/name/exercise-count) and the
+          // chevron's expand/collapse tap target are siblings within this
+          // Row, not nested — a GestureDetector.onTap wrapping another
+          // interactive descendant (the old structure: this whole Row,
+          // chevron included, inside one outer GestureDetector) doesn't
+          // reliably suppress the descendant's own tap recognizer, since
+          // two independent TapGestureRecognizers sharing a pointer aren't
+          // mutually exclusive by default — only genuinely competing
+          // gesture families (tap vs. drag, etc.) are. That let a chevron
+          // tap silently ALSO fire onPreview (a full navigation into
+          // gym_session_screen.dart) on every expand/collapse. Restructuring
+          // so the chevron (and the "Start" button, same conflict class)
+          // sit outside the onPreview GestureDetector's subtree entirely
+          // fixes this structurally, with no stop-propagation/absorb-pointer
+          // trick needed.
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: widget.onPreview,
+                    child: Row(
                       children: [
-                        Text(
-                          sessionName,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            color: WW.text,
+                        Container(
+                          width: 36,
+                          height: 36,
+                          decoration: const BoxDecoration(
+                            color: WW.chipBg,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Center(
+                            child: Text(
+                              badge,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                color: WW.primary,
+                              ),
+                            ),
                           ),
                         ),
-                        Text(
-                          '${rawExercises.length} exercises'
-                          '${estimatedMinutes > 0 ? ' · ${estimatedMinutes}min' : ''}',
-                          style: const TextStyle(
-                              fontSize: 11, color: WW.textSec),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                sessionName,
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: WW.text,
+                                ),
+                              ),
+                              Text(
+                                '${rawExercises.length} exercises'
+                                '${estimatedMinutes > 0 ? ' · ${estimatedMinutes}min' : ''}',
+                                style: const TextStyle(
+                                    fontSize: 11, color: WW.textSec),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ),
                   ),
-                  if (widget.showStartButton) ...[
-                    FilledButton(
-                      onPressed: widget.onStart,
-                      style: FilledButton.styleFrom(
-                        backgroundColor: WW.primary,
-                        minimumSize: const Size(56, 30),
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 10),
-                        textStyle: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                      ),
-                      child: const Text('Start'),
+                ),
+                if (widget.isCompleted) ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: WW.tealBg,
+                      borderRadius: BorderRadius.circular(10),
                     ),
-                    const SizedBox(width: 8),
-                  ],
-                  AnimatedRotation(
-                    turns: _expanded ? 0.5 : 0,
-                    duration: const Duration(milliseconds: 200),
-                    child: const Icon(Icons.keyboard_arrow_down_rounded,
-                        color: WW.textSec, size: 18),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.check_rounded, color: WW.teal, size: 11),
+                        SizedBox(width: 3),
+                        Text(
+                          'Completed',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            color: WW.teal,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
-              ),
+                if (widget.showStartButton) ...[
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: widget.onStart,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: WW.primary,
+                      minimumSize: const Size(56, 30),
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 10),
+                      textStyle: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    child: const Text('Start'),
+                  ),
+                ],
+                GestureDetector(
+                  onTap: () => setState(() => _expanded = !_expanded),
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 8),
+                    child: AnimatedRotation(
+                      turns: _expanded ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 200),
+                      child: const Icon(Icons.keyboard_arrow_down_rounded,
+                          color: WW.textSec, size: 18),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           if (_expanded && rawExercises.isNotEmpty) ...[

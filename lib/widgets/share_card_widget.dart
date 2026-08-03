@@ -11,6 +11,7 @@ class ShareCardWidget extends StatelessWidget {
   final double volume;
   final int goalMinutes;
   final DateTime date;
+  final List<Color> gradientColors;
 
   const ShareCardWidget({
     super.key,
@@ -23,6 +24,7 @@ class ShareCardWidget extends StatelessWidget {
     required this.volume,
     required this.goalMinutes,
     required this.date,
+    this.gradientColors = const [WW.primaryDark, Color(0xFF4a4ea8)],
   });
 
   String _fmtDuration(int secs) {
@@ -49,22 +51,28 @@ class ShareCardWidget extends StatelessWidget {
     final durationStr = _fmtDuration(elapsedSeconds);
     final dateStr = _fmtDate(date);
 
+    // Fixed Story-ratio canvas (360x640 logical -> 1080x1920 @ pixelRatio
+    // 3.0, matching the app's other share-card rendering) instead of the
+    // old intrinsic-height card — same content/styling throughout, just
+    // distributed across the full height via the Expanded/Center section
+    // below rather than shrink-wrapping it. Sole call site
+    // (post_session_summary_screen.dart) already renders this off-tree at
+    // a fixed size, so this doesn't change how it's used there.
     return Container(
       width: 360,
+      height: 640,
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [WW.primaryDark, Color(0xFF4a4ea8)],
+          colors: gradientColors,
         ),
-        borderRadius: BorderRadius.circular(24),
       ),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
         children: [
           // Top header
           Padding(
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
+            padding: const EdgeInsets.fromLTRB(24, 32, 24, 20),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -75,7 +83,7 @@ class ShareCardWidget extends StatelessWidget {
                       width: 32,
                       height: 32,
                       decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
+                        color: Colors.white.withValues(alpha: 0.2),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: const Center(
@@ -103,7 +111,7 @@ class ShareCardWidget extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(
                       horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.2),
+                    color: Colors.white.withValues(alpha: 0.2),
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
@@ -119,51 +127,52 @@ class ShareCardWidget extends StatelessWidget {
             ),
           ),
 
-          // Session name
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Text(
-              sessionName,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
-                color: Colors.white,
-                letterSpacing: -0.5,
-                height: 1.2,
+          // Session name / date / stats — centered in the space between
+          // the header and the footer strip, so it doesn't just hug the
+          // top the way it would inside a shrink-wrapped card.
+          Expanded(
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      sessionName,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                        letterSpacing: -0.5,
+                        height: 1.2,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      dateStr,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.white.withValues(alpha: 0.6),
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 28),
+                    isCardio
+                        ? _buildCardioStats(durationStr)
+                        : _buildGymStats(durationStr),
+                  ],
+                ),
               ),
             ),
           ),
-          const SizedBox(height: 4),
-          Text(
-            dateStr,
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.white.withOpacity(0.6),
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          const SizedBox(height: 24),
-
-          // Stats grid
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: isCardio
-                ? _buildCardioStats(durationStr)
-                : _buildGymStats(durationStr),
-          ),
-          const SizedBox(height: 24),
 
           // Bottom hashtag strip
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 14),
+            padding: const EdgeInsets.symmetric(vertical: 16),
             decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.2),
-              borderRadius: const BorderRadius.only(
-                bottomLeft: Radius.circular(24),
-                bottomRight: Radius.circular(24),
-              ),
+              color: Colors.black.withValues(alpha: 0.2),
             ),
             child: const Text(
               '#WiseWorkout  #FitForLife',

@@ -7,9 +7,16 @@ class Collections {
   static const String users = 'users';
   static const String plans = 'plans';
   static const String exercises = 'exercises';
+  static const String injuryCategories = 'injuryCategories';
   static const String sessions = 'sessions';
   static const String xpEvents = 'xpEvents';
   static const String challenges = 'challenges';
+  static const String nutritionLogs = 'nutritionLogs';
+  static const String posts = 'posts';
+  static const String follows = 'follows';
+  static const String friendRequests = 'friendRequests';
+  static const String friends = 'friends';
+  static const String notifications = 'notifications';
 }
 
 class AppConstants {

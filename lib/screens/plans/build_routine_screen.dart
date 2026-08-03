@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
@@ -12,51 +13,6 @@ import '../../services/firestore_service.dart';
 
 const _kMuscleFilters = [
   'All', 'Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Glutes', 'Cardio',
-];
-
-const _kExerciseLibrary = <Map<String, String>>[
-  {'name': 'Bench Press', 'muscle': 'Chest'},
-  {'name': 'Incline DB Press', 'muscle': 'Chest'},
-  {'name': 'Cable Fly', 'muscle': 'Chest'},
-  {'name': 'Dips', 'muscle': 'Chest'},
-  {'name': 'Pec Deck', 'muscle': 'Chest'},
-  {'name': 'Pull-up', 'muscle': 'Back'},
-  {'name': 'Barbell Row', 'muscle': 'Back'},
-  {'name': 'Lat Pulldown', 'muscle': 'Back'},
-  {'name': 'Cable Row', 'muscle': 'Back'},
-  {'name': 'T-Bar Row', 'muscle': 'Back'},
-  {'name': 'Deadlift', 'muscle': 'Back'},
-  {'name': 'Overhead Press', 'muscle': 'Shoulders'},
-  {'name': 'Lateral Raise', 'muscle': 'Shoulders'},
-  {'name': 'Face Pull', 'muscle': 'Shoulders'},
-  {'name': 'Rear Delt Fly', 'muscle': 'Shoulders'},
-  {'name': 'Barbell Curl', 'muscle': 'Arms'},
-  {'name': 'Tricep Pushdown', 'muscle': 'Arms'},
-  {'name': 'Hammer Curl', 'muscle': 'Arms'},
-  {'name': 'Skull Crusher', 'muscle': 'Arms'},
-  {'name': 'Preacher Curl', 'muscle': 'Arms'},
-  {'name': 'Cable Tricep Extension', 'muscle': 'Arms'},
-  {'name': 'Squat', 'muscle': 'Legs'},
-  {'name': 'Romanian Deadlift', 'muscle': 'Legs'},
-  {'name': 'Leg Press', 'muscle': 'Legs'},
-  {'name': 'Leg Extension', 'muscle': 'Legs'},
-  {'name': 'Leg Curl', 'muscle': 'Legs'},
-  {'name': 'Calf Raise', 'muscle': 'Legs'},
-  {'name': 'Walking Lunges', 'muscle': 'Legs'},
-  {'name': 'Front Squat', 'muscle': 'Legs'},
-  {'name': 'Plank', 'muscle': 'Core'},
-  {'name': 'Cable Crunch', 'muscle': 'Core'},
-  {'name': 'Dead Bug', 'muscle': 'Core'},
-  {'name': 'Ab Wheel', 'muscle': 'Core'},
-  {'name': 'Hanging Leg Raise', 'muscle': 'Core'},
-  {'name': 'Hip Thrust', 'muscle': 'Glutes'},
-  {'name': 'Glute Bridge', 'muscle': 'Glutes'},
-  {'name': 'Cable Kickback', 'muscle': 'Glutes'},
-  {'name': 'Treadmill Run', 'muscle': 'Cardio', 'equipment': 'Treadmill', 'tag': 'Cardio'},
-  {'name': 'Stationary Bike', 'muscle': 'Cardio', 'equipment': 'Bike Machine', 'tag': 'Cardio'},
-  {'name': 'Rowing Machine', 'muscle': 'Cardio', 'equipment': 'Rowing Machine', 'tag': 'Cardio'},
-  {'name': 'Elliptical', 'muscle': 'Cardio', 'equipment': 'Elliptical', 'tag': 'Cardio'},
-  {'name': 'Stair Climber', 'muscle': 'Cardio', 'equipment': 'Stair Machine', 'tag': 'Cardio'},
 ];
 
 // ── Muscle color helpers ───────────────────────────────────────────────────────
@@ -264,8 +220,6 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           'name': ex['name'] as String? ?? '',
           'muscle': ex['muscle'] as String? ?? '',
           'restTime': (ex['restTime'] as num?)?.toInt() ?? 90,
-          'note': ex['note'] as String? ?? '',
-          'showNote': false,
           'sets': sets,
         };
       }).toList();
@@ -307,8 +261,6 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         'name': name,
         'muscle': muscle,
         'restTime': 90,
-        'note': '',
-        'showNote': false,
         'sets': <Map<String, dynamic>>[
           _newSet(),
         ],
@@ -511,6 +463,27 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
     }
     setState(() {
       (_days[_activeDay]['exercises'] as List).removeAt(exIdx);
+      _hasChanges = true;
+    });
+  }
+
+  void _deleteDay(int dayIdx) {
+    if (_days.length <= 1) return;
+    // Clean up controllers for every set in every exercise on this day
+    final exercises =
+        _days[dayIdx]['exercises'] as List<Map<String, dynamic>>;
+    for (final ex in exercises) {
+      for (final s in (ex['sets'] as List<Map<String, dynamic>>)) {
+        _removeCtrlsForSet(s);
+      }
+    }
+    setState(() {
+      _days.removeAt(dayIdx);
+      if (_activeDay > dayIdx) {
+        _activeDay--;
+      } else if (_activeDay == dayIdx) {
+        _activeDay = _activeDay.clamp(0, _days.length - 1);
+      }
       _hasChanges = true;
     });
   }
@@ -813,8 +786,6 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         'name': '$activity ${minutes}min',
         'muscle': 'Cardio',
         'restTime': 0,
-        'note': '',
-        'showNote': false,
         'isCardio': true,
         'cardioActivity': activity,
         'cardioMinutes': minutes,
@@ -846,6 +817,21 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
 
     setState(() => _isSaving = true);
 
+    // Captured before any await. The previous fix gated BOTH the success
+    // SnackBar and the pop behind a single `if (mounted)` check made AFTER
+    // the Firestore write — so if this widget became unusable for any
+    // reason during that async gap, the entire feedback block (snackbar
+    // included) was silently skipped even though the write itself had
+    // already succeeded. Confirmed via live testing: edit-mode saves DO
+    // persist to Firestore with zero visible feedback — exactly this
+    // symptom. Grabbing the ScaffoldMessengerState up front means showing
+    // the success snackbar no longer depends on `context`/`mounted` still
+    // being valid once the write resolves; only the actual navigation
+    // (which genuinely does require a live widget) stays behind the
+    // mounted guard below.
+    final messenger = ScaffoldMessenger.of(context);
+    final wasEditMode = _isEditMode;
+
     try {
       print('Saving routine: $_routineName');
       final uid = AuthService().getCurrentUser()?.uid;
@@ -873,7 +859,6 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
             'name': ex['name'],
             'muscle': ex['muscle'],
             'restTime': ex['restTime'],
-            'note': ex['note'],
             'tag': 'Primary',
             'sets': sets,
             if (ex['isCardio'] == true) ...{
@@ -916,11 +901,26 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
 
       print('Saved successfully!');
 
-      if (mounted) {
-        setState(() => _hasChanges = false);
-        _snack(_isEditMode ? 'Routine updated.' : 'Routine saved to All Plans.');
-        context.pop(_isEditMode);
-      }
+      if (mounted) setState(() => _hasChanges = false);
+      // Uses the messenger captured before the write, not _snack(context) —
+      // see this method's own note above on why: showing this no longer
+      // depends on the widget still being mounted at this point.
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+              wasEditMode ? 'Routine updated.' : 'Routine saved to All Plans.'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: WW.primaryDark,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      );
+      // Same short delay plan_detail_screen.dart's _handleDeleteCustomPlan
+      // already uses between showing a SnackBar and popping — popping
+      // immediately after showSnackBar() tears the route down before the
+      // SnackBar has actually rendered, so it was never visible at all.
+      await Future.delayed(const Duration(milliseconds: 600));
+      if (!mounted) return;
+      context.pop(wasEditMode);
     } catch (e) {
       print('Save error: $e');
       if (mounted) _snack('Failed to save. Please try again.');
@@ -936,20 +936,23 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
     return Scaffold(
       backgroundColor: WW.bg,
       resizeToAvoidBottomInset: true,
-      body: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            _buildTopBar(),
-            _buildDayTabs(),
-            Expanded(
-              child: _isLoading
-                  ? const Center(
-                      child: CircularProgressIndicator(color: WW.primary),
-                    )
-                  : _buildExerciseList(),
-            ),
-          ],
+      body: GestureDetector(
+        onTap: () => FocusScope.of(context).unfocus(),
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              _buildTopBar(),
+              _buildDayTabs(),
+              Expanded(
+                child: _isLoading
+                    ? const Center(
+                        child: CircularProgressIndicator(color: WW.primary),
+                      )
+                    : _buildExerciseList(),
+              ),
+            ],
+          ),
         ),
       ),
       bottomNavigationBar: _buildFooter(),
@@ -1085,27 +1088,13 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           final active = i == _activeDay;
           return Padding(
             padding: const EdgeInsets.only(right: 8),
-            child: GestureDetector(
+            child: _DayTab(
+              label: _days[i]['label'] as String,
+              active: active,
+              canDelete: _days.length > 1,
               onTap: () => setState(() => _activeDay = i),
-              onLongPress: () => _showDayRenameDialog(i),
-              child: Container(
-                height: 36,
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                decoration: BoxDecoration(
-                  color: active ? WW.primary : WW.elevated,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Center(
-                  child: Text(
-                    _days[i]['label'] as String,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: active ? Colors.white : WW.textSec,
-                    ),
-                  ),
-                ),
-              ),
+              onRename: () => _showDayRenameDialog(i),
+              onDelete: () => _deleteDay(i),
             ),
           );
         },
@@ -1259,6 +1248,204 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
   }
 }
 
+// ── Day tab ────────────────────────────────────────────────────────────────────
+// Mirrors _ExerciseCard's overflow-menu pattern below: a small trigger opens
+// an Overlay-based popup (Rename / Delete Day) instead of only exposing
+// rename via long-press. Delete is guarded by widget.canDelete (hidden when
+// this is the last remaining day) — see _deleteDay's own guard in
+// _BuildRoutineScreenState.
+
+class _DayTab extends StatefulWidget {
+  final String label;
+  final bool active;
+  final bool canDelete;
+  final VoidCallback onTap;
+  final VoidCallback onRename;
+  final VoidCallback onDelete;
+
+  const _DayTab({
+    required this.label,
+    required this.active,
+    required this.canDelete,
+    required this.onTap,
+    required this.onRename,
+    required this.onDelete,
+  });
+
+  @override
+  State<_DayTab> createState() => _DayTabState();
+}
+
+class _DayTabState extends State<_DayTab> {
+  OverlayEntry? _overlayEntry;
+  final LayerLink _layerLink = LayerLink();
+
+  @override
+  void dispose() {
+    _closeMenu();
+    super.dispose();
+  }
+
+  void _openMenu() {
+    const menuWidth = 170.0;
+    // The old fixed Offset(-130, 28) was copied from _ExerciseCard's "⋮"
+    // menu below, whose CompositedTransformTarget wraps only a small icon
+    // near the right edge of a wide card — subtracting 130px there still
+    // lands on-screen. Here the target is the *whole* day-tab pill, which
+    // (for Day 1) sits flush against the row's left padding, so the same
+    // negative offset pushed the menu off-screen to the left. Instead,
+    // measure the tapped tab's real on-screen position/size and clamp the
+    // menu's left edge to stay within the screen on both sides, for any
+    // tab position.
+    final targetBox = context.findRenderObject() as RenderBox;
+    final targetGlobalPos = targetBox.localToGlobal(Offset.zero);
+    final targetSize = targetBox.size;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final clampedLeft = targetGlobalPos.dx.clamp(8.0, screenWidth - menuWidth - 8.0);
+    final menuOffset = Offset(
+      clampedLeft - targetGlobalPos.dx,
+      targetSize.height + 8,
+    );
+
+    _overlayEntry = OverlayEntry(
+      builder: (context) => Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: _closeMenu,
+              behavior: HitTestBehavior.opaque,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Positioned(
+            width: menuWidth,
+            child: CompositedTransformFollower(
+              link: _layerLink,
+              showWhenUnlinked: false,
+              offset: menuOffset,
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: WW.card,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: WW.border, width: 0.5),
+                    boxShadow: WW.shadow,
+                  ),
+                  child: IntrinsicWidth(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _menuItem(
+                          icon: Icons.edit_outlined,
+                          label: 'Rename Day',
+                          onTap: () {
+                            _closeMenu();
+                            widget.onRename();
+                          },
+                        ),
+                        if (widget.canDelete)
+                          _menuItem(
+                            icon: Icons.delete_outline_rounded,
+                            label: 'Delete Day',
+                            color: const Color(0xFFEF4444),
+                            onTap: () {
+                              _closeMenu();
+                              widget.onDelete();
+                            },
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    Overlay.of(context).insert(_overlayEntry!);
+  }
+
+  void _closeMenu() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+  }
+
+  Widget _menuItem({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    Color color = WW.text,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 15, color: color),
+            const SizedBox(width: 10),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: color,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CompositedTransformTarget(
+      link: _layerLink,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        onLongPress: widget.onRename,
+        child: Container(
+          height: 36,
+          padding: const EdgeInsets.only(left: 14, right: 4),
+          decoration: BoxDecoration(
+            color: widget.active ? WW.primary : WW.elevated,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: widget.active ? Colors.white : WW.textSec,
+                ),
+              ),
+              GestureDetector(
+                onTap: _openMenu,
+                child: Padding(
+                  padding: const EdgeInsets.all(6),
+                  child: Icon(
+                    Icons.arrow_drop_down_rounded,
+                    size: 16,
+                    color: widget.active ? Colors.white : WW.textSec,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ── Exercise card ──────────────────────────────────────────────────────────────
 
 class _ExerciseCard extends StatefulWidget {
@@ -1289,19 +1476,10 @@ class _ExerciseCardState extends State<_ExerciseCard> {
   bool _menuOpen = false;
   OverlayEntry? _overlayEntry;
   final LayerLink _layerLink = LayerLink();
-  late final TextEditingController _noteCtrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _noteCtrl = TextEditingController(
-        text: widget.exercise['note'] as String? ?? '');
-  }
 
   @override
   void dispose() {
     _closeMenu();
-    _noteCtrl.dispose();
     super.dispose();
   }
 
@@ -1345,8 +1523,6 @@ class _ExerciseCardState extends State<_ExerciseCard> {
   }
 
   void _openMenu() {
-    final showNote = _ex['showNote'] as bool? ?? false;
-
     _overlayEntry = OverlayEntry(
       builder: (context) => Stack(
         children: [
@@ -1376,15 +1552,6 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _menuItem(
-                          icon: Icons.sticky_note_2_outlined,
-                          label: showNote ? 'Hide Note' : 'Add Note',
-                          onTap: () {
-                            _closeMenu();
-                            setState(() => _ex['showNote'] = !showNote);
-                            widget.onChanged();
-                          },
-                        ),
                         _menuItem(
                           icon: Icons.swap_horiz_rounded,
                           label: 'Replace Exercise',
@@ -1428,7 +1595,6 @@ class _ExerciseCardState extends State<_ExerciseCard> {
     final name = _ex['name'] as String? ?? '';
     final muscle = _ex['muscle'] as String? ?? '';
     final restTime = _ex['restTime'] as int? ?? 90;
-    final showNote = _ex['showNote'] as bool? ?? false;
     final isCardio = _ex['isCardio'] as bool? ?? false;
     final cardioActivity = _ex['cardioActivity'] as String? ?? '';
     final cardioMinutes = _ex['cardioMinutes'] as int? ?? 30;
@@ -1533,7 +1699,13 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                 // ⓘ info button
                 if (!isCardio) ...[
                   GestureDetector(
-                    onTap: () => widget.onSnack('Exercise info coming soon'),
+                    onTap: () => context.push(
+                      Routes.exerciseDetail,
+                      extra: {
+                        'name': _ex['name'] as String? ?? '',
+                        'muscle': _ex['muscle'] as String? ?? '',
+                      },
+                    ),
                     child: Container(
                       width: 30,
                       height: 30,
@@ -1653,31 +1825,6 @@ class _ExerciseCardState extends State<_ExerciseCard> {
               ),
             ),
           ],
-
-          // ── Note field ─────────────────────────────────────────────────────
-          if (showNote)
-            Container(
-              decoration: const BoxDecoration(
-                border: Border(top: BorderSide(color: WW.elevated, width: 1)),
-              ),
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-              child: TextField(
-                controller: _noteCtrl,
-                onChanged: (v) {
-                  _ex['note'] = v;
-                  widget.onChanged();
-                },
-                decoration: const InputDecoration(
-                  hintText: 'Add note… (e.g. pause at bottom, grip width)',
-                  hintStyle: TextStyle(fontSize: 12, color: WW.textSec),
-                  border: InputBorder.none,
-                  isDense: true,
-                  contentPadding: EdgeInsets.symmetric(vertical: 10),
-                ),
-                style: const TextStyle(fontSize: 12, color: WW.text),
-                maxLines: null,
-              ),
-            ),
             ],
           ),
         ),
@@ -1892,18 +2039,60 @@ class _ExerciseSearchSheetState extends State<_ExerciseSearchSheet> {
   String _query = '';
   String _muscleFilter = 'All';
 
+  // Fetched once when the sheet opens (see _loadExercises) rather than
+  // re-querying Firestore on every chip/search keystroke — _results below
+  // filters this in-memory list client-side. Used to filter the hardcoded
+  // _kExerciseLibrary const directly; that const has since been removed
+  // now that this Firestore-backed fetch is confirmed working.
+  List<Map<String, dynamic>> _allExercises = [];
+  bool _isLoading = true;
+  bool _hasError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadExercises();
+  }
+
+  Future<void> _loadExercises() async {
+    setState(() {
+      _isLoading = true;
+      _hasError = false;
+    });
+    try {
+      final exercises = await FirestoreService().getAllExercises();
+      if (!mounted) return;
+      setState(() {
+        _allExercises = exercises;
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _hasError = true;
+        _isLoading = false;
+      });
+    }
+  }
+
   @override
   void dispose() {
     _searchCtrl.dispose();
     super.dispose();
   }
 
-  List<Map<String, String>> get _results {
-    return _kExerciseLibrary.where((e) {
+  // muscle ?? 'Other' — some real exercise documents may lack a muscle
+  // field (see getAllExercises()'s own doc comment on incomplete
+  // documents); falling back to 'Other' here rather than an empty string
+  // keeps both the muscle-chip filter and the row's muscle label sensible
+  // instead of silently matching nothing / displaying blank.
+  List<Map<String, dynamic>> get _results {
+    return _allExercises.where((e) {
+      final name = (e['name'] as String?) ?? '';
+      final muscle = (e['muscle'] as String?) ?? 'Other';
       final nameMatch = _query.isEmpty ||
-          (e['name']?.toLowerCase().contains(_query.toLowerCase()) ?? false);
-      final muscleMatch =
-          _muscleFilter == 'All' || e['muscle'] == _muscleFilter;
+          name.toLowerCase().contains(_query.toLowerCase());
+      final muscleMatch = _muscleFilter == 'All' || muscle == _muscleFilter;
       return nameMatch && muscleMatch;
     }).toList();
   }
@@ -2035,25 +2224,31 @@ class _ExerciseSearchSheetState extends State<_ExerciseSearchSheet> {
           const SizedBox(height: 6),
           const Divider(height: 1, color: WW.border),
 
-          // Results
+          // Results / loading / error
           Expanded(
-            child: results.isEmpty
+            child: _isLoading
                 ? const Center(
-                    child: Text(
-                      'No exercises found',
-                      style: TextStyle(
-                          fontSize: 13, color: WW.textSec),
-                    ),
+                    child: CircularProgressIndicator(color: WW.primary),
                   )
-                : ListView.separated(
+                : _hasError
+                    ? _buildErrorState()
+                    : results.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No exercises found',
+                              style: TextStyle(
+                                  fontSize: 13, color: WW.textSec),
+                            ),
+                          )
+                        : ListView.separated(
                     padding: const EdgeInsets.fromLTRB(18, 4, 18, 24),
                     itemCount: results.length,
                     separatorBuilder: (ctx2, idx2) =>
                         const Divider(height: 1, color: WW.border),
                     itemBuilder: (ctx3, i) {
                       final e = results[i];
-                      final name = e['name'] ?? '';
-                      final muscle = e['muscle'] ?? '';
+                      final name = (e['name'] as String?) ?? '';
+                      final muscle = (e['muscle'] as String?) ?? 'Other';
                       final added = widget.alreadyAdded.contains(name);
                       final mc = _muscleColor(muscle);
                       final mb = _muscleBg(muscle);
@@ -2122,6 +2317,47 @@ class _ExerciseSearchSheetState extends State<_ExerciseSearchSheet> {
                       );
                     },
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildErrorState() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline_rounded,
+              size: 40, color: WW.textSec),
+          const SizedBox(height: 10),
+          const Text(
+            "Couldn't load exercises",
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: WW.text,
+            ),
+          ),
+          const SizedBox(height: 12),
+          GestureDetector(
+            onTap: _loadExercises,
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(
+                color: WW.primary,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Text(
+                'Retry',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+              ),
+            ),
           ),
         ],
       ),

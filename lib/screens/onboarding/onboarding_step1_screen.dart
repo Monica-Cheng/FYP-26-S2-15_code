@@ -27,8 +27,14 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
   final _authService = AuthService();
   final _firestoreService = FirestoreService();
   final _displayNameController = TextEditingController();
+  final _usernameController = TextEditingController();
   final _heightController = TextEditingController();
   final _weightController = TextEditingController();
+  final _usernameFocusNode = FocusNode();
+
+  String? _usernameError;
+  bool _usernameChecking = false;
+  bool _usernameValid = false;
 
   int _subStep = 0;
   String _displayName = '';
@@ -48,11 +54,79 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
   bool _healthGranted = false;
 
   @override
+  void initState() {
+    super.initState();
+    _usernameFocusNode.addListener(_onUsernameFocusChange);
+  }
+
+  @override
   void dispose() {
+    _usernameFocusNode.removeListener(_onUsernameFocusChange);
+    _usernameFocusNode.dispose();
     _displayNameController.dispose();
+    _usernameController.dispose();
     _heightController.dispose();
     _weightController.dispose();
     super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
+  // On-blur username validation — runs format checks, then the async
+  // uniqueness check, updating inline state for _buildBodySection() to show.
+  // ---------------------------------------------------------------------------
+  void _onUsernameFocusChange() {
+    if (_usernameFocusNode.hasFocus) return;
+    final username = _usernameController.text.trim();
+    if (username.isEmpty) {
+      setState(() {
+        _usernameError = null;
+        _usernameValid = false;
+        _usernameChecking = false;
+      });
+      return;
+    }
+    _validateUsernameInline(username);
+  }
+
+  Future<void> _validateUsernameInline(String username) async {
+    if (username.length < 3 || username.length > 20) {
+      setState(() {
+        _usernameError = 'Username must be between 3 and 20 characters.';
+        _usernameValid = false;
+        _usernameChecking = false;
+      });
+      return;
+    }
+    if (!RegExp(r'^[a-z0-9_]+$').hasMatch(username)) {
+      setState(() {
+        _usernameError =
+            'Username can only contain lowercase letters, numbers, and underscores.';
+        _usernameValid = false;
+        _usernameChecking = false;
+      });
+      return;
+    }
+    setState(() {
+      _usernameError = null;
+      _usernameChecking = true;
+      _usernameValid = false;
+    });
+    try {
+      final isTaken = await _firestoreService.isUsernameTaken(username);
+      if (!mounted) return;
+      setState(() {
+        _usernameChecking = false;
+        if (isTaken) {
+          _usernameError = 'That username is already taken.';
+          _usernameValid = false;
+        } else {
+          _usernameError = null;
+          _usernameValid = true;
+        }
+      });
+    } catch (_) {
+      if (mounted) setState(() => _usernameChecking = false);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -171,11 +245,55 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
       return;
     }
 
+    final username = _usernameController.text.trim();
+    if (username.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please enter a username.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    if (username.length < 3 || username.length > 20) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Username must be between 3 and 20 characters.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    if (!RegExp(r'^[a-z0-9_]+$').hasMatch(username)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Username can only contain lowercase letters, numbers, and underscores.',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
     final uid = _authService.getCurrentUser()?.uid;
     if (uid == null) return;
 
     setState(() => _isLoading = true);
     try {
+      final isTaken = await _firestoreService.isUsernameTaken(username);
+      if (isTaken) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('That username is already taken.'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
+
       // Convert to metric for storage regardless of display unit.
       final rawHeight = double.tryParse(_heightController.text.trim());
       final rawWeight = double.tryParse(_weightController.text.trim());
@@ -186,6 +304,7 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
 
       final data = <String, dynamic>{
         'displayName': _displayNameController.text.trim(),
+        'username': username,
         if (_dob != null) 'dob': _dob!.toIso8601String(),
         if (_biologicalSex.isNotEmpty) 'biologicalSex': _biologicalSex,
         if (heightCm != null) 'heightCm': heightCm,
@@ -198,11 +317,24 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
 
       await _firestoreService.saveOnboardingStep1(uid, data);
       if (mounted) context.go(Routes.onboardingStep2);
-    } catch (_) {
+    } catch (e) {
+      // Was a bare `catch (_)` that silently discarded the exception —
+      // this step's failure (e.g. a Firestore PERMISSION_DENIED from a
+      // rules regression) was previously indistinguishable from any other
+      // failure, both in the console and to the user. Logged here so a
+      // future issue like that shows up immediately instead of needing to
+      // be independently investigated from scratch.
+      print('onboarding_step1_screen: save failed: $e');
       if (mounted) {
+        final isNetworkError = e is SocketException ||
+            e.toString().toLowerCase().contains('network');
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Something went wrong. Please try again.'),
+          SnackBar(
+            content: Text(
+              isNetworkError
+                  ? 'No internet connection. Please check your connection and try again.'
+                  : 'Something went wrong saving your profile. Please try again.',
+            ),
             behavior: SnackBarBehavior.floating,
           ),
         );
@@ -377,6 +509,40 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
                   hint: 'e.g. Alex',
                   onChanged: (v) => setState(() => _displayName = v),
                 ),
+                const SizedBox(height: 16),
+
+                // ── Username ──────────────────────────────────────────────────
+                _FieldLabel('Username'),
+                const SizedBox(height: 6),
+                _PlainTextField(
+                  controller: _usernameController,
+                  hint: 'e.g. alex_92',
+                  focusNode: _usernameFocusNode,
+                ),
+                if (_usernameChecking) ...[
+                  const SizedBox(height: 6),
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: WW.primary,
+                    ),
+                  ),
+                ] else if (_usernameError != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    _usernameError!,
+                    style: const TextStyle(fontSize: 12, color: Color(0xFFEF4444)),
+                  ),
+                ] else if (_usernameValid) ...[
+                  const SizedBox(height: 6),
+                  const Icon(
+                    Icons.check_circle_rounded,
+                    size: 16,
+                    color: Color(0xFF22C55E),
+                  ),
+                ],
                 const SizedBox(height: 16),
 
                 // ── Date of Birth ─────────────────────────────────────────────
@@ -950,12 +1116,14 @@ class _PlainTextField extends StatelessWidget {
   final String hint;
   final ValueChanged<String>? onChanged;
   final TextInputType keyboardType;
+  final FocusNode? focusNode;
 
   const _PlainTextField({
     required this.controller,
     required this.hint,
     this.onChanged,
     this.keyboardType = TextInputType.text,
+    this.focusNode,
   });
 
   @override
@@ -968,6 +1136,7 @@ class _PlainTextField extends StatelessWidget {
       height: 50,
       child: TextField(
         controller: controller,
+        focusNode: focusNode,
         keyboardType: keyboardType,
         onChanged: onChanged,
         style: const TextStyle(fontSize: 15, color: WW.text),

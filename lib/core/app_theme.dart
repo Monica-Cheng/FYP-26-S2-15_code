@@ -36,6 +36,8 @@ class WW {
 
   // Accent
   static const Color gold = Color(0xFFF59E0B);
+  static const Color lightBlue = Color(0xFF7EC8E3);
+  static const Color lightYellow = Color(0xFFF5D76E);
 
   // Shadows
   static List<BoxShadow> get shadow => [
@@ -80,6 +82,26 @@ class WW {
     fontSize: 11,
     fontWeight: FontWeight.w600,
     color: textSec,
+  );
+
+  // Shared flat-list-row styles — reused by any screen rendering
+  // "avatar + name + stat" rows (e.g. Club's Leaderboard/Friends tabs).
+  // rowStat has no fixed color since callers vary it per row (e.g. the
+  // current user's own row vs. everyone else's) via .copyWith(color: ...).
+  static const TextStyle rowName = TextStyle(
+    fontSize: 14,
+    fontWeight: FontWeight.w600,
+    color: text,
+  );
+  static const TextStyle rowSecondary = TextStyle(
+    fontSize: 12,
+    fontWeight: FontWeight.w500,
+    color: textSec,
+  );
+  static const TextStyle rowStat = TextStyle(
+    fontSize: 15,
+    fontWeight: FontWeight.w700,
+    color: text,
   );
 
   // Theme data for MaterialApp

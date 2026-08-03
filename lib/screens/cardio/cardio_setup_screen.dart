@@ -59,6 +59,13 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
   bool _fromPlan = false;
   String? _planActivity;
   int? _planMinutes;
+  // Which in-progress plan session (and which cardio block within it) this
+  // launch belongs to, if any — forwarded from gym_session_screen.dart's
+  // _buildCardioPlaceholderCard via this screen's own incoming extra, and
+  // re-forwarded into whichever cardio screen _handleStart() launches next
+  // (see below). Both null when reached standalone (not from a plan).
+  String? _sessionRunId;
+  int? _blockIndex;
   String _goalType = 'time';
   int _goalMinutes = 30;
   late FixedExtentScrollController _durationController;
@@ -66,8 +73,9 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
   @override
   void initState() {
     super.initState();
-    _durationController =
-        FixedExtentScrollController(initialItem: _goalMinutes - 1);
+    _durationController = FixedExtentScrollController(
+      initialItem: _goalMinutes - 1,
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) => _readExtra());
   }
 
@@ -84,22 +92,49 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
       _fromPlan = extra['fromPlan'] as bool? ?? false;
       _planActivity = extra['planActivity'] as String?;
       _planMinutes = extra['planMinutes'] as int?;
+      _sessionRunId = extra['sessionRunId'] as String?;
+      _blockIndex = extra['blockIndex'] as int?;
       if (_planActivity != null) _selectedActivity = _planActivity!;
     });
   }
 
   void _handleStart() {
+    if (_selectedMode == 'outdoor') {
+      // Temporary wiring: Routes.outdoorCardioTest only proves the map
+      // renders and location permissions work (see OutdoorCardioScreen).
+      // Once Phase A/B of outdoor GPS tracking are fully built, this
+      // should push the real outdoor cardio route/flow instead, and the
+      // temporary test route can be removed.
+      context.push(
+        Routes.outdoorCardioTest,
+        extra: {
+          'activity': _selectedActivity,
+          'fromPlan': _fromPlan,
+          'planActivity': _planActivity,
+          'planMinutes': _planMinutes,
+          'sessionRunId': _sessionRunId,
+          'blockIndex': _blockIndex,
+        },
+      );
+      return;
+    }
+
     final effectiveGoalMinutes = _fromPlan
         ? (_planMinutes ?? 30)
         : (_goalType == 'time' ? _goalMinutes : 0);
 
-    context.push(Routes.cardioSession, extra: {
-      'activity': _selectedActivity,
-      'mode': 'indoor',
-      'plannedMinutes': effectiveGoalMinutes,
-      'fromPlan': _fromPlan,
-      'goalMinutes': effectiveGoalMinutes,
-    });
+    context.push(
+      Routes.cardioSession,
+      extra: {
+        'activity': _selectedActivity,
+        'mode': 'indoor',
+        'plannedMinutes': effectiveGoalMinutes,
+        'fromPlan': _fromPlan,
+        'goalMinutes': effectiveGoalMinutes,
+        'sessionRunId': _sessionRunId,
+        'blockIndex': _blockIndex,
+      },
+    );
   }
 
   @override
@@ -107,311 +142,359 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
     return Scaffold(
       backgroundColor: WW.bg,
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(height: 16),
+        child: Column(
+          children: [
+            // Scrollable content — everything except the footer (plan info
+            // row + Start button) below, so short screens (e.g. the
+            // Small_Phone emulator profile) scroll instead of overflowing
+            // once Activity/Mode/Goal/duration-picker no longer fit.
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 16),
 
-              // ── Custom top row ───────────────────────────────────────────
-              Row(
-                children: [
-                  GestureDetector(
-                    onTap: () => context.pop(),
-                    child: Container(
-                      width: 38,
-                      height: 38,
-                      decoration: BoxDecoration(
-                        color: WW.elevated,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Center(
-                        child: Icon(Icons.chevron_left_rounded,
-                            color: WW.primaryDark, size: 24),
-                      ),
-                    ),
-                  ),
-                  const Expanded(
-                    child: Text(
-                      'Start Cardio',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w800,
-                        color: WW.primaryDark,
-                        letterSpacing: -0.3,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 38),
-                ],
-              ),
-
-              const SizedBox(height: 24),
-
-              // ── Activity section ─────────────────────────────────────────
-              const Text(
-                'ACTIVITY',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  color: WW.textSec,
-                  letterSpacing: 0.5,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: _kActivities.map((activity) {
-                  final isSelected = _selectedActivity == activity.id;
-                  return Expanded(
-                    child: Padding(
-                      padding: EdgeInsets.only(
-                        right: activity.id != 'Cycle' ? 8 : 0,
-                      ),
-                      child: GestureDetector(
-                        onTap: () =>
-                            setState(() => _selectedActivity = activity.id),
-                        child: Container(
-                          height: 80,
-                          decoration: BoxDecoration(
-                            color: isSelected
-                                ? activity.color.withValues(alpha: 0.12)
-                                : WW.card,
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(
-                              color:
-                                  isSelected ? activity.color : WW.border,
-                              width: isSelected ? 2 : 1,
+                    // ── Custom top row ───────────────────────────────────────────
+                    Row(
+                      children: [
+                        GestureDetector(
+                          onTap: () => context.pop(),
+                          child: Container(
+                            width: 38,
+                            height: 38,
+                            decoration: BoxDecoration(
+                              color: WW.elevated,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Center(
+                              child: Icon(
+                                Icons.chevron_left_rounded,
+                                color: WW.primaryDark,
+                                size: 24,
+                              ),
                             ),
                           ),
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(activity.icon,
-                                  size: 28, color: activity.color),
-                              const SizedBox(height: 4),
-                              Text(
-                                activity.label,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
+                        ),
+                        const Expanded(
+                          child: Text(
+                            'Start Cardio',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w800,
+                              color: WW.primaryDark,
+                              letterSpacing: -0.3,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 38),
+                      ],
+                    ),
+
+                    const SizedBox(height: 24),
+
+                    // ── Activity section ─────────────────────────────────────────
+                    const Text(
+                      'ACTIVITY',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: WW.textSec,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: _kActivities.map((activity) {
+                        final isSelected = _selectedActivity == activity.id;
+                        // Plan-launched cardio has its activity fixed by the plan
+                        // block — lock the selector to that activity and grey out
+                        // the other two, reusing the same WW.elevated/WW.textSec
+                        // muted-disabled treatment as the cardio placeholder's
+                        // Start button in gym_session_screen.dart's _readOnly gate,
+                        // rather than inventing a new disabled style.
+                        final isLockedOut =
+                            _fromPlan && _planActivity != null && !isSelected;
+                        return Expanded(
+                          child: Padding(
+                            padding: EdgeInsets.only(
+                              right: activity.id != 'Cycle' ? 8 : 0,
+                            ),
+                            child: GestureDetector(
+                              onTap: isLockedOut
+                                  ? null
+                                  : () => setState(
+                                      () => _selectedActivity = activity.id,
+                                    ),
+                              child: Container(
+                                height: 80,
+                                decoration: BoxDecoration(
                                   color: isSelected
-                                      ? activity.color
-                                      : WW.textSec,
+                                      ? activity.color.withValues(alpha: 0.12)
+                                      : (isLockedOut ? WW.elevated : WW.card),
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: isSelected
+                                        ? activity.color
+                                        : WW.border,
+                                    width: isSelected ? 2 : 1,
+                                  ),
+                                ),
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      activity.icon,
+                                      size: 28,
+                                      color: isLockedOut
+                                          ? WW.textSec
+                                          : activity.color,
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      activity.label,
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
+                                        color: isSelected
+                                            ? activity.color
+                                            : WW.textSec,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                            ],
+                            ),
                           ),
-                        ),
+                        );
+                      }).toList(),
+                    ),
+
+                    const SizedBox(height: 24),
+
+                    // ── Mode section ─────────────────────────────────────────────
+                    const Text(
+                      'MODE',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: WW.textSec,
+                        letterSpacing: 0.5,
                       ),
                     ),
-                  );
-                }).toList(),
-              ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildModeCard(
+                            id: 'indoor',
+                            label: 'Indoor',
+                            subtitle: 'Timer based',
+                            icon: Icons.fitness_center_rounded,
+                            color: WW.primary,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _buildModeCard(
+                            id: 'outdoor',
+                            label: 'Outdoor',
+                            subtitle: 'GPS tracking',
+                            icon: Icons.map_rounded,
+                            color: WW.teal,
+                          ),
+                        ),
+                      ],
+                    ),
 
-              const SizedBox(height: 24),
+                    if (!_fromPlan) ...[
+                      const SizedBox(height: 24),
+                      const Text(
+                        'GOAL',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: WW.textSec,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
 
-              // ── Mode section ─────────────────────────────────────────────
-              const Text(
-                'MODE',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  color: WW.textSec,
-                  letterSpacing: 0.5,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(child: _buildModeCard(
-                    id: 'indoor',
-                    label: 'Indoor',
-                    subtitle: 'Timer based',
-                    icon: Icons.fitness_center_rounded,
-                    color: WW.primary,
-                  )),
-                  const SizedBox(width: 8),
-                  Expanded(child: _buildModeCard(
-                    id: 'outdoor',
-                    label: 'Outdoor',
-                    subtitle: 'GPS tracking',
-                    icon: Icons.map_rounded,
-                    color: WW.teal,
-                  )),
-                ],
-              ),
+                      // Goal type toggle
+                      Row(
+                        children: [
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: () => setState(() => _goalType = 'time'),
+                              child: Container(
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  color: _goalType == 'time'
+                                      ? WW.primary
+                                      : WW.elevated,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    'Set Duration',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: _goalType == 'time'
+                                          ? Colors.white
+                                          : WW.textSec,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: () => setState(() => _goalType = 'open'),
+                              child: Container(
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  color: _goalType == 'open'
+                                      ? WW.primary
+                                      : WW.elevated,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    'Open-ended',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: _goalType == 'open'
+                                          ? Colors.white
+                                          : WW.textSec,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
 
-              if (!_fromPlan) ...[
-                const SizedBox(height: 24),
-                const Text(
-                  'GOAL',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: WW.textSec,
-                    letterSpacing: 0.5,
-                  ),
-                ),
-                const SizedBox(height: 10),
-
-                // Goal type toggle
-                Row(
-                  children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => setState(() => _goalType = 'time'),
-                        child: Container(
-                          height: 48,
+                      // Duration picker — only shown when goalType == 'time'
+                      if (_goalType == 'time') ...[
+                        const SizedBox(height: 12),
+                        Container(
+                          height: 120,
                           decoration: BoxDecoration(
-                            color: _goalType == 'time'
-                                ? WW.primary
-                                : WW.elevated,
+                            color: WW.elevated,
                             borderRadius: BorderRadius.circular(12),
                           ),
-                          child: Center(
-                            child: Text(
-                              'Set Duration',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                                color: _goalType == 'time'
-                                    ? Colors.white
-                                    : WW.textSec,
+                          child: CupertinoPicker(
+                            scrollController: _durationController,
+                            itemExtent: 36,
+                            onSelectedItemChanged: (index) {
+                              setState(() => _goalMinutes = index + 1);
+                            },
+                            children: List.generate(
+                              120,
+                              (i) => Center(
+                                child: Text(
+                                  '${i + 1} min',
+                                  style: const TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w600,
+                                    color: WW.text,
+                                  ),
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => setState(() => _goalType = 'open'),
-                        child: Container(
-                          height: 48,
-                          decoration: BoxDecoration(
-                            color: _goalType == 'open'
-                                ? WW.primary
-                                : WW.elevated,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Center(
-                            child: Text(
-                              'Open-ended',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                                color: _goalType == 'open'
-                                    ? Colors.white
-                                    : WW.textSec,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
+                      ],
+                    ],
+
+                    const SizedBox(height: 24),
                   ],
                 ),
+              ),
+            ),
 
-                // Duration picker — only shown when goalType == 'time'
-                if (_goalType == 'time') ...[
-                  const SizedBox(height: 12),
-                  Container(
-                    height: 120,
-                    decoration: BoxDecoration(
-                      color: WW.elevated,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: CupertinoPicker(
-                      scrollController: _durationController,
-                      itemExtent: 36,
-                      onSelectedItemChanged: (index) {
-                        setState(() => _goalMinutes = index + 1);
-                      },
-                      children: List.generate(
-                        120,
-                        (i) => Center(
-                          child: Text(
-                            '${i + 1} min',
+            // Fixed footer — plan info row + Start button stay pinned to
+            // the bottom of the screen (outside the scroll area) rather
+            // than being pushed off it, matching how the Spacer() used to
+            // anchor this on tall screens while still letting the content
+            // above scroll on short ones.
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+              child: Column(
+                children: [
+                  // ── Plan info row ────────────────────────────────────
+                  if (_fromPlan && _planMinutes != null) ...[
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: WW.chipBg,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.info_outline,
+                            color: WW.primary,
+                            size: 16,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Suggested duration: $_planMinutes min',
                             style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                              color: WW.text,
+                              fontSize: 13,
+                              color: WW.primary,
                             ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+
+                  // ── Start button ─────────────────────────────────────
+                  GestureDetector(
+                    onTap: _handleStart,
+                    child: Container(
+                      width: double.infinity,
+                      height: 54,
+                      decoration: BoxDecoration(
+                        color: WW.primary,
+                        borderRadius: BorderRadius.circular(14),
+                        boxShadow: [
+                          BoxShadow(
+                            color: WW.primary.withValues(alpha: 0.35),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Center(
+                        child: Text(
+                          _fromPlan
+                              ? 'Start $_selectedActivity'
+                              : _goalType == 'time'
+                              ? 'Start · $_goalMinutes min'
+                              : 'Start',
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white,
                           ),
                         ),
                       ),
                     ),
                   ),
                 ],
-              ],
-
-              const Spacer(),
-
-              // ── Plan info row ────────────────────────────────────────────
-              if (_fromPlan && _planMinutes != null) ...[
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: WW.chipBg,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.info_outline,
-                          color: WW.primary, size: 16),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Suggested duration: $_planMinutes min',
-                        style: const TextStyle(
-                          fontSize: 13,
-                          color: WW.primary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 12),
-              ],
-
-              // ── Start button ─────────────────────────────────────────────
-              GestureDetector(
-                onTap: _handleStart,
-                child: Container(
-                  width: double.infinity,
-                  height: 54,
-                  decoration: BoxDecoration(
-                    color: WW.primary,
-                    borderRadius: BorderRadius.circular(14),
-                    boxShadow: [
-                      BoxShadow(
-                        color: WW.primary.withValues(alpha: 0.35),
-                        blurRadius: 12,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: Center(
-                    child: Text(
-                      _fromPlan
-                          ? 'Start $_selectedActivity · Indoor'
-                          : _goalType == 'time'
-                              ? 'Start · $_goalMinutes min'
-                              : 'Start · Open Run',
-                      style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                ),
               ),
-              const SizedBox(height: 24),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -458,10 +541,7 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
                   const SizedBox(height: 2),
                   Text(
                     subtitle,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: WW.textSec,
-                    ),
+                    style: const TextStyle(fontSize: 11, color: WW.textSec),
                   ),
                 ],
               ),
