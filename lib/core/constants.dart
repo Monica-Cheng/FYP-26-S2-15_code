@@ -17,6 +17,9 @@ class Collections {
   static const String friendRequests = 'friendRequests';
   static const String friends = 'friends';
   static const String notifications = 'notifications';
+  static const String businessPartners = 'businessPartners';
+  static const String coachRequests = 'coachRequests';
+  static const String coachClients = 'coachClients';
 }
 
 class AppConstants {

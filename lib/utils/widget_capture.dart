@@ -51,6 +51,23 @@ Future<Uint8List?> captureWidgetAsPngBytes(
   buildOwner.buildScope(rootElement);
   buildOwner.finalizeTree();
 
+  // Image.memory()/Image.network() etc. decode asynchronously — dart:ui
+  // decodes the codec off the UI thread and signals completion via a
+  // microtask/callback, so the buildScope() above only STARTS that
+  // decode, it doesn't wait for it. Without this wait, flushPaint() below
+  // would run before the decoded frame arrives and that image paints as
+  // a blank hole (proved via test/capture_async_image_race_test.dart:
+  // capturing a widget with a real Image.memory background with no wait
+  // produced a 331-byte blank PNG; the identical capture after a 200ms
+  // wait produced the correct 639-byte image — a CustomPaint-only widget
+  // with no Image dependency captured correctly with zero wait either
+  // way, confirming this delay is specifically about image decode, not a
+  // general rendering issue). These are small in-memory (base64) images,
+  // not network fetches, so decode is fast and CPU-bound.
+  await Future.delayed(const Duration(milliseconds: 100));
+  buildOwner.buildScope(rootElement);
+  buildOwner.finalizeTree();
+
   pipelineOwner.flushLayout();
   pipelineOwner.flushCompositingBits();
   pipelineOwner.flushPaint();

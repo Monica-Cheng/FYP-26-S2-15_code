@@ -67,11 +67,9 @@ class RoutePainter extends CustomPainter {
     if (latSpan < 1e-9 && lngSpan < 1e-9) {
       // Route with essentially no movement (e.g. a near-stationary test
       // session) — draw a single dot rather than dividing by zero below.
-      canvas.drawCircle(
-        Offset(size.width / 2, drawHeight / 2 + padding),
-        7,
-        Paint()..color = Colors.white,
-      );
+      final dot = Offset(size.width / 2, drawHeight / 2 + padding);
+      canvas.drawCircle(dot, 8.5, Paint()..color = Colors.black.withValues(alpha: 0.45));
+      canvas.drawCircle(dot, 7, Paint()..color = Colors.white);
       return;
     }
 
@@ -97,6 +95,24 @@ class RoutePainter extends CustomPainter {
       path.lineTo(o.dx, o.dy);
     }
 
+    // A dark outline stroke drawn first, slightly wider than the white
+    // line on top of it, so the route stays visible regardless of what's
+    // underneath — this overlay gets stacked on 3 genuinely different
+    // background types (map snapshot, user photo, color gradient), and a
+    // plain white line has poor contrast against any light/bright region
+    // in a photo or map tile (the card's own dark scrim only covers the
+    // bottom third — see route_overlay.dart's own doc comment above).
+    // Classic "sticker" outline technique, not just a guess — same idea
+    // as the start/end markers already having a white ring for contrast.
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = Colors.black.withValues(alpha: 0.45)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 9
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round,
+    );
     canvas.drawPath(
       path,
       Paint()
@@ -108,11 +124,14 @@ class RoutePainter extends CustomPainter {
     );
 
     // Start (hollow) / end (filled) markers — a common route-map
-    // convention, and a cheap way to show direction of travel.
+    // convention, and a cheap way to show direction of travel. Same dark
+    // outline treatment for the same reason as the line above.
     final start = project(points.first);
     final end = project(points.last);
+    canvas.drawCircle(start, 9.5, Paint()..color = Colors.black.withValues(alpha: 0.45));
     canvas.drawCircle(start, 8, Paint()..color = Colors.white);
     canvas.drawCircle(start, 5, Paint()..color = WW.primaryDark);
+    canvas.drawCircle(end, 9.5, Paint()..color = Colors.black.withValues(alpha: 0.45));
     canvas.drawCircle(end, 8, Paint()..color = Colors.white);
   }
 

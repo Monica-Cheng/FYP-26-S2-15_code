@@ -81,7 +81,16 @@ class RouteMapShareCard extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // Background — snapshot image or painted route-on-gradient.
+          // Background — snapshot image or painted gradient. NOT relied
+          // on alone for the route line anymore (see RouteOverlay below)
+          // — a snapshot's baked-in route depends on a completely
+          // separate pipeline (outdoor_cardio_screen.dart's
+          // _drawRouteOnSnapshot, using the `image` package, its own
+          // Mercator projection, and a WW.primary-colored line with no
+          // contrast outline) succeeding, and previously had no fallback
+          // at all here if it didn't draw clearly. RouteOverlay is now
+          // always stacked on top when there's route data, independent
+          // of whether the snapshot's own baked-in line is visible.
           if (hasSnapshot)
             Image.memory(
               base64Decode(mapSnapshotBase64!),
@@ -90,6 +99,9 @@ class RouteMapShareCard extends StatelessWidget {
             )
           else
             _buildPaintedBackground(),
+
+          if (routePoints.length >= 2)
+            Positioned.fill(child: RouteOverlay(routePoints: routePoints)),
 
           // Dark scrim behind the bottom stat block, for legibility over
           // either a bright map snapshot or a bright photo-like painted
@@ -257,6 +269,10 @@ class RouteMapShareCard extends StatelessWidget {
     );
   }
 
+  // Just the gradient now — the route line itself is drawn by the
+  // RouteOverlay stacked on top in build() (same mechanism used for
+  // both this card's snapshot case and the Photo/Color cards), not
+  // painted here directly anymore.
   Widget _buildPaintedBackground() {
     return Container(
       decoration: const BoxDecoration(
@@ -266,12 +282,6 @@ class RouteMapShareCard extends StatelessWidget {
           colors: [WW.primaryDark, Color(0xFF4a4ea8)],
         ),
       ),
-      child: routePoints.length >= 2
-          ? CustomPaint(
-              size: const Size(width, height),
-              painter: RoutePainter(points: routePoints),
-            )
-          : null,
     );
   }
 }
