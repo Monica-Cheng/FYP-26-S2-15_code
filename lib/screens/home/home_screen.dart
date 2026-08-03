@@ -821,11 +821,6 @@ class _HomeTabState extends State<_HomeTab> {
     }
   }
 
-  Future<void> _handleLogout() async {
-    await _authService.signOut();
-    if (mounted) context.go(Routes.login);
-  }
-
   void _showNotificationsSheet() {
     final uid = _authService.getCurrentUser()?.uid;
     if (uid == null) return;
@@ -1375,12 +1370,6 @@ class _HomeTabState extends State<_HomeTab> {
                 ),
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          // Settings / logout gear
-          GestureDetector(
-            onTap: _handleLogout,
-            child: const Icon(Icons.logout_rounded, color: WW.textSec, size: 22),
           ),
         ],
       ),
