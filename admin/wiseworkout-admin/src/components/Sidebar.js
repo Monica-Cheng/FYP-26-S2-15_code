@@ -9,6 +9,10 @@ const menuItems = [
   { id: 'analytics', label: 'Analytics', icon: '📈' },
   { id: 'challenges', label: 'Challenges', icon: '🏆' },
   { id: 'plans', label: 'Plans', icon: '📋' },
+  { id: 'posts', label: 'Posts', icon: '📝' },
+  { id: 'injuries', label: 'Injuries', icon: '🩹' },
+  { id: 'broadcasts', label: 'Broadcasts', icon: '📢' },
+  { id: 'badges', label: 'Badges', icon: '🏅' },
 ];
 
 function Sidebar({ currentPage, setCurrentPage, onLogout }) {
@@ -21,10 +25,47 @@ function Sidebar({ currentPage, setCurrentPage, onLogout }) {
       display: 'flex',
       flexDirection: 'column',
       padding: '24px 0',
+      flexShrink: 0,
     }}>
-      <div style={{ padding: '0 24px 32px' }}>
-        <div style={{ fontSize: '13px', color: '#a0a0b0', marginBottom: '4px' }}>WiseWorkout</div>
-        <div style={{ fontSize: '16px', fontWeight: '600' }}>Admin Portal</div>
+      <style>{`
+        .wwa-nav-item {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          padding: 11px 24px;
+          cursor: pointer;
+          font-size: 14px;
+          border-left: 3px solid transparent;
+          color: #a0a0b0;
+          transition: background 0.15s ease, color 0.15s ease;
+        }
+        .wwa-nav-item:hover {
+          background: rgba(255, 255, 255, 0.04);
+          color: #e5e5f0;
+        }
+        .wwa-nav-item-active, .wwa-nav-item-active:hover {
+          background: #16213e;
+          border-left-color: #6c63ff;
+          color: #ffffff;
+          font-weight: 600;
+        }
+        .wwa-nav-icon { font-size: 15px; width: 18px; text-align: center; }
+        .wwa-logout {
+          padding: 12px 24px;
+          cursor: pointer;
+          color: #ff6b6b;
+          font-size: 14px;
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          transition: background 0.15s ease;
+        }
+        .wwa-logout:hover { background: rgba(255, 107, 107, 0.08); }
+      `}</style>
+
+      <div style={{ padding: '0 24px 28px', borderBottom: '1px solid rgba(255,255,255,0.06)', marginBottom: '12px' }}>
+        <div style={{ fontSize: '12px', color: '#8a8aa0', marginBottom: '4px', letterSpacing: '0.04em', textTransform: 'uppercase' }}>WiseWorkout</div>
+        <div style={{ fontSize: '17px', fontWeight: '700', letterSpacing: '-0.01em' }}>Admin Portal</div>
       </div>
 
       <div style={{ flex: 1 }}>
@@ -32,37 +73,16 @@ function Sidebar({ currentPage, setCurrentPage, onLogout }) {
           <div
             key={item.id}
             onClick={() => setCurrentPage(item.id)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '12px',
-              padding: '12px 24px',
-              cursor: 'pointer',
-              backgroundColor: currentPage === item.id ? '#16213e' : 'transparent',
-              borderLeft: currentPage === item.id ? '3px solid #6c63ff' : '3px solid transparent',
-              color: currentPage === item.id ? '#ffffff' : '#a0a0b0',
-              fontSize: '14px',
-            }}
+            className={`wwa-nav-item ${currentPage === item.id ? 'wwa-nav-item-active' : ''}`}
           >
-            <span>{item.icon}</span>
+            <span className="wwa-nav-icon">{item.icon}</span>
             <span>{item.label}</span>
           </div>
         ))}
       </div>
 
-      <div
-        onClick={onLogout}
-        style={{
-          padding: '12px 24px',
-          cursor: 'pointer',
-          color: '#ff6b6b',
-          fontSize: '14px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '12px',
-        }}
-      >
-        <span>🚪</span>
+      <div onClick={onLogout} className="wwa-logout">
+        <span className="wwa-nav-icon">🚪</span>
         <span>Sign out</span>
       </div>
     </div>

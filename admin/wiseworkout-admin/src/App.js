@@ -8,6 +8,10 @@ import Settings from './pages/Settings';
 import Analytics from './pages/Analytics';
 import Challenges from './pages/Challenges';
 import Plans from './pages/Plans';
+import Posts from './pages/Posts';
+import Injuries from './pages/Injuries';
+import Broadcasts from './pages/Broadcasts';
+import Badges from './pages/Badges';
 import Login from './pages/Login';
 import './App.css';
 
@@ -29,6 +33,10 @@ function App() {
       case 'analytics': return <Analytics />;
       case 'challenges': return <Challenges />;
       case 'plans': return <Plans />;
+      case 'posts': return <Posts />;
+      case 'injuries': return <Injuries />;
+      case 'broadcasts': return <Broadcasts />;
+      case 'badges': return <Badges />;
       default: return <Dashboard />;
     }
   };
