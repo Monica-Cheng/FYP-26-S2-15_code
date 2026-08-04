@@ -16,9 +16,979 @@ const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const {defineSecret} = require("firebase-functions/params");
 const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
+const {getAuth} = require("firebase-admin/auth");
 
 initializeApp();
 const db = getFirestore();
+const adminAuth = getAuth();
+
+/**
+ * Confirms that the caller is signed in and has an active admin record at:
+ * admins/{firebaseAuthUid}
+ *
+ * @param {object} request Callable Cloud Function request.
+ * @return {Promise<string>} The authenticated admin UID.
+ */
+async function requireAdmin(request) {
+  const uid = request.auth && request.auth.uid;
+
+  if (!uid) {
+    throw new HttpsError(
+        "unauthenticated",
+        "You must sign in before accessing the admin portal.",
+    );
+  }
+
+  const adminDoc = await db.collection("admins").doc(uid).get();
+
+  if (!adminDoc.exists || adminDoc.data().active !== true) {
+    throw new HttpsError(
+        "permission-denied",
+        "This account does not have administrator access.",
+    );
+  }
+
+  return uid;
+}
+
+/**
+ * Lets the React dashboard verify that the signed-in account is an admin.
+ */
+exports.adminCheckAccess = onCall(async (request) => {
+  const uid = await requireAdmin(request);
+
+  return {
+    authorized: true,
+    uid,
+  };
+});
+
+/**
+ * Returns the user fields required by the React Users page.
+ * This uses Firebase Admin SDK on the server, so it does not depend on
+ * the browser's restricted Firestore permissions.
+ */
+exports.adminListUsers = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const snapshot = await db.collection("users").get();
+
+  const users = snapshot.docs.map((userDoc) => {
+    const data = userDoc.data();
+
+    return {
+      id: userDoc.id,
+      displayName: data.displayName || "",
+      username: data.username || "",
+      email: data.email || "",
+      level: typeof data.level === "number" ? data.level : 1,
+      onboardingComplete: data.onboardingComplete === true,
+      healthConnected: data.healthConnected === true,
+      wearableConnected: data.wearableConnected === true,
+      isPremium: data.isPremium === true,
+      accountStatus:
+        data.accountStatus === "suspended" ? "suspended" : "active",
+      planMatchGoal: data.planMatchGoal || "",
+      primaryGoal: data.primaryGoal || "",
+      hometown: data.hometown || "",
+      totalXp: typeof data.totalXp === "number" ? data.totalXp : 0,
+      weeklyXp: typeof data.weeklyXp === "number" ? data.weeklyXp : 0,
+      trackedPlanName: data.trackedPlanName || "",
+      savedPlanIds: Array.isArray(data.savedPlanIds) ?
+        data.savedPlanIds :
+        [],
+        bio: data.bio || "",
+        preferredUnits: data.preferredUnits || "",
+        
+        notificationsEnabled: data.notificationsEnabled !== false,
+        workoutReminders: data.workoutReminders !== false,
+        streakAlerts: data.streakAlerts !== false,
+        wiseCoachMessages: data.wiseCoachMessages !== false,
+        
+        reminderHour:
+          typeof data.reminderHour === "number" ? data.reminderHour : 7,
+        reminderMinute:
+          typeof data.reminderMinute === "number" ? data.reminderMinute : 0,
+        
+        trackedPlanId: data.trackedPlanId || "",
+        planMatchLevel: data.planMatchLevel || "",
+        planMatchSport: data.planMatchSport || "",
+        planMatchDays: data.planMatchDays || "",
+        planMatchEquipment: data.planMatchEquipment || [],
+    };
+  });
+
+  return {users};
+});
+
+/**
+ * Suspends or reinstates a WiseWorkout account.
+ *
+ * Updates both Firebase Authentication and the Firestore user document.
+ */
+exports.adminSetUserSuspended = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+  const data = request.data || {};
+
+  const targetUid = data.uid;
+  const suspended = data.suspended;
+
+  if (typeof targetUid !== "string" || targetUid.trim() === "") {
+    throw new HttpsError(
+        "invalid-argument",
+        "A valid user UID is required.",
+    );
+  }
+
+  if (typeof suspended !== "boolean") {
+    throw new HttpsError(
+        "invalid-argument",
+        "suspended must be true or false.",
+    );
+  }
+
+  if (targetUid === adminUid) {
+    throw new HttpsError(
+        "failed-precondition",
+        "You cannot suspend your own admin account.",
+    );
+  }
+
+  try {
+    await adminAuth.updateUser(targetUid, {
+      disabled: suspended,
+    });
+
+    await db.collection("users").doc(targetUid).set(
+        {
+          accountStatus: suspended ? "suspended" : "active",
+          accountStatusUpdatedAt: FieldValue.serverTimestamp(),
+          accountStatusUpdatedBy: adminUid,
+        },
+        {merge: true},
+    );
+
+    return {
+      uid: targetUid,
+      accountStatus: suspended ? "suspended" : "active",
+    };
+  } catch (err) {
+    console.error(
+        `adminSetUserSuspended failed for ${targetUid}:`,
+        err,
+    );
+
+    if (err.code === "auth/user-not-found") {
+      throw new HttpsError(
+          "not-found",
+          "The Firebase Authentication account was not found.",
+      );
+    }
+
+    throw new HttpsError(
+        "internal",
+        "Failed to update the account status.",
+    );
+  }
+});
+
+/**
+ * Updates the safe profile fields managed by the React User Detail panel.
+ */
+exports.adminUpdateUser = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+  const data = request.data || {};
+
+  const targetUid = data.uid;
+  const requestedChanges = data.changes;
+
+  if (typeof targetUid !== "string" || targetUid.trim() === "") {
+    throw new HttpsError(
+        "invalid-argument",
+        "A valid user UID is required.",
+    );
+  }
+
+  if (
+    !requestedChanges ||
+    typeof requestedChanges !== "object" ||
+    Array.isArray(requestedChanges)
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "changes must be an object.",
+    );
+  }
+
+  const allowedFields = new Set([
+    "displayName",
+    "username",
+    "level",
+    "isPremium",
+    "planMatchGoal",
+    "hometown",
+    "bio",
+    "preferredUnits",
+    "notificationsEnabled",
+    "workoutReminders",
+    "streakAlerts",
+    "wiseCoachMessages",
+    "reminderHour",
+    "reminderMinute",
+  ]);
+
+  const changes = {};
+
+  for (const [field, value] of Object.entries(requestedChanges)) {
+    if (!allowedFields.has(field)) {
+      throw new HttpsError(
+          "invalid-argument",
+          `The field "${field}" cannot be edited from the admin dashboard.`,
+      );
+    }
+
+    changes[field] = value;
+  }
+
+  if (Object.keys(changes).length === 0) {
+    throw new HttpsError(
+        "invalid-argument",
+        "No profile changes were supplied.",
+    );
+  }
+
+  if (
+    "displayName" in changes &&
+    (
+      typeof changes.displayName !== "string" ||
+      changes.displayName.trim() === ""
+    )
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Display name cannot be empty.",
+    );
+  }
+
+  if (
+    "username" in changes &&
+    typeof changes.username !== "string"
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Username must be a string.",
+    );
+  }
+
+  if (
+    "level" in changes &&
+    (
+      typeof changes.level !== "number" ||
+      !Number.isInteger(changes.level) ||
+      changes.level < 1
+    )
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Level must be a positive whole number.",
+    );
+  }
+
+  if (
+    "isPremium" in changes &&
+    typeof changes.isPremium !== "boolean"
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "isPremium must be true or false.",
+    );
+  }
+
+  if (
+    "preferredUnits" in changes &&
+    !["", "metric", "imperial"].includes(changes.preferredUnits)
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Preferred units must be metric, imperial, or empty.",
+    );
+  }
+
+  if (
+    "planMatchGoal" in changes &&
+    ![
+      "",
+      "Build Muscle",
+      "Improve Endurance",
+      "Lose Weight",
+      "Build Strength",
+    ].includes(changes.planMatchGoal)
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Invalid plan-match goal.",
+    );
+  }
+
+  if (
+    "reminderHour" in changes &&
+    (
+      typeof changes.reminderHour !== "number" ||
+      !Number.isInteger(changes.reminderHour) ||
+      changes.reminderHour < 0 ||
+      changes.reminderHour > 23
+    )
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Reminder hour must be between 0 and 23.",
+    );
+  }
+
+  if (
+    "reminderMinute" in changes &&
+    (
+      typeof changes.reminderMinute !== "number" ||
+      !Number.isInteger(changes.reminderMinute) ||
+      changes.reminderMinute < 0 ||
+      changes.reminderMinute > 59
+    )
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Reminder minute must be between 0 and 59.",
+    );
+  }
+
+  const booleanFields = [
+    "notificationsEnabled",
+    "workoutReminders",
+    "streakAlerts",
+    "wiseCoachMessages",
+  ];
+
+  for (const field of booleanFields) {
+    if (field in changes && typeof changes[field] !== "boolean") {
+      throw new HttpsError(
+          "invalid-argument",
+          `${field} must be true or false.`,
+      );
+    }
+  }
+
+  changes.adminUpdatedAt = FieldValue.serverTimestamp();
+  changes.adminUpdatedBy = adminUid;
+
+  await db.collection("users").doc(targetUid).update(changes);
+
+  const responseChanges = {...changes};
+  delete responseChanges.adminUpdatedAt;
+
+  return {
+    uid: targetUid,
+    changes: responseChanges,
+  };
+});
+
+/**
+ * Returns the selected user's tracked-plan progress for the admin panel.
+ */
+exports.adminGetUserPlanProgress = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const data = request.data || {};
+  const targetUid = data.uid;
+  const planId = data.planId;
+
+  if (typeof targetUid !== "string" || targetUid.trim() === "") {
+    throw new HttpsError(
+        "invalid-argument",
+        "A valid user UID is required.",
+    );
+  }
+
+  if (typeof planId !== "string" || planId.trim() === "") {
+    throw new HttpsError(
+        "invalid-argument",
+        "A valid tracked plan ID is required.",
+    );
+  }
+
+  const progressDoc = await db
+      .collection("users")
+      .doc(targetUid)
+      .collection("planProgress")
+      .doc(planId)
+      .get();
+
+  if (!progressDoc.exists) {
+    return {
+      exists: false,
+      progress: null,
+    };
+  }
+
+  const progress = progressDoc.data();
+
+  return {
+    exists: true,
+    progress: {
+      currentDayIndex:
+        typeof progress.currentDayIndex === "number" ?
+          progress.currentDayIndex :
+          1,
+      breakModeActive: progress.breakModeActive === true,
+      breakStartDate: progress.breakStartDate || null,
+      breakEndDate: progress.breakEndDate || null,
+      breakDays:
+        typeof progress.breakDays === "number" ?
+          progress.breakDays :
+          null,
+      compressedDays: Array.isArray(progress.compressedDays) ?
+        progress.compressedDays :
+        [],
+    },
+  };
+});
+
+/**
+ * Starts or ends Break Mode for a user's tracked plan.
+ */
+exports.adminSetUserBreakMode = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const data = request.data || {};
+  const targetUid = data.uid;
+  const planId = data.planId;
+  const active = data.active;
+  const days = data.days;
+
+  if (typeof targetUid !== "string" || targetUid.trim() === "") {
+    throw new HttpsError(
+        "invalid-argument",
+        "A valid user UID is required.",
+    );
+  }
+
+  if (typeof planId !== "string" || planId.trim() === "") {
+    throw new HttpsError(
+        "invalid-argument",
+        "A valid tracked plan ID is required.",
+    );
+  }
+
+  if (typeof active !== "boolean") {
+    throw new HttpsError(
+        "invalid-argument",
+        "active must be true or false.",
+    );
+  }
+
+  const progressRef = db
+      .collection("users")
+      .doc(targetUid)
+      .collection("planProgress")
+      .doc(planId);
+
+  const progressDoc = await progressRef.get();
+
+  if (!progressDoc.exists) {
+    throw new HttpsError(
+        "not-found",
+        "The user's tracked-plan progress document was not found.",
+    );
+  }
+
+  if (active) {
+    if (
+      typeof days !== "number" ||
+      !Number.isInteger(days) ||
+      days < 1 ||
+      days > 14
+    ) {
+      throw new HttpsError(
+          "invalid-argument",
+          "Break duration must be between 1 and 14 days.",
+      );
+    }
+
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Singapore",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+
+    const startDate = new Date();
+    const endDate = new Date(startDate);
+    endDate.setUTCDate(endDate.getUTCDate() + days);
+
+    await progressRef.update({
+      breakModeActive: true,
+      breakStartDate: formatter.format(startDate),
+      breakEndDate: formatter.format(endDate),
+      breakDays: days,
+      adminUpdatedAt: FieldValue.serverTimestamp(),
+      adminUpdatedBy: adminUid,
+    });
+  } else {
+    await progressRef.update({
+      breakModeActive: false,
+      breakStartDate: null,
+      breakEndDate: null,
+      breakDays: null,
+      adminUpdatedAt: FieldValue.serverTimestamp(),
+      adminUpdatedBy: adminUid,
+    });
+  }
+
+  const updatedDoc = await progressRef.get();
+  const updated = updatedDoc.data();
+
+  return {
+    progress: {
+      currentDayIndex:
+        typeof updated.currentDayIndex === "number" ?
+          updated.currentDayIndex :
+          1,
+      breakModeActive: updated.breakModeActive === true,
+      breakStartDate: updated.breakStartDate || null,
+      breakEndDate: updated.breakEndDate || null,
+      breakDays:
+        typeof updated.breakDays === "number" ?
+          updated.breakDays :
+          null,
+      compressedDays: Array.isArray(updated.compressedDays) ?
+        updated.compressedDays :
+        [],
+    },
+  };
+});
+
+/**
+ * Compresses or restores the current tracked-plan day.
+ */
+exports.adminSetUserCompressedDay = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const data = request.data || {};
+  const targetUid = data.uid;
+  const planId = data.planId;
+  const compressed = data.compressed;
+
+  if (typeof targetUid !== "string" || targetUid.trim() === "") {
+    throw new HttpsError(
+        "invalid-argument",
+        "A valid user UID is required.",
+    );
+  }
+
+  if (typeof planId !== "string" || planId.trim() === "") {
+    throw new HttpsError(
+        "invalid-argument",
+        "A valid tracked plan ID is required.",
+    );
+  }
+
+  if (typeof compressed !== "boolean") {
+    throw new HttpsError(
+        "invalid-argument",
+        "compressed must be true or false.",
+    );
+  }
+
+  const progressRef = db
+      .collection("users")
+      .doc(targetUid)
+      .collection("planProgress")
+      .doc(planId);
+
+  const progressDoc = await progressRef.get();
+
+  if (!progressDoc.exists) {
+    throw new HttpsError(
+        "not-found",
+        "The user's tracked-plan progress document was not found.",
+    );
+  }
+
+  const progress = progressDoc.data();
+
+  const currentDayIndex =
+    typeof progress.currentDayIndex === "number" ?
+      progress.currentDayIndex :
+      1;
+
+  const existingDays = Array.isArray(progress.compressedDays) ?
+    progress.compressedDays :
+    [];
+
+  const compressedDays = compressed ?
+    Array.from(new Set([...existingDays, currentDayIndex])) :
+    existingDays.filter((day) => day !== currentDayIndex);
+
+  await progressRef.update({
+    compressedDays,
+    adminUpdatedAt: FieldValue.serverTimestamp(),
+    adminUpdatedBy: adminUid,
+  });
+
+  return {
+    currentDayIndex,
+    compressedDays,
+  };
+});
+
+/**
+ * Permanently deletes a WiseWorkout user and their related project data.
+ *
+ * Cleanup includes:
+ * - Firebase Authentication account
+ * - users/{uid} and every nested subcollection
+ * - publicProfiles/{uid}
+ * - posts created by the user, including comments/reactions
+ * - follow relationships involving the user
+ * - user-created challenges
+ * - memberships/invitations in other challenges
+ * - mirrored friend/request records under other users
+ *
+ * This operation is permanent.
+ */
+exports.adminDeleteUser = onCall(
+  {
+    timeoutSeconds: 540,
+    memory: "512MiB",
+  },
+  async (request) => {
+    const adminUid = await requireAdmin(request);
+    const data = request.data || {};
+
+    const targetUid = data.uid;
+    const confirmUid = data.confirmUid;
+
+    if (typeof targetUid !== "string" || targetUid.trim() === "") {
+      throw new HttpsError(
+          "invalid-argument",
+          "A valid user UID is required.",
+      );
+    }
+
+    // Extra protection against an accidental or altered request.
+    if (confirmUid !== targetUid) {
+      throw new HttpsError(
+          "failed-precondition",
+          "The deletion confirmation does not match the target UID.",
+      );
+    }
+
+    if (targetUid === adminUid) {
+      throw new HttpsError(
+          "failed-precondition",
+          "You cannot delete your own administrator account.",
+      );
+    }
+
+    // Do not permit deletion of another approved administrator.
+    const targetAdminDoc = await db
+        .collection("admins")
+        .doc(targetUid)
+        .get();
+
+    if (
+      targetAdminDoc.exists &&
+      targetAdminDoc.data().active === true
+    ) {
+      throw new HttpsError(
+          "failed-precondition",
+          "An active administrator account cannot be deleted.",
+      );
+    }
+
+    const userRef = db.collection("users").doc(targetUid);
+    const userDoc = await userRef.get();
+
+    let authUserExists = true;
+
+    try {
+      await adminAuth.getUser(targetUid);
+    } catch (err) {
+      if (err.code === "auth/user-not-found") {
+        authUserExists = false;
+      } else {
+        console.error(
+            `adminDeleteUser: Auth lookup failed for ${targetUid}:`,
+            err,
+        );
+
+        throw new HttpsError(
+            "internal",
+            "Unable to verify the Firebase Authentication account.",
+        );
+      }
+    }
+
+    if (!userDoc.exists && !authUserExists) {
+      throw new HttpsError(
+          "not-found",
+          "The selected user no longer exists.",
+      );
+    }
+
+    // Disable login before cleanup begins. If the operation is retried,
+    // the remaining deletions are designed to be safe to run again.
+    if (authUserExists) {
+      await adminAuth.updateUser(targetUid, {
+        disabled: true,
+      });
+    }
+
+    const deletedCounts = {
+      posts: 0,
+      follows: 0,
+      createdChallenges: 0,
+      updatedChallenges: 0,
+      mirroredRecords: 0,
+      notifications: 0,
+    };
+
+    try {
+      // ---------------------------------------------------------------
+      // 1. Delete posts authored by the user, including each post's
+      // reactions and comments subcollections.
+      // ---------------------------------------------------------------
+      const postsSnapshot = await db
+          .collection("posts")
+          .where("uid", "==", targetUid)
+          .get();
+
+      for (const postDoc of postsSnapshot.docs) {
+        await db.recursiveDelete(postDoc.ref);
+        deletedCounts.posts += 1;
+      }
+
+      // ---------------------------------------------------------------
+      // 2. Delete top-level follow relationships in both directions.
+      // ---------------------------------------------------------------
+      const [followingSnapshot, followerSnapshot] = await Promise.all([
+        db
+            .collection("follows")
+            .where("followerUid", "==", targetUid)
+            .get(),
+        db
+            .collection("follows")
+            .where("followingUid", "==", targetUid)
+            .get(),
+      ]);
+
+      const followRefs = new Map();
+
+      for (const followDoc of followingSnapshot.docs) {
+        followRefs.set(followDoc.ref.path, followDoc.ref);
+      }
+
+      for (const followDoc of followerSnapshot.docs) {
+        followRefs.set(followDoc.ref.path, followDoc.ref);
+      }
+
+      if (followRefs.size > 0) {
+        const writer = db.bulkWriter();
+
+        for (const followRef of followRefs.values()) {
+          writer.delete(followRef);
+        }
+
+        await writer.close();
+        deletedCounts.follows = followRefs.size;
+      }
+
+      // ---------------------------------------------------------------
+      // 3. Delete challenges created by the user, including progress
+      // caches and progress-notification subcollections.
+      // ---------------------------------------------------------------
+      const createdChallengesSnapshot = await db
+          .collection("challenges")
+          .where("createdBy", "==", targetUid)
+          .get();
+
+      const deletedChallengeIds = new Set();
+
+      for (const challengeDoc of createdChallengesSnapshot.docs) {
+        deletedChallengeIds.add(challengeDoc.id);
+        await db.recursiveDelete(challengeDoc.ref);
+        deletedCounts.createdChallenges += 1;
+      }
+
+      // ---------------------------------------------------------------
+      // 4. Remove the UID from other challenge memberships/invitations.
+      // ---------------------------------------------------------------
+      const [
+        participantChallengesSnapshot,
+        invitedChallengesSnapshot,
+      ] = await Promise.all([
+        db
+            .collection("challenges")
+            .where(
+                "participantUids",
+                "array-contains",
+                targetUid,
+            )
+            .get(),
+        db
+            .collection("challenges")
+            .where(
+                "invitedUids",
+                "array-contains",
+                targetUid,
+            )
+            .get(),
+      ]);
+
+      const challengeRefs = new Map();
+
+      for (const challengeDoc of participantChallengesSnapshot.docs) {
+        if (!deletedChallengeIds.has(challengeDoc.id)) {
+          challengeRefs.set(
+              challengeDoc.ref.path,
+              challengeDoc.ref,
+          );
+        }
+      }
+
+      for (const challengeDoc of invitedChallengesSnapshot.docs) {
+        if (!deletedChallengeIds.has(challengeDoc.id)) {
+          challengeRefs.set(
+              challengeDoc.ref.path,
+              challengeDoc.ref,
+          );
+        }
+      }
+
+      if (challengeRefs.size > 0) {
+        const writer = db.bulkWriter();
+
+        for (const challengeRef of challengeRefs.values()) {
+          writer.update(challengeRef, {
+            participantUids: FieldValue.arrayRemove(targetUid),
+            invitedUids: FieldValue.arrayRemove(targetUid),
+          });
+        }
+
+        await writer.close();
+        deletedCounts.updatedChallenges = challengeRefs.size;
+      }
+
+      // ---------------------------------------------------------------
+      // 5. Remove mirrored social records stored under other users.
+      //
+      // WiseWorkout stores friends and friend requests under each
+      // user's own users/{uid} document, so deleting only the target
+      // tree would leave references inside other users' trees.
+      // ---------------------------------------------------------------
+      const allUsersSnapshot = await db.collection("users").get();
+      const socialWriter = db.bulkWriter();
+
+      for (const otherUserDoc of allUsersSnapshot.docs) {
+        if (otherUserDoc.id === targetUid) continue;
+
+        const otherUserRef = otherUserDoc.ref;
+
+        socialWriter.delete(
+            otherUserRef
+                .collection("friends")
+                .doc(targetUid),
+        );
+
+        socialWriter.delete(
+            otherUserRef
+                .collection("friendRequests")
+                .doc(targetUid),
+        );
+
+        socialWriter.delete(
+            otherUserRef
+                .collection("sentFriendRequests")
+                .doc(targetUid),
+        );
+
+        deletedCounts.mirroredRecords += 3;
+
+        // Remove notifications whose sender was the deleted user.
+        const notificationSnapshot = await otherUserRef
+            .collection("notifications")
+            .where("fromUid", "==", targetUid)
+            .get();
+
+        for (const notificationDoc of notificationSnapshot.docs) {
+          socialWriter.delete(notificationDoc.ref);
+          deletedCounts.notifications += 1;
+        }
+      }
+
+      await socialWriter.close();
+
+      // ---------------------------------------------------------------
+      // 6. Remove the public profile.
+      // ---------------------------------------------------------------
+      await db
+          .collection("publicProfiles")
+          .doc(targetUid)
+          .delete();
+
+      // Remove an inactive admins record if one happens to exist.
+      await db
+          .collection("admins")
+          .doc(targetUid)
+          .delete();
+
+      // ---------------------------------------------------------------
+      // 7. Recursively remove the private user tree and every nested
+      // collection: sessions, notifications, friends, planProgress,
+      // nutrition logs, XP events and any future subcollections.
+      // ---------------------------------------------------------------
+      await db.recursiveDelete(userRef);
+
+      // ---------------------------------------------------------------
+      // 8. Delete Firebase Authentication last. The account remains
+      // disabled throughout cleanup and disappears once this succeeds.
+      // ---------------------------------------------------------------
+      if (authUserExists) {
+        try {
+          await adminAuth.deleteUser(targetUid);
+        } catch (err) {
+          if (err.code !== "auth/user-not-found") {
+            throw err;
+          }
+        }
+      }
+
+      console.log(
+          `adminDeleteUser: ${adminUid} permanently deleted ` +
+          `${targetUid}`,
+          deletedCounts,
+      );
+
+      return {
+        deleted: true,
+        uid: targetUid,
+        deletedCounts,
+      };
+    } catch (err) {
+      console.error(
+          `adminDeleteUser failed for ${targetUid}:`,
+          err,
+      );
+
+      // The account stays disabled if cleanup fails. This prevents a
+      // partially deleted account from signing back in. The admin can
+      // safely retry the same deletion operation.
+      throw new HttpsError(
+          "internal",
+          "User deletion was not completed. The account has been " +
+          "disabled and the deletion can be retried.",
+      );
+    }
+  },
+);
 
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
 // plaintext .env value — the previous approach in the Flutter app bundled

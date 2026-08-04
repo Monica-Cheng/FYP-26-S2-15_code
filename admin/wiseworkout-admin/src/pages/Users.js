@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { collection, getDocs, doc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
@@ -26,9 +26,9 @@ function Users() {
     const fetchUsers = async () => {
       setLoadError('');
       try {
-        const snap = await getDocs(collection(db, 'users'));
-        const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        setUsers(data);
+        const adminListUsers = httpsCallable(functions, "adminListUsers");
+        const result = await adminListUsers();
+        setUsers(result.data.users);
       } catch (err) {
         console.error(err);
         const detail = err && err.code ? ` (${err.code})` : '';
@@ -40,23 +40,129 @@ function Users() {
   }, []);
 
   const toggleSuspend = async (userId, currentStatus) => {
-    const newStatus = currentStatus === 'suspended' ? 'active' : 'suspended';
-    await updateDoc(doc(db, 'users', userId), { accountStatus: newStatus });
-    setUsers(prev => prev.map(u => u.id === userId ? { ...u, accountStatus: newStatus } : u));
+    const suspended = currentStatus !== 'suspended';
+    const action = suspended ? 'suspend' : 'reinstate';
+  
+    if (!window.confirm(`Are you sure you want to ${action} this user?`)) {
+      return;
+    }
+  
+    try {
+      const adminSetUserSuspended = httpsCallable(
+        functions,
+        'adminSetUserSuspended'
+      );
+  
+      const result = await adminSetUserSuspended({
+        uid: userId,
+        suspended,
+      });
+  
+      const newStatus = result.data.accountStatus;
+  
+      setUsers(prev =>
+        prev.map(user =>
+          user.id === userId
+            ? { ...user, accountStatus: newStatus }
+            : user
+        )
+      );
+    } catch (err) {
+      console.error(err);
+  
+      window.alert(
+        err.message || 'Failed to update the user account status.'
+      );
+    }
   };
-  const handleDelete = async (userId) => {
-    if (!window.confirm('Permanently delete this user? This cannot be undone.')) return;
-    await deleteDoc(doc(db, 'users', userId));
-    setUsers(prev => prev.filter(u => u.id !== userId));
-    setSelectedUserId(prev => (prev === userId ? null : prev));
+  const handleDelete = async (user) => {
+    const userLabel =
+      user.displayName ||
+      user.username ||
+      user.email ||
+      user.id;
+  
+    const confirmation = window.prompt(
+      `Permanently delete "${userLabel}"?\n\n` +
+      `This will remove the Firebase Authentication account and related ` +
+      `WiseWorkout data. This cannot be undone.\n\n` +
+      `Type DELETE to continue:`
+    );
+  
+    if (confirmation !== 'DELETE') {
+      return;
+    }
+  
+    const uidConfirmation = window.prompt(
+      `Final confirmation.\n\n` +
+      `Copy and paste this user UID exactly:\n${user.id}`
+    );
+  
+    if (uidConfirmation !== user.id) {
+      window.alert('The UID did not match. Deletion cancelled.');
+      return;
+    }
+  
+    try {
+      const adminDeleteUser = httpsCallable(
+        functions,
+        'adminDeleteUser'
+      );
+  
+      await adminDeleteUser({
+        uid: user.id,
+        confirmUid: uidConfirmation,
+      });
+  
+      setUsers(prev =>
+        prev.filter(existingUser => existingUser.id !== user.id)
+      );
+  
+      setSelectedUserId(prev =>
+        prev === user.id ? null : prev
+      );
+  
+      window.alert(
+        `"${userLabel}" was permanently deleted successfully.`
+      );
+    } catch (err) {
+      console.error(err);
+  
+      window.alert(
+        err.message ||
+        'The user could not be permanently deleted.'
+      );
+    }
   };
 
   // Writes only the changed fields (partial update — Firestore leaves every
   // other field on the document untouched) and mirrors the change into local
   // state so the table and detail panel reflect it immediately.
   const handleSaveUser = async (userId, changes) => {
-    await updateDoc(doc(db, 'users', userId), changes);
-    setUsers(prev => prev.map(u => u.id === userId ? { ...u, ...changes } : u));
+    try {
+      const adminUpdateUser = httpsCallable(
+        functions,
+        'adminUpdateUser'
+      );
+  
+      const result = await adminUpdateUser({
+        uid: userId,
+        changes,
+      });
+  
+      const savedChanges = result.data.changes || changes;
+  
+      setUsers(prev =>
+        prev.map(user =>
+          user.id === userId
+            ? { ...user, ...savedChanges }
+            : user
+        )
+      );
+    } catch (err) {
+      console.error(err);
+      throw err;
+    }
   };
 
   // Distinct levels actually present in the loaded data — no hardcoded list.
@@ -284,7 +390,7 @@ function Users() {
                           </button>
                           <button
                             className="wwa-btn wwa-btn-sm wwa-btn-danger"
-                            onClick={() => handleDelete(user.id)}
+                            onClick={() => handleDelete(user)}
                           >
                             Delete
                           </button>

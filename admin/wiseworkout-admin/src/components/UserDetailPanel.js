@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { doc, onSnapshot, updateDoc } from 'firebase/firestore';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import Badge from './ui/Badge';
 import ToggleSwitch from './ui/ToggleSwitch';
 import { formatEquipment } from '../utils/formatUtils';
@@ -109,22 +109,58 @@ function UserDetailPanel({ user, onClose, onSave }) {
   }, [userId]);
 
   useEffect(() => {
-    setPlanActionError('');
-    if (!userId || !trackedPlanId) {
-      setPlanProgress(null);
-      setPlanLoading(false);
-      return undefined;
-    }
-    setPlanLoading(true);
-    const ref = doc(db, 'users', userId, 'planProgress', trackedPlanId);
-    const unsubscribe = onSnapshot(ref, snap => {
-      setPlanProgress(snap.exists() ? snap.data() : null);
-      setPlanLoading(false);
-    }, err => {
-      console.error(err);
-      setPlanLoading(false);
-    });
-    return unsubscribe;
+    let cancelled = false;
+  
+    const loadPlanProgress = async () => {
+      setPlanActionError('');
+  
+      if (!userId || !trackedPlanId) {
+        setPlanProgress(null);
+        setPlanLoading(false);
+        return;
+      }
+  
+      setPlanLoading(true);
+  
+      try {
+        const adminGetUserPlanProgress = httpsCallable(
+          functions,
+          'adminGetUserPlanProgress'
+        );
+  
+        const result = await adminGetUserPlanProgress({
+          uid: userId,
+          planId: trackedPlanId,
+        });
+  
+        if (cancelled) return;
+  
+        setPlanProgress(
+          result.data.exists
+            ? result.data.progress
+            : null
+        );
+      } catch (err) {
+        console.error(err);
+  
+        if (!cancelled) {
+          setPlanProgress(null);
+          setPlanActionError(
+            err.message || 'Failed to load the user plan status.'
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setPlanLoading(false);
+        }
+      }
+    };
+  
+    loadPlanProgress();
+  
+    return () => {
+      cancelled = true;
+    };
   }, [userId, trackedPlanId]);
 
   if (!user) return null;
@@ -137,34 +173,51 @@ function UserDetailPanel({ user, onClose, onSave }) {
   // the app reads back a break state it already knows how to interpret.
   const handleToggleBreakMode = async () => {
     if (!userId || !trackedPlanId) return;
+  
+    const currentlyActive = planProgress?.breakModeActive === true;
+    const newActiveState = !currentlyActive;
+  
+    const action = newActiveState
+      ? 'start Break Mode'
+      : 'end Break Mode';
+  
+    if (!window.confirm(`Are you sure you want to ${action}?`)) {
+      return;
+    }
+  
     setSavingBreakMode(true);
     setPlanActionError('');
+  
     try {
-      const ref = doc(db, 'users', userId, 'planProgress', trackedPlanId);
-      if (planProgress?.breakModeActive) {
-        await updateDoc(ref, {
-          breakModeActive: false,
-          breakStartDate: null,
-          breakEndDate: null,
-          breakDays: null,
-        });
-      } else {
-        const days = Math.min(MAX_BREAK_DAYS, Math.max(MIN_BREAK_DAYS, Number(breakDaysInput) || DEFAULT_BREAK_DAYS));
-        const today = new Date();
-        const endDate = new Date(today);
-        endDate.setDate(endDate.getDate() + days);
-        await updateDoc(ref, {
-          breakModeActive: true,
-          breakStartDate: toDateStr(today),
-          breakEndDate: toDateStr(endDate),
-          breakDays: days,
-        });
-      }
+      const adminSetUserBreakMode = httpsCallable(
+        functions,
+        'adminSetUserBreakMode'
+      );
+  
+      const days = Math.min(
+        MAX_BREAK_DAYS,
+        Math.max(
+          MIN_BREAK_DAYS,
+          Number(breakDaysInput) || DEFAULT_BREAK_DAYS
+        )
+      );
+  
+      const result = await adminSetUserBreakMode({
+        uid: userId,
+        planId: trackedPlanId,
+        active: newActiveState,
+        days: newActiveState ? days : null,
+      });
+  
+      setPlanProgress(result.data.progress);
     } catch (err) {
       console.error(err);
-      setPlanActionError('Failed to update break mode. Please try again.');
+      setPlanActionError(
+        err.message || 'Failed to update break mode. Please try again.'
+      );
+    } finally {
+      setSavingBreakMode(false);
     }
-    setSavingBreakMode(false);
   };
 
   // Mirrors _showCompressSheet/_restoreDaySession in plan_schedule_screen.dart —
@@ -172,19 +225,44 @@ function UserDetailPanel({ user, onClose, onSave }) {
   // app reads to decide whether to show the compressed (primary-only) session.
   const handleToggleCompress = async () => {
     if (!userId || !trackedPlanId) return;
+  
+    const newCompressedState = !isCurrentDayCompressed;
+    const action = newCompressedState
+      ? `compress Day ${currentDayIndex}`
+      : `restore Day ${currentDayIndex} to the full session`;
+  
+    if (!window.confirm(`Are you sure you want to ${action}?`)) {
+      return;
+    }
+  
     setSavingCompress(true);
     setPlanActionError('');
+  
     try {
-      const ref = doc(db, 'users', userId, 'planProgress', trackedPlanId);
-      const updated = isCurrentDayCompressed
-        ? compressedDays.filter(d => d !== currentDayIndex)
-        : [...compressedDays, currentDayIndex];
-      await updateDoc(ref, { compressedDays: updated });
+      const adminSetUserCompressedDay = httpsCallable(
+        functions,
+        'adminSetUserCompressedDay'
+      );
+  
+      const result = await adminSetUserCompressedDay({
+        uid: userId,
+        planId: trackedPlanId,
+        compressed: newCompressedState,
+      });
+  
+      setPlanProgress(prev => ({
+        ...(prev || {}),
+        currentDayIndex: result.data.currentDayIndex,
+        compressedDays: result.data.compressedDays,
+      }));
     } catch (err) {
       console.error(err);
-      setPlanActionError('Failed to update compress control. Please try again.');
+      setPlanActionError(
+        err.message || 'Failed to update compress control. Please try again.'
+      );
+    } finally {
+      setSavingCompress(false);
     }
-    setSavingCompress(false);
   };
 
   const startEdit = () => {
