@@ -1724,6 +1724,516 @@ exports.adminDeleteChallenge = onCall(async (request) => {
   };
 });
 
+/**
+ * Returns everything required by the React Plans dashboard.
+ *
+ * Includes official and custom plans, limited user fields for creator
+ * labels, and the exercise catalog used by the plan session editor.
+ */
+exports.adminListPlansDashboard = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const [
+    plansSnapshot,
+    usersSnapshot,
+    exercisesSnapshot,
+  ] = await Promise.all([
+    db.collection("plans").get(),
+    db.collection("users").get(),
+    db.collection("exercises").get(),
+  ]);
+
+  const plans = plansSnapshot.docs.map((planDoc) => ({
+    id: planDoc.id,
+    ...serializeAdminFirestoreValue(planDoc.data()),
+  }));
+
+  const users = usersSnapshot.docs.map((userDoc) => {
+    const data = userDoc.data();
+
+    return {
+      id: userDoc.id,
+      displayName: data.displayName || "",
+      email: data.email || "",
+      username: data.username || "",
+    };
+  });
+
+  const exercises = exercisesSnapshot.docs.map((exerciseDoc) => {
+    const data = exerciseDoc.data();
+
+    return {
+      id: exerciseDoc.id,
+      name: data.name || "",
+      muscleGroup: data.muscleGroup || "",
+    };
+  });
+
+  return {
+    plans,
+    users,
+    exercises,
+  };
+});
+
+function requireNonEmptyAdminString(value, fieldName) {
+  const normalized =
+    typeof value === "string" ? value.trim() : "";
+
+  if (!normalized) {
+    throw new HttpsError(
+        "invalid-argument",
+        `${fieldName} is required.`,
+    );
+  }
+
+  return normalized;
+}
+
+function normalizeAdminStringArray(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+      .filter((item) => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean);
+}
+
+function normalizeAdminPlanSessions(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new HttpsError(
+        "invalid-argument",
+        "At least one plan session is required.",
+    );
+  }
+
+  return value.map((rawSession, sessionIndex) => {
+    const session =
+      rawSession && typeof rawSession === "object" ?
+        rawSession :
+        {};
+
+    const isRestDay = session.isRestDay === true;
+    const name =
+      typeof session.name === "string" ?
+        session.name.trim() :
+        "";
+
+    if (!isRestDay && !name) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Session ${sessionIndex + 1} requires a name.`,
+      );
+    }
+
+    const rawExercises = Array.isArray(session.exercises) ?
+      session.exercises :
+      [];
+
+    if (!isRestDay && rawExercises.length === 0) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Session ${sessionIndex + 1} requires an exercise.`,
+      );
+    }
+
+    const exercises = rawExercises.map((rawExercise, exerciseIndex) => {
+      const exercise =
+        rawExercise && typeof rawExercise === "object" ?
+          {...rawExercise} :
+          {};
+
+      if (exercise.isCardio === true) {
+        const cardioActivity = requireNonEmptyAdminString(
+            exercise.cardioActivity,
+            `Session ${sessionIndex + 1}, cardio activity`,
+        );
+
+        const cardioMinutes = Number(exercise.cardioMinutes);
+
+        if (!Number.isInteger(cardioMinutes) || cardioMinutes <= 0) {
+          throw new HttpsError(
+              "invalid-argument",
+              `Session ${sessionIndex + 1}, cardio block ` +
+              `${exerciseIndex + 1} requires valid minutes.`,
+          );
+        }
+
+        return {
+          ...exercise,
+          isCardio: true,
+          cardioActivity,
+          cardioMinutes,
+        };
+      }
+
+      const exerciseName = requireNonEmptyAdminString(
+          exercise.name,
+          `Session ${sessionIndex + 1}, exercise ${exerciseIndex + 1} name`,
+      );
+
+      const muscle = requireNonEmptyAdminString(
+          exercise.muscle,
+          `Session ${sessionIndex + 1}, exercise ${exerciseIndex + 1} muscle`,
+      );
+
+      return {
+        ...exercise,
+        name: exerciseName,
+        muscle,
+      };
+    });
+
+    return {
+      ...session,
+      name: name || "Rest",
+      isRestDay,
+      exercises: isRestDay ? [] : exercises,
+    };
+  });
+}
+
+function normalizeAdminDesignedBy(value) {
+  if (!value || typeof value !== "object") return null;
+
+  const normalized = {};
+
+  for (const field of ["name", "title", "credential", "quote"]) {
+    if (typeof value[field] === "string" && value[field].trim()) {
+      normalized[field] = value[field].trim();
+    }
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function normalizeOfficialPlanData(rawData) {
+  const data = rawData || {};
+
+  const name = requireNonEmptyAdminString(data.name, "Plan name");
+  const level = requireNonEmptyAdminString(data.level, "Level");
+  const type = requireNonEmptyAdminString(data.type, "Type");
+
+  const daysPerWeek = Number(data.daysPerWeek);
+  const durationWeeks = Number(data.durationWeeks);
+
+  if (!Number.isInteger(daysPerWeek) || daysPerWeek <= 0) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Days per week must be a positive integer.",
+    );
+  }
+
+  if (!Number.isInteger(durationWeeks) || durationWeeks <= 0) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Duration must be a positive number of weeks.",
+    );
+  }
+
+  const sessions = normalizeAdminPlanSessions(data.sessions);
+
+  const actualTrainingDays =
+    sessions.filter((session) => session.isRestDay !== true).length;
+
+  if (actualTrainingDays !== daysPerWeek) {
+    throw new HttpsError(
+        "invalid-argument",
+        `Days per week (${daysPerWeek}) must match the number of ` +
+        `training sessions (${actualTrainingDays}).`,
+    );
+  }
+
+  const normalized = {
+    name,
+    level,
+    type,
+    daysPerWeek,
+    durationWeeks,
+    description:
+      typeof data.description === "string" ?
+        data.description.trim() :
+        "",
+    equipment: normalizeAdminStringArray(data.equipment),
+    goals: normalizeAdminStringArray(data.goals),
+    sessions,
+    isActive: data.isActive !== false,
+    matchGoals: normalizeAdminStringArray(data.matchGoals),
+    matchLevel:
+      typeof data.matchLevel === "string" && data.matchLevel.trim() ?
+        data.matchLevel.trim() :
+        level,
+    matchSport:
+      typeof data.matchSport === "string" && data.matchSport.trim() ?
+        data.matchSport.trim() :
+        type,
+    imageUrl:
+      typeof data.imageUrl === "string" ?
+        data.imageUrl.trim() :
+        "",
+  };
+
+  const designedBy = normalizeAdminDesignedBy(data.designedBy);
+
+  if (designedBy) {
+    normalized.designedBy = designedBy;
+  }
+
+  return normalized;
+}
+
+/**
+ * Creates a new official WiseWorkout plan.
+ *
+ * Official plans deliberately omit isCustom and createdBy.
+ */
+exports.adminCreateOfficialPlan = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const planData = normalizeOfficialPlanData(
+      request.data?.plan,
+  );
+
+  const planRef = await db.collection("plans").add({
+    ...planData,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+    createdByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    planId: planRef.id,
+    plan: planData,
+  };
+});
+
+/**
+ * Updates either an official plan or a user-created custom plan.
+ *
+ * Custom-plan ownership and identity fields are never changed.
+ */
+exports.adminUpdatePlan = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+  const planId = request.data?.planId;
+  const requestedChanges = request.data?.changes;
+
+  if (typeof planId !== "string" || !planId.trim()) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Plan ID is required.",
+    );
+  }
+
+  if (
+    !requestedChanges ||
+    typeof requestedChanges !== "object" ||
+    Array.isArray(requestedChanges)
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Plan changes are required.",
+    );
+  }
+
+  const normalizedPlanId = planId.trim();
+  const planRef = db.collection("plans").doc(normalizedPlanId);
+  const planSnapshot = await planRef.get();
+
+  if (!planSnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Plan not found.",
+    );
+  }
+
+  const existing = planSnapshot.data() || {};
+  const isCustom = existing.isCustom === true;
+
+  let updateData;
+
+  if (isCustom) {
+    const allowedFields = new Set([
+      "name",
+      "description",
+      "daysPerWeek",
+      "sessions",
+    ]);
+
+    const unsafeField = Object.keys(requestedChanges)
+        .find((field) => !allowedFields.has(field));
+
+    if (unsafeField) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Custom-plan field "${unsafeField}" cannot be changed.`,
+      );
+    }
+
+    const mergedName =
+      requestedChanges.name !== undefined ?
+        requestedChanges.name :
+        existing.name;
+
+    const mergedDays =
+      requestedChanges.daysPerWeek !== undefined ?
+        Number(requestedChanges.daysPerWeek) :
+        Number(existing.daysPerWeek);
+
+    const mergedSessions =
+      requestedChanges.sessions !== undefined ?
+        requestedChanges.sessions :
+        existing.sessions;
+
+    const name = requireNonEmptyAdminString(
+        mergedName,
+        "Plan name",
+    );
+
+    if (!Number.isInteger(mergedDays) || mergedDays <= 0) {
+      throw new HttpsError(
+          "invalid-argument",
+          "Days per week must be a positive integer.",
+      );
+    }
+
+    const sessions = normalizeAdminPlanSessions(mergedSessions);
+
+    updateData = {
+      name,
+      description:
+        requestedChanges.description !== undefined ?
+          String(requestedChanges.description || "").trim() :
+          String(existing.description || "").trim(),
+      daysPerWeek: mergedDays,
+      sessions,
+    };
+  } else {
+    const allowedFields = new Set([
+      "name",
+      "description",
+      "level",
+      "type",
+      "daysPerWeek",
+      "durationWeeks",
+      "equipment",
+      "goals",
+      "sessions",
+      "isActive",
+      "matchGoals",
+      "matchLevel",
+      "matchSport",
+      "imageUrl",
+      "designedBy",
+    ]);
+
+    const unsafeField = Object.keys(requestedChanges)
+        .find((field) => !allowedFields.has(field));
+
+    if (unsafeField) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Official-plan field "${unsafeField}" cannot be changed.`,
+      );
+    }
+
+    const merged = {};
+
+    for (const field of allowedFields) {
+      merged[field] =
+        requestedChanges[field] !== undefined ?
+          requestedChanges[field] :
+          existing[field];
+    }
+
+    updateData = normalizeOfficialPlanData(merged);
+  }
+
+  await planRef.update({
+    ...updateData,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    planId: normalizedPlanId,
+    plan: updateData,
+  };
+});
+
+/**
+ * Permanently deletes a plan.
+ *
+ * Custom-plan cleanup mirrors FirestoreService.deleteCustomPlan():
+ * matching customRoutines documents and planProgress are also removed.
+ */
+exports.adminDeletePlan = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+  const planId = request.data?.planId;
+
+  if (typeof planId !== "string" || !planId.trim()) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Plan ID is required.",
+    );
+  }
+
+  const normalizedPlanId = planId.trim();
+  const planRef = db.collection("plans").doc(normalizedPlanId);
+  const planSnapshot = await planRef.get();
+
+  if (!planSnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Plan not found.",
+    );
+  }
+
+  const plan = planSnapshot.data() || {};
+  const isCustom = plan.isCustom === true;
+  const creatorUid =
+    typeof plan.createdBy === "string" ?
+      plan.createdBy.trim() :
+      "";
+
+  const batch = db.batch();
+  batch.delete(planRef);
+
+  if (isCustom && creatorUid) {
+    const routineSnapshot = await db
+        .collection("users")
+        .doc(creatorUid)
+        .collection("customRoutines")
+        .where("name", "==", plan.name || "")
+        .get();
+
+    for (const routineDoc of routineSnapshot.docs) {
+      batch.delete(routineDoc.ref);
+    }
+
+    const progressRef = db
+        .collection("users")
+        .doc(creatorUid)
+        .collection("planProgress")
+        .doc(normalizedPlanId);
+
+    batch.delete(progressRef);
+  }
+
+  await batch.commit();
+
+  console.log(
+      `adminDeletePlan: ${adminUid} deleted ${normalizedPlanId}`,
+  );
+
+  return {
+    success: true,
+    planId: normalizedPlanId,
+    planType: isCustom ? "custom" : "official",
+  };
+});
+
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
 // plaintext .env value — the previous approach in the Flutter app bundled
 // .env as a Flutter asset (pubspec.yaml's flutter:assets:), which ships it

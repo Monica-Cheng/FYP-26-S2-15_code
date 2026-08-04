@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import {
-  collection, getDocs, addDoc, updateDoc, deleteDoc, doc, query, where, serverTimestamp,
-} from 'firebase/firestore';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
@@ -53,32 +51,57 @@ function Plans() {
 
   useEffect(() => {
     const fetchData = async () => {
+      setLoading(true);
+  
       try {
-        const [plansSnap, usersSnap, exercisesSnap] = await Promise.all([
-          getDocs(collection(db, 'plans')),
-          getDocs(collection(db, 'users')),
-          getDocs(collection(db, 'exercises')),
-        ]);
-        const data = plansSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-        setPlans(data);
-
+        const adminListPlansDashboard = httpsCallable(
+          functions,
+          'adminListPlansDashboard'
+        );
+  
+        const result = await adminListPlansDashboard();
+        const data = result.data || {};
+  
+        const loadedPlans = Array.isArray(data.plans)
+          ? data.plans
+          : [];
+  
+        setPlans(loadedPlans);
+  
         const byId = {};
-        usersSnap.docs.forEach(d => { byId[d.id] = d.data(); });
+        const loadedUsers = Array.isArray(data.users)
+          ? data.users
+          : [];
+  
+        loadedUsers.forEach(user => {
+          byId[user.id] = user;
+        });
+  
         setUsersById(byId);
-
-        // Convenience name/muscle picker for the Add Plan session builder —
-        // the exercises collection uses `muscleGroup`, not `muscle`, and has
-        // no relation to plan-embedded exercises beyond suggesting a name.
-        const catalog = exercisesSnap.docs
-          .map(d => d.data())
-          .filter(e => e.name)
-          .map(e => ({ name: e.name, muscle: e.muscleGroup || '' }));
+  
+        const catalog = Array.isArray(data.exercises)
+          ? data.exercises
+              .filter(exercise => exercise.name)
+              .map(exercise => ({
+                name: exercise.name,
+                muscle: exercise.muscleGroup || '',
+              }))
+          : [];
+  
         setExerciseCatalog(catalog);
       } catch (err) {
-        console.error(err);
+        console.error('Failed to load plans dashboard:', err);
+  
+        window.alert(
+          `Failed to load plans dashboard.${
+            err?.code ? ` (${err.code})` : ''
+          }`
+        );
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
+  
     fetchData();
   }, []);
 
@@ -163,8 +186,22 @@ function Plans() {
       };
       if (designedBy) payload.designedBy = designedBy;
 
-      const docRef = await addDoc(collection(db, 'plans'), payload);
-      setPlans(prev => [...prev, { id: docRef.id, ...payload }]);
+      const adminCreateOfficialPlan = httpsCallable(
+        functions,
+        'adminCreateOfficialPlan'
+      );
+      
+      const result = await adminCreateOfficialPlan({
+        plan: payload,
+      });
+      
+      setPlans(prev => [
+        ...prev,
+        {
+          id: result.data.planId,
+          ...(result.data.plan || payload),
+        },
+      ]);
       setShowAddForm(false);
       setAddForm(emptyAddForm);
       setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek));
@@ -183,8 +220,29 @@ function Plans() {
   // (see handleAddPlan above), but stamping updatedAt on edit is harmless
   // additive bookkeeping nothing in the app depends on being absent.
   const handleSavePlan = async (planId, changes) => {
-    await updateDoc(doc(db, 'plans', planId), { ...changes, updatedAt: serverTimestamp() });
-    setPlans(prev => prev.map(p => p.id === planId ? { ...p, ...changes, updatedAt: new Date() } : p));
+    const adminUpdatePlan = httpsCallable(
+      functions,
+      'adminUpdatePlan'
+    );
+  
+    const result = await adminUpdatePlan({
+      planId,
+      changes,
+    });
+  
+    const savedPlan = result.data.plan || changes;
+  
+    setPlans(prev =>
+      prev.map(plan =>
+        plan.id === planId
+          ? {
+              ...plan,
+              ...savedPlan,
+              updatedAt: new Date().toISOString(),
+            }
+          : plan
+      )
+    );
   };
 
   // Mirrors FirestoreService.deleteCustomPlan exactly for custom plans:
@@ -199,27 +257,39 @@ function Plans() {
   // Doing a full users-collection scan/rewrite to purge those references would
   // be a much larger, riskier operation than this delete button implies.
   const handleDeletePlan = async (plan) => {
-    await deleteDoc(doc(db, 'plans', plan.id));
-    if (plan.createdBy) {
-      try {
-        const routinesQuery = query(
-          collection(db, 'users', plan.createdBy, 'customRoutines'),
-          where('name', '==', plan.name)
-        );
-        const routinesSnap = await getDocs(routinesQuery);
-        await Promise.all(routinesSnap.docs.map(d => deleteDoc(d.ref)));
-      } catch (err) {
-        console.error(err);
-      }
-      try {
-        await deleteDoc(doc(db, 'users', plan.createdBy, 'planProgress', plan.id));
-      } catch (err) {
-        console.error(err);
-      }
-    }
-    setPlans(prev => prev.filter(p => p.id !== plan.id));
+    const planName = plan.name || plan.title || plan.id;
+  
+    const confirmation = window.prompt(
+      `Permanently delete "${planName}"?\n\n` +
+      `${
+        plan.isCustom
+          ? 'This also removes the creator’s matching custom routine and plan progress.'
+          : 'This removes the official plan from the shared plan library.'
+      }\n\n` +
+      'Type DELETE to continue:'
+    );
+  
+    if (confirmation !== 'DELETE') return;
+  
+    const adminDeletePlan = httpsCallable(
+      functions,
+      'adminDeletePlan'
+    );
+  
+    await adminDeletePlan({
+      planId: plan.id,
+    });
+  
+    setPlans(prev =>
+      prev.filter(existing => existing.id !== plan.id)
+    );
+  
     setSelectedPlanId(null);
-    setSuccessMsg(`${plan.isCustom ? 'Custom' : 'Official'} plan deleted successfully`);
+  
+    setSuccessMsg(
+      `${plan.isCustom ? 'Custom' : 'Official'} plan deleted successfully`
+    );
+  
     setTimeout(() => setSuccessMsg(''), 3000);
   };
 
