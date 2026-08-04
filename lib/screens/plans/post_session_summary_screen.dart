@@ -358,32 +358,37 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     }
 
     if (!mounted) return;
-    await showQuickAddSheet(context, [
-      QuickAddOption(
-        icon: Icons.camera_alt_rounded,
-        iconColor: WW.primary,
-        iconBg: WW.chipBg,
-        title: 'Take Photo',
-        subtitle: 'Use a photo in the Photo card design',
-        onTap: () => _pickPhotoThenContinue(ImageSource.camera, forPost: forPost),
-      ),
-      QuickAddOption(
-        icon: Icons.photo_library_rounded,
-        iconColor: WW.teal,
-        iconBg: WW.tealBg,
-        title: 'Choose from Gallery',
-        subtitle: 'Pick an existing photo',
-        onTap: () => _pickPhotoThenContinue(ImageSource.gallery, forPost: forPost),
-      ),
-      QuickAddOption(
-        icon: Icons.arrow_forward_rounded,
-        iconColor: WW.textSec,
-        iconBg: WW.elevated,
-        title: 'Skip Photo',
-        subtitle: 'Only offer the Map/Color card designs',
-        onTap: () => _showCardPickerAndContinue(photoBase64: null, forPost: forPost),
-      ),
-    ]);
+    await showQuickAddSheet(
+      context,
+      [
+        QuickAddOption(
+          icon: Icons.camera_alt_rounded,
+          iconColor: WW.primary,
+          iconBg: WW.chipBg,
+          title: 'Take Photo',
+          subtitle: 'Use a photo in the Photo card design',
+          onTap: () => _pickPhotoThenContinue(ImageSource.camera, forPost: forPost),
+        ),
+        QuickAddOption(
+          icon: Icons.photo_library_rounded,
+          iconColor: WW.teal,
+          iconBg: WW.tealBg,
+          title: 'Choose from Gallery',
+          subtitle: 'Pick an existing photo',
+          onTap: () => _pickPhotoThenContinue(ImageSource.gallery, forPost: forPost),
+        ),
+        QuickAddOption(
+          icon: Icons.arrow_forward_rounded,
+          iconColor: WW.textSec,
+          iconBg: WW.elevated,
+          title: 'Skip Photo',
+          subtitle: 'Only offer the Map/Color card designs',
+          onTap: () => _showCardPickerAndContinue(photoBase64: null, forPost: forPost),
+        ),
+      ],
+      title: 'Add a Photo',
+      subtitle: 'Choose how to add your photo',
+    );
   }
 
   Future<void> _pickPhotoThenContinue(ImageSource source, {required bool forPost}) async {

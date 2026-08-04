@@ -4,6 +4,7 @@
 // FAB shown only on Home tab; tapping shows SnackBar.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -127,38 +128,43 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _onFabTap() {
-    showQuickAddSheet(context, [
-      QuickAddOption(
-        icon: Icons.camera_alt_rounded,
-        iconColor: WW.lavender,
-        iconBg: WW.lavenderBg,
-        title: 'Scan Food',
-        subtitle: 'Snap a photo for instant calories',
-        onTap: () => context
-            .push(Routes.nutritionScan)
-            .then((_) => _homeTabKey.currentState?._loadUserData()),
-      ),
-      QuickAddOption(
-        icon: Icons.edit_note_rounded,
-        iconColor: WW.teal,
-        iconBg: WW.tealBg,
-        title: 'Describe a Meal',
-        subtitle: 'Type what you ate instead',
-        onTap: () => context
-            .push(Routes.nutritionScan, extra: 'describe')
-            .then((_) => _homeTabKey.currentState?._loadUserData()),
-      ),
-      QuickAddOption(
-        icon: Icons.fitness_center_rounded,
-        iconColor: WW.gold,
-        iconBg: WW.gold.withValues(alpha: 0.14),
-        title: 'Log Activity',
-        subtitle: 'Manually add a workout or exercise',
-        onTap: () => context
-            .push(Routes.manualActivityLog)
-            .then((_) => _homeTabKey.currentState?._loadUserData()),
-      ),
-    ]);
+    showQuickAddSheet(
+      context,
+      [
+        QuickAddOption(
+          icon: Icons.camera_alt_rounded,
+          iconColor: WW.lavender,
+          iconBg: WW.lavenderBg,
+          title: 'Scan Food',
+          subtitle: 'Snap a photo for instant calories',
+          onTap: () => context
+              .push(Routes.nutritionScan)
+              .then((_) => _homeTabKey.currentState?._loadUserData()),
+        ),
+        QuickAddOption(
+          icon: Icons.edit_note_rounded,
+          iconColor: WW.teal,
+          iconBg: WW.tealBg,
+          title: 'Describe a Meal',
+          subtitle: 'Type what you ate instead',
+          onTap: () => context
+              .push(Routes.nutritionScan, extra: 'describe')
+              .then((_) => _homeTabKey.currentState?._loadUserData()),
+        ),
+        QuickAddOption(
+          icon: Icons.fitness_center_rounded,
+          iconColor: WW.gold,
+          iconBg: WW.gold.withValues(alpha: 0.14),
+          title: 'Log Activity',
+          subtitle: 'Manually add a workout or exercise',
+          onTap: () => context
+              .push(Routes.manualActivityLog)
+              .then((_) => _homeTabKey.currentState?._loadUserData()),
+        ),
+      ],
+      title: 'Quick Add',
+      subtitle: 'What would you like to log?',
+    );
   }
 
   @override
@@ -266,6 +272,7 @@ class _HomeTabState extends State<_HomeTab> {
   final _firestoreService = FirestoreService();
 
   String? _displayName;
+  String? _photoBase64;
   bool _isLoadingName = true;
   // Covers the whole "profile group" (display name, calorie goal settings,
   // tracked plan id/name) — see _loadProfileGroup(). One flag for the
@@ -340,6 +347,7 @@ class _HomeTabState extends State<_HomeTab> {
           _trackedPlanId = newPlanId;
           _displayName =
               doc.data()?['displayName'] as String? ?? _displayName;
+          _photoBase64 = doc.data()?['photoBase64'] as String?;
         });
         if (planChanged && newPlanId.isNotEmpty) {
           _startProgressStream(uid, newPlanId);
@@ -707,6 +715,7 @@ class _HomeTabState extends State<_HomeTab> {
 
       setState(() {
         _displayName = profile?['displayName'] as String?;
+        _photoBase64 = profile?['photoBase64'] as String?;
         _isLoadingName = false;
         _profileError = false;
         _calorieGoalActive = profile?['calorieGoalActive'] as bool? ?? false;
@@ -1422,19 +1431,44 @@ class _HomeTabState extends State<_HomeTab> {
                 shape: BoxShape.circle,
                 border: Border.all(color: WW.primary, width: 1.5),
               ),
-              child: Center(
-                child: Text(
-                  initials,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w800,
-                    color: WW.primary,
-                  ),
-                ),
-              ),
+              child: ClipOval(child: _buildTopBarAvatarContent(initials)),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  // Shows the real uploaded photo when present (same field/decode pattern
+  // as profile_screen.dart's _buildAvatarContent()), falling back to the
+  // initials circle otherwise.
+  Widget _buildTopBarAvatarContent(String initials) {
+    final photo = _photoBase64;
+    if (photo != null && photo.isNotEmpty) {
+      try {
+        return Image.memory(
+          base64Decode(photo),
+          width: 38,
+          height: 38,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _buildTopBarInitialAvatar(initials),
+        );
+      } catch (_) {
+        return _buildTopBarInitialAvatar(initials);
+      }
+    }
+    return _buildTopBarInitialAvatar(initials);
+  }
+
+  Widget _buildTopBarInitialAvatar(String initials) {
+    return Center(
+      child: Text(
+        initials,
+        style: const TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w800,
+          color: WW.primary,
+        ),
       ),
     );
   }
