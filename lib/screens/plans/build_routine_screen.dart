@@ -137,6 +137,15 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
   bool _isLoading = false;
   String? _existingPlanId;
 
+  // Set from extra['isCoachPlan'] (see _initFromExtra) — true only when
+  // this screen was opened from coach_dashboard_screen.dart's "Create a
+  // Plan" entry point, never for a normal personal-plan save (including
+  // a coach account's OWN personal plans via the ordinary flow everyone
+  // else uses). Read via the same GoRouterState.of(context).extra map
+  // this screen already uses for planId/isCustom, rather than a new
+  // constructor param — matching this screen's existing pattern.
+  bool _isCoachPlan = false;
+
   // Unique id counter (string keys for controllers etc.)
   int _idCounter = 0;
   String _nextId() => '${_idCounter++}';
@@ -158,6 +167,13 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
   Future<void> _initFromExtra() async {
     final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
     if (extra == null) return;
+
+    if (extra['isCoachPlan'] == true) {
+      setState(() {
+        _isCoachPlan = true;
+        _routineName = 'New Coach Plan';
+      });
+    }
 
     final planId = extra['id'] as String?;
 
@@ -896,6 +912,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           routineName: _routineName.trim(),
           sessions: sessions,
           daysPerWeek: activeDays,
+          isCoachPlan: _isCoachPlan,
         );
       }
 

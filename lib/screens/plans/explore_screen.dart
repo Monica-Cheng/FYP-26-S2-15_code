@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/router.dart';
+import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
@@ -18,6 +19,7 @@ class ExploreScreen extends StatefulWidget {
 
 class _ExploreScreenState extends State<ExploreScreen> {
   List<Map<String, dynamic>> _firestorePlans = [];
+  List<Map<String, dynamic>> _coachPlans = [];
   bool _isLoading = true;
 
   final _searchController = TextEditingController();
@@ -55,6 +57,34 @@ class _ExploreScreenState extends State<ExploreScreen> {
     } catch (_) {
       if (mounted) setState(() => _isLoading = false);
     }
+    _loadCoachPlans();
+  }
+
+  // Separate from _loadPlans()'s own try/catch — a failure here (or an
+  // account with no accepted coach at all, the common case) shouldn't
+  // block or delay the main Explore list from showing. Fails soft to an
+  // empty list either way, which _buildBrowseMode() already treats as
+  // "don't show this section" further down.
+  Future<void> _loadCoachPlans() async {
+    final uid = AuthService().getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final plans = await _fs.getCoachPlansForClient(uid);
+      if (mounted) setState(() => _coachPlans = plans);
+    } catch (_) {}
+  }
+
+  // "Coach [Name]'s Plans" when every plan came from the same coach (the
+  // common case — one client, one coach); falls back to a generic title
+  // if this client happens to have plans from more than one coach,
+  // rather than guessing which name to feature.
+  String get _coachPlansSectionTitle {
+    final names = _coachPlans
+        .map((p) => p['coachDisplayName'] as String?)
+        .whereType<String>()
+        .toSet();
+    if (names.length == 1) return "Coach ${names.first}'s Plans";
+    return "Your Coaches' Plans";
   }
 
   // All plans: real non-custom Firestore plans only — the "coming soon"
@@ -471,6 +501,40 @@ class _ExploreScreenState extends State<ExploreScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // ── Coach's Plans (only if this client has an accepted coach
+          // relationship with at least one coach who's created plans) —
+          // same card style as Featured Plans below, positioned above it.
+          if (_coachPlans.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+              child: Text(
+                _coachPlansSectionTitle,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                  color: WW.primaryDark,
+                  letterSpacing: -0.2,
+                ),
+              ),
+            ),
+            SizedBox(
+              height: 186,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                itemCount: _coachPlans.length,
+                separatorBuilder: (ctx, idx) => const SizedBox(width: 12),
+                itemBuilder: (ctx, i) => _FeaturedCard(
+                  plan: _coachPlans[i],
+                  accentColor: _accentColor(_coachPlans[i]),
+                  onTap: () => _onPlanTap(_coachPlans[i]),
+                  badgeLabel: 'COACH',
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+          ],
+
           // ── Featured ──────────────────────────────────────────────────────
           if (featured.isNotEmpty) ...[
             const Padding(
@@ -602,11 +666,16 @@ class _FeaturedCard extends StatelessWidget {
   final Map<String, dynamic> plan;
   final Color accentColor;
   final VoidCallback onTap;
+  // Defaults to 'FEATURED' so the existing Featured Plans section is
+  // completely unchanged — the Coach's Plans section above passes
+  // 'COACH' instead so the two don't read as the same category of card.
+  final String badgeLabel;
 
   const _FeaturedCard({
     required this.plan,
     required this.accentColor,
     required this.onTap,
+    this.badgeLabel = 'FEATURED',
   });
 
   @override
@@ -651,9 +720,9 @@ class _FeaturedCard extends StatelessWidget {
                     color: Colors.white.withValues(alpha: 0.25),
                     borderRadius: BorderRadius.circular(6),
                   ),
-                  child: const Text(
-                    'FEATURED',
-                    style: TextStyle(
+                  child: Text(
+                    badgeLabel,
+                    style: const TextStyle(
                       fontSize: 9,
                       fontWeight: FontWeight.w800,
                       color: Colors.white,

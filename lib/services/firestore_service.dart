@@ -2252,11 +2252,22 @@ class FirestoreService {
   //   1. users/{uid}/customRoutines/{auto-id}  — private copy
   //   2. plans/{auto-id}                       — discoverable plan entry
   // ---------------------------------------------------------------------------
+  // isCoachPlan defaults to false so every existing call site (a normal
+  // user, or a coach saving an ordinary PERSONAL plan for themselves via
+  // the same screen everyone uses) is completely unaffected — it's only
+  // ever true when build_routine_screen.dart was opened from
+  // coach_dashboard_screen.dart's "Create a Plan" entry point (see that
+  // screen's own extra: {'isCoachPlan': true}). Doesn't change the
+  // existing plans-collection create rule at all (isCustom==true &&
+  // createdBy==caller already covers this write; isCoachPlan is just an
+  // extra field the rule never inspects), so no rules deploy needed for
+  // this.
   Future<void> saveCustomRoutine({
     required String uid,
     required String routineName,
     required List<Map<String, dynamic>> sessions,
     required int daysPerWeek,
+    bool isCoachPlan = false,
   }) async {
     await _db
         .collection(Collections.users)
@@ -2267,6 +2278,7 @@ class FirestoreService {
       'createdAt': FieldValue.serverTimestamp(),
       'sessions': sessions,
       'isCustom': true,
+      if (isCoachPlan) 'isCoachPlan': true,
     });
 
     await _db.collection(Collections.plans).add({
@@ -2279,6 +2291,7 @@ class FirestoreService {
       'createdBy': uid,
       'sessions': sessions,
       'createdAt': FieldValue.serverTimestamp(),
+      if (isCoachPlan) 'isCoachPlan': true,
     });
   }
 
@@ -3393,6 +3406,11 @@ class FirestoreService {
       'clientUid': clientUid,
       if (clientDisplayName != null && clientDisplayName.isNotEmpty)
         'clientDisplayName': clientDisplayName,
+      // Denormalized here (not just clientDisplayName) so
+      // getCoachPlansForClient() can label a coach's plans with their
+      // name from this one doc, without a separate per-coach profile
+      // read from the client's session.
+      'coachDisplayName': coachDisplayName,
       'addedAt': FieldValue.serverTimestamp(),
     });
 
@@ -3432,6 +3450,57 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
   Future<void> declineCoachRequest(String requestId) async {
     await _db.collection(Collections.coachRequests).doc(requestId).delete();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Plans created by any coach this client has an ACCEPTED relationship
+  // with (a coachClients doc exists for them), for explore_screen.dart's
+  // "Coach [Name]'s Plans" section — separate from a coach's own
+  // ordinary personal plans, which never carry isCoachPlan at all.
+  //
+  // Filters isCoachPlan==true plans down to this client's own coach(es)
+  // CLIENT-SIDE rather than adding a second `where('createdBy', whereIn:
+  // ...)` clause — combining whereIn with another equality filter would
+  // need a composite index deployed alongside this change; the coach-
+  // plan corpus is small enough (this is a small in-app coaching
+  // feature, not a public marketplace) that fetching all of them and
+  // filtering in Dart is simpler and avoids that extra deploy step.
+  //
+  // Each returned plan is denormalized with 'coachDisplayName' (sourced
+  // from the matching coachClients doc, not a second profile read) so
+  // the UI can group/label by coach without an extra round-trip.
+  // ---------------------------------------------------------------------------
+  Future<List<Map<String, dynamic>>> getCoachPlansForClient(
+      String clientUid) async {
+    final relationSnap = await _db
+        .collection(Collections.coachClients)
+        .where('clientUid', isEqualTo: clientUid)
+        .get();
+    if (relationSnap.docs.isEmpty) return [];
+
+    final coachNamesByUid = <String, String>{};
+    for (final doc in relationSnap.docs) {
+      final data = doc.data();
+      final coachUid = data['coachUid'] as String?;
+      if (coachUid == null) continue;
+      coachNamesByUid[coachUid] =
+          (data['coachDisplayName'] as String?) ?? 'Your Coach';
+    }
+    if (coachNamesByUid.isEmpty) return [];
+
+    final plansSnap = await _db
+        .collection(Collections.plans)
+        .where('isCoachPlan', isEqualTo: true)
+        .get();
+
+    return plansSnap.docs
+        .map((d) => {'id': d.id, ...d.data()})
+        .where((p) => coachNamesByUid.containsKey(p['createdBy']))
+        .map((p) => {
+              ...p,
+              'coachDisplayName': coachNamesByUid[p['createdBy']],
+            })
+        .toList();
   }
 
   // ---------------------------------------------------------------------------
