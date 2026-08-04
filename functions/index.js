@@ -2234,6 +2234,95 @@ exports.adminDeletePlan = onCall(async (request) => {
   };
 });
 
+/**
+ * Returns broadcast history and the current number of possible recipients.
+ */
+exports.adminListBroadcastDashboard = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const [broadcastsSnapshot, usersSnapshot] = await Promise.all([
+    db.collection("adminBroadcasts").get(),
+    db.collection("users").get(),
+  ]);
+
+  const broadcasts = broadcastsSnapshot.docs.map((broadcastDoc) => ({
+    id: broadcastDoc.id,
+    ...serializeAdminFirestoreValue(broadcastDoc.data()),
+  }));
+
+  broadcasts.sort((a, b) => {
+    const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return dateB - dateA;
+  });
+
+  return {
+    broadcasts,
+    recipientCount: usersSnapshot.size,
+  };
+});
+
+/**
+ * Queues one broadcast for the existing sendAdminBroadcast Firestore trigger.
+ *
+ * The callable performs the privileged Admin SDK document creation. The
+ * existing onDocumentCreated trigger performs the notification fan-out.
+ */
+exports.adminCreateBroadcast = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const rawMessage = request.data?.message;
+  const confirmation = request.data?.confirmation;
+
+  const message =
+    typeof rawMessage === "string" ? rawMessage.trim() : "";
+
+  if (!message) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Broadcast message is required.",
+    );
+  }
+
+  if (message.length > 500) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Broadcast message cannot exceed 500 characters.",
+    );
+  }
+
+  if (confirmation !== "SEND TO ALL USERS") {
+    throw new HttpsError(
+        "failed-precondition",
+        "Broadcast confirmation text is incorrect.",
+    );
+  }
+
+  const usersSnapshot = await db.collection("users").get();
+
+  if (usersSnapshot.empty) {
+    throw new HttpsError(
+        "failed-precondition",
+        "There are no users available to receive this broadcast.",
+    );
+  }
+
+  const broadcastRef = await db.collection("adminBroadcasts").add({
+    message,
+    audience: "all",
+    createdAt: FieldValue.serverTimestamp(),
+    processed: false,
+    createdByAdminUid: adminUid,
+    recipientCount: usersSnapshot.size,
+  });
+
+  return {
+    success: true,
+    broadcastId: broadcastRef.id,
+    recipientCount: usersSnapshot.size,
+  };
+});
+
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
 // plaintext .env value — the previous approach in the Flutter app bundled
 // .env as a Flutter asset (pubspec.yaml's flutter:assets:), which ships it

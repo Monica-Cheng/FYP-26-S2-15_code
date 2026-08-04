@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { db } from '../firebase';
-import { collection, getDocs, addDoc, serverTimestamp } from 'firebase/firestore';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import Badge from '../components/ui/Badge';
 import EmptyState from '../components/ui/EmptyState';
 import SkeletonBlock from '../components/ui/SkeletonBlock';
-import { formatDate, toDate } from '../utils/dateUtils';
+import { formatDate } from '../utils/dateUtils';
 import { broadcastAudienceLabel, broadcastStatusLabel } from '../utils/broadcastUtils';
 
 const MAX_MESSAGE_LENGTH = 500;
@@ -20,27 +20,40 @@ function Broadcasts() {
 
   const [broadcasts, setBroadcasts] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
+  const [recipientCount, setRecipientCount] = useState(0);
 
   const fetchHistory = useCallback(async () => {
+    setLoadingHistory(true);
+  
     try {
-      const snap = await getDocs(collection(db, 'adminBroadcasts'));
-      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      // createdAt is a serverTimestamp that may still be unresolved (null) right
-      // after a write, so docs without a resolvable date are treated as the
-      // newest rather than dropped from the sort.
-      data.sort((a, b) => {
-        const dateA = toDate(a.createdAt);
-        const dateB = toDate(b.createdAt);
-        if (!dateA && !dateB) return 0;
-        if (!dateA) return -1;
-        if (!dateB) return 1;
-        return dateB.getTime() - dateA.getTime();
-      });
-      setBroadcasts(data);
+      const adminListBroadcastDashboard = httpsCallable(
+        functions,
+        'adminListBroadcastDashboard'
+      );
+  
+      const result = await adminListBroadcastDashboard();
+      const data = result.data || {};
+  
+      setBroadcasts(
+        Array.isArray(data.broadcasts) ? data.broadcasts : []
+      );
+  
+      setRecipientCount(
+        Number.isInteger(data.recipientCount)
+          ? data.recipientCount
+          : 0
+      );
     } catch (err) {
-      console.error(err);
+      console.error('Failed to load broadcast dashboard:', err);
+  
+      const detail = err?.code ? ` (${err.code})` : '';
+  
+      setError(
+        `Failed to load broadcast history.${detail}`
+      );
+    } finally {
+      setLoadingHistory(false);
     }
-    setLoadingHistory(false);
   }, []);
 
   useEffect(() => {
@@ -55,26 +68,52 @@ function Broadcasts() {
   };
 
   const handleConfirmSend = async () => {
+    const confirmation = window.prompt(
+      `This will send the notification to ${recipientCount} users.\n\n` +
+      'Type SEND TO ALL USERS exactly to continue:'
+    );
+  
+    if (confirmation !== 'SEND TO ALL USERS') {
+      setConfirming(false);
+      return;
+    }
+  
     setSending(true);
     setError('');
+  
     try {
-      await addDoc(collection(db, 'adminBroadcasts'), {
+      const adminCreateBroadcast = httpsCallable(
+        functions,
+        'adminCreateBroadcast'
+      );
+  
+      const result = await adminCreateBroadcast({
         message: message.trim(),
-        audience: 'all',
-        createdAt: serverTimestamp(),
-        processed: false,
+        confirmation,
       });
+  
+      const sentCount = result.data?.recipientCount ?? recipientCount;
+  
       setMessage('');
       setConfirming(false);
-      setSuccessMsg('Broadcast queued successfully.');
-      fetchHistory();
+      setSuccessMsg(
+        `Broadcast queued successfully for ${sentCount} users.`
+      );
+  
+      await fetchHistory();
     } catch (err) {
-      console.error(err);
+      console.error('Failed to send broadcast:', err);
+  
       setConfirming(false);
-      const detail = err && err.code ? ` (${err.code})` : '';
-      setError(`Failed to send broadcast. Please try again.${detail}`);
+  
+      const detail = err?.code ? ` (${err.code})` : '';
+  
+      setError(
+        `Failed to send broadcast. Please try again.${detail}`
+      );
+    } finally {
+      setSending(false);
     }
-    setSending(false);
   };
 
   return (
@@ -122,10 +161,12 @@ function Broadcasts() {
         <div style={{ marginBottom: 20 }}>
           <label className="wwa-field-label">Audience</label>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Badge tone="brand">All Users</Badge>
-            <span style={{ fontSize: 12.5, color: '#9ca3af' }}>
-              The only supported audience for broadcasts.
-            </span>
+          <Badge tone="brand">
+            All Users ({recipientCount})
+          </Badge>
+          <span style={{ fontSize: 12.5, color: '#9ca3af' }}>
+            This broadcast will be delivered to every current WiseWorkout account.
+          </span>
           </div>
         </div>
 
@@ -134,7 +175,12 @@ function Broadcasts() {
             <button
               className="wwa-btn wwa-btn-primary"
               onClick={handleSendClick}
-              disabled={sending || !message.trim()}
+              disabled={
+                sending ||
+                loadingHistory ||
+                recipientCount <= 0 ||
+                !message.trim()
+              }
             >
               Send Broadcast
             </button>
