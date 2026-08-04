@@ -77,21 +77,21 @@ service cloud.firestore {
       // 6. Notifications. Written cross-uid by the SENDER's client into
       // the RECIPIENT's subcollection (sendFriendRequest/
       // acceptFriendRequest/createChallenge/the client-side challenge-
-      // progress fallback) — unlike friends/friendRequests, notification
-      // doc ids are auto-generated, not derivable from the writer's uid,
-      // so a doc-id-matching trick isn't available here. Best achievable
-      // rule: the notification's own fromUid field must equal the writer
-      // (stops sender impersonation) and its type must be one of the
-      // known values this app actually sends — this can't fully prevent
-      // a malicious signed-in user from spamming notifications into
-      // someone else's inbox, but it closes impersonation and arbitrary
-      // payload shapes.
+      // progress fallback/acceptCoachRequest) — unlike friends/
+      // friendRequests, notification doc ids are auto-generated, not
+      // derivable from the writer's uid, so a doc-id-matching trick
+      // isn't available here. Best achievable rule: the notification's
+      // own fromUid field must equal the writer (stops sender
+      // impersonation) and its type must be one of the known values this
+      // app actually sends — this can't fully prevent a malicious
+      // signed-in user from spamming notifications into someone else's
+      // inbox, but it closes impersonation and arbitrary payload shapes.
       match /notifications/{notificationId} {
         allow read: if request.auth != null && request.auth.uid == uid;
         allow create: if request.auth != null &&
           request.resource.data.fromUid == request.auth.uid &&
           request.resource.data.type in
-            ['friend_request', 'friend_accepted', 'challenge_invite', 'challenge_friend_progress', 'admin_broadcast'];
+            ['friend_request', 'friend_accepted', 'challenge_invite', 'challenge_friend_progress', 'admin_broadcast', 'coach_request_accepted'];
         // Owner-only, and restricted to the read/status toggle fields
         // markNotificationRead()/respondToChallengeInvite() actually
         // write — not a general-purpose rewrite of someone's own
@@ -293,15 +293,77 @@ service cloud.firestore {
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // 14. businessPartners/{uid} — read-only from the app today; no
-    // registration/write flow is wired up anywhere yet, so there is
-    // nothing to allow. Revisit when that flow is built (creator should
-    // be able to create their own doc with isApproved forced to false;
-    // isApproved/isVisible must stay admin-only fields even then).
+    // 14. businessPartners/{uid} — coach registration (Part 1) writes
+    // this doc directly as the applicant, via registerAsCoach() in
+    // firestore_service.dart. A user may create ONLY their own
+    // application (doc id == caller's uid), and only if submitted as
+    // unapproved/invisible — isApproved/isVisible must stay admin-only
+    // fields, so create is rejected outright if either is anything but
+    // false, closing off self-approval/self-publishing at write time
+    // rather than relying on the client to behave. Update/delete stay
+    // fully blocked for every client — no admin-bypass rule exists in
+    // this file yet (that's the separate admin-approval work); once it
+    // lands, its rules should be additive here, not a replacement of
+    // this block.
     // ─────────────────────────────────────────────────────────────────
     match /businessPartners/{uid} {
       allow read: if request.auth != null;
-      allow write: if false;
+      allow create: if request.auth != null &&
+        request.auth.uid == uid &&
+        request.resource.data.isApproved == false &&
+        request.resource.data.isVisible == false;
+      allow update, delete: if false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // coachRequests/{autoId} — "Request as my coach" from
+    // find_professional_screen.dart, written via sendCoachRequest() in
+    // firestore_service.dart. Top-level with an auto-generated doc id
+    // (not a users/{uid} subcollection like friendRequests), so unlike
+    // that collection's doc-id-matching trick, this checks the clientUid
+    // field itself: a user may only create a request where they are the
+    // requesting client, never fabricate one on someone else's behalf or
+    // impersonate the coach side. Read is open to either party named on
+    // the doc (the client who sent it, or the coach it's addressed to).
+    // Update/delete are now allowed for the COACH side only (matching
+    // coachUid) — acceptCoachRequest()/declineCoachRequest() in
+    // firestore_service.dart both run on the coach's own device/session,
+    // deleting the resolved request; the client never needs to
+    // update/delete a request they sent (there's no "cancel my request"
+    // feature), so this is intentionally coach-only, not both parties.
+    // ─────────────────────────────────────────────────────────────────
+    match /coachRequests/{requestId} {
+      allow read: if request.auth != null &&
+        (resource.data.clientUid == request.auth.uid ||
+         resource.data.coachUid == request.auth.uid);
+      allow create: if request.auth != null &&
+        request.resource.data.clientUid == request.auth.uid;
+      allow update, delete: if request.auth != null &&
+        resource.data.coachUid == request.auth.uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // coachClients/{coachUid_clientUid} — written by
+    // acceptCoachRequest() in firestore_service.dart when a coach
+    // accepts a pending request. Top-level with a composite doc id
+    // (coachUid_clientUid), not a users/{uid} subcollection like
+    // friends/, so — same reasoning as coachRequests above — this
+    // checks the coachUid/clientUid FIELDS on the doc rather than
+    // matching a path segment. Read is open to either party (coach
+    // viewing their client list; client, in future, viewing who their
+    // coach is). Write (create/update/delete) is coach-only — this
+    // relationship is asymmetric, only the coach side ever manages it
+    // (accepting, and in future possibly removing a client); the client
+    // has no corresponding action that needs write access here.
+    // ─────────────────────────────────────────────────────────────────
+    match /coachClients/{clientRelationId} {
+      allow read: if request.auth != null &&
+        (resource.data.coachUid == request.auth.uid ||
+         resource.data.clientUid == request.auth.uid);
+      allow create: if request.auth != null &&
+        request.resource.data.coachUid == request.auth.uid;
+      allow update, delete: if request.auth != null &&
+        resource.data.coachUid == request.auth.uid;
     }
 
     // ─────────────────────────────────────────────────────────────────

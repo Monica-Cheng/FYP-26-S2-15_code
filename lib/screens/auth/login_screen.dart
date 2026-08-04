@@ -355,13 +355,16 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     ),
                   ),
-                  const Text(
-                    'Register as Professional',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: WW.textSec,
-                      decoration: TextDecoration.underline,
-                      decorationColor: WW.border,
+                  GestureDetector(
+                    onTap: () => context.push(Routes.coachRegister),
+                    child: const Text(
+                      'Register as Professional',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: WW.textSec,
+                        decoration: TextDecoration.underline,
+                        decorationColor: WW.border,
+                      ),
                     ),
                   ),
                 ],

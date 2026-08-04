@@ -291,6 +291,24 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Reads publicProfiles/{uid} — the cross-user-readable mirror of
+  // _publicProfileFields (displayName/username/weeklyXp/level/
+  // leaderboardVisible/lastWeeklyXpUpdate). Use this instead of
+  // getUserProfile() whenever the caller needs to read a DIFFERENT
+  // user's data — users/{uid} is locked to owner-only reads, so
+  // getUserProfile(otherUid) permission-denies for anyone but that user
+  // themselves (see acceptCoachRequest()'s own history: it originally
+  // called getUserProfile(clientUid) from the coach's session to look up
+  // the client's display name, which silently failed every accept with
+  // PERMISSION_DENIED since a coach is never that client).
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>?> getPublicProfile(String uid) async {
+    final doc = await _db.collection(_publicProfiles).doc(uid).get();
+    if (!doc.exists) return null;
+    return doc.data();
+  }
+
+  // ---------------------------------------------------------------------------
   // Checks whether a username is already taken by another user document.
   // ---------------------------------------------------------------------------
   // Queries publicProfiles rather than users/{uid} — this is a cross-user
@@ -331,7 +349,14 @@ class FirestoreService {
     final batch = _db.batch();
     batch.set(
       _db.collection(Collections.users).doc(uid),
-      bodyProfile,
+      // 'role' defaults to 'user' here since this is the very first write
+      // for a brand-new account (see this method's own doc comment above)
+      // — every other read of this field elsewhere falls back to 'user'
+      // too (accounts created before this field existed have no role at
+      // all), this just makes it explicit going forward. bodyProfile is
+      // spread after so it could still override this if a caller ever
+      // needed to (none do today).
+      {'role': 'user', ...bodyProfile},
       SetOptions(merge: true),
     );
     if (publicUpdates.isNotEmpty) {
@@ -3204,13 +3229,209 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
   Future<List<Map<String, dynamic>>> getBusinessPartners() async {
     final snap = await _db
-        .collection('businessPartners')
+        .collection(Collections.businessPartners)
         .where('isApproved', isEqualTo: true)
         .where('isVisible', isEqualTo: true)
         .get();
     return snap.docs
         .map((doc) => {'id': doc.id, ...doc.data()})
         .toList();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Fetches a single businessPartners/{uid} doc regardless of isApproved/
+  // isVisible — unlike getBusinessPartners() (which only returns
+  // already-approved, publicly-visible profiles), this is used by the
+  // coach-facing side to check the CALLER's own application status
+  // (pending vs approved), so it must be able to read a not-yet-approved
+  // doc. Returns null if no application exists for this uid.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>?> getBusinessPartnerProfile(String uid) async {
+    final doc =
+        await _db.collection(Collections.businessPartners).doc(uid).get();
+    return doc.exists ? doc.data() : null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Registers the current user as a coach applicant — writes
+  // businessPartners/{uid} with isApproved/isVisible both false (matching
+  // getBusinessPartners()'s existing read filter exactly, so a separate
+  // admin-approval dashboard built against this same collection can flip
+  // both to true later without this needing to change) and sets
+  // role: 'coach' on the user's own doc. Batched so both writes succeed
+  // or fail together — a coach doc with no matching role, or vice versa,
+  // would leave the app unable to consistently decide which UI to show.
+  // ---------------------------------------------------------------------------
+  Future<void> registerAsCoach({
+    required String uid,
+    required String name,
+    required String type,
+    required String bio,
+    required String experience,
+    String? email,
+  }) async {
+    final batch = _db.batch();
+
+    final partnerRef = _db.collection(Collections.businessPartners).doc(uid);
+    batch.set(partnerRef, {
+      'name': name,
+      'type': type,
+      'bio': bio,
+      'experience': experience,
+      if (email != null && email.isNotEmpty) 'email': email,
+      'isApproved': false,
+      'isVisible': false,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+
+    final userRef = _db.collection(Collections.users).doc(uid);
+    batch.set(userRef, {'role': 'coach'}, SetOptions(merge: true));
+
+    await batch.commit();
+  }
+
+  // ---------------------------------------------------------------------------
+  // "Request as my coach" from find_professional_screen.dart — writes
+  // coachRequests/{autoId}, top-level (not a users/{uid} subcollection
+  // like friendRequests/sentFriendRequests, per this collection's own
+  // scoped shape). clientDisplayName is denormalized onto the request the
+  // same way sendFriendRequest() denormalizes the sender's own name —
+  // lets the coach dashboard's request list show who's asking without an
+  // extra per-request profile read.
+  // ---------------------------------------------------------------------------
+  Future<void> sendCoachRequest({
+    required String clientUid,
+    required String clientDisplayName,
+    required String coachUid,
+  }) async {
+    await _db.collection(Collections.coachRequests).add({
+      'clientUid': clientUid,
+      'clientDisplayName': clientDisplayName,
+      'coachUid': coachUid,
+      'status': 'pending',
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live stream of a coach's own PENDING incoming requests, for
+  // coach_dashboard_screen.dart's request list. Sorted client-side
+  // (newest first) rather than via an orderBy clause, so this stays a
+  // plain two-equality-filter query — Firestore auto-indexes that
+  // without needing a composite index, unlike adding orderBy on a third
+  // field would.
+  // ---------------------------------------------------------------------------
+  Stream<List<Map<String, dynamic>>> getCoachRequestsStream(String coachUid) {
+    return _db
+        .collection(Collections.coachRequests)
+        .where('coachUid', isEqualTo: coachUid)
+        .where('status', isEqualTo: 'pending')
+        .snapshots()
+        .map((snap) {
+      final requests =
+          snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
+      requests.sort((a, b) {
+        final aTs = a['createdAt'] as Timestamp?;
+        final bTs = b['createdAt'] as Timestamp?;
+        if (aTs == null || bTs == null) return 0;
+        return bTs.compareTo(aTs);
+      });
+      return requests;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // A coach's current client list, for coach_dashboard_screen.dart.
+  // coachClients/{coachUid}_{clientUid} is top-level with a composite doc
+  // id (not a users/{uid} subcollection like friends/), so listing a
+  // coach's clients queries the coachUid field rather than a
+  // subcollection read.
+  // ---------------------------------------------------------------------------
+  Future<List<Map<String, dynamic>>> getCoachClients(String coachUid) async {
+    final snap = await _db
+        .collection(Collections.coachClients)
+        .where('coachUid', isEqualTo: coachUid)
+        .get();
+    return snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Accepts a pending coach request — mirrors acceptFriendRequest()'s
+  // shape: creates the mirrored relationship doc (coachClients here,
+  // instead of a two-sided friends/ write, since this relationship is
+  // asymmetric — only the coach side ever queries "my clients"), deletes
+  // the resolved request, and notifies the client. clientDisplayName is
+  // fetched fresh here (rather than trusting the possibly-stale one
+  // already denormalized on the request doc) since this is the
+  // authoritative write moment for the new coachClients doc — reads
+  // publicProfiles/{clientUid}, NOT getUserProfile()/users/{clientUid}:
+  // this runs on the COACH's session, and users/{uid} is locked to
+  // owner-only reads, so a getUserProfile(clientUid) call here silently
+  // PERMISSION_DENIED the whole batch every time (confirmed via
+  // "Listen for Query(target=Query(users/{clientUid}...)) failed:
+  // PERMISSION_DENIED" in the Firestore debug log) — the client's own
+  // devices could accept fine in theory, but a coach accepting someone
+  // else's request never could, which is exactly the "works for one
+  // request, fails for another" symptom this traced back to.
+  // ---------------------------------------------------------------------------
+  Future<void> acceptCoachRequest({
+    required String coachUid,
+    required String coachDisplayName,
+    required String clientUid,
+    required String requestId,
+  }) async {
+    final clientProfile = await getPublicProfile(clientUid);
+    final clientDisplayName =
+        (clientProfile?['displayName'] as String?)?.trim();
+
+    final batch = _db.batch();
+
+    final clientRef =
+        _db.collection(Collections.coachClients).doc('${coachUid}_$clientUid');
+    batch.set(clientRef, {
+      'coachUid': coachUid,
+      'clientUid': clientUid,
+      if (clientDisplayName != null && clientDisplayName.isNotEmpty)
+        'clientDisplayName': clientDisplayName,
+      'addedAt': FieldValue.serverTimestamp(),
+    });
+
+    final requestRef = _db.collection(Collections.coachRequests).doc(requestId);
+    batch.delete(requestRef);
+
+    final notificationRef = _db
+        .collection(Collections.users)
+        .doc(clientUid)
+        .collection(Collections.notifications)
+        .doc();
+    batch.set(notificationRef, {
+      'type': 'coach_request_accepted',
+      'fromUid': coachUid,
+      'fromDisplayName': coachDisplayName,
+      'read': false,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+
+    try {
+      await batch.commit();
+    } catch (e) {
+      // Kept deliberately (not just for this investigation) — a
+      // permission-denied here is otherwise easy to misdiagnose as a
+      // coachRequests/coachClients rules bug rather than the actual
+      // cross-user users/{uid} read it almost always turns out to be.
+      print('[acceptCoachRequest] batch commit FAILED: coachUid=$coachUid '
+          'clientUid=$clientUid requestId=$requestId error=$e');
+      rethrow;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Declines a pending coach request — deletes it silently, matching
+  // declineFriendRequest()'s own precedent (no notification, no other
+  // side effect).
+  // ---------------------------------------------------------------------------
+  Future<void> declineCoachRequest(String requestId) async {
+    await _db.collection(Collections.coachRequests).doc(requestId).delete();
   }
 
   // ---------------------------------------------------------------------------
@@ -3432,7 +3653,7 @@ class FirestoreService {
     final initial =
         authorName.trim().isNotEmpty ? authorName.trim()[0].toUpperCase() : '?';
 
-    await _db.collection(Collections.posts).add({
+    final postData = {
       'uid': uid,
       'authorName': authorName,
       'authorInitial': initial,
@@ -3455,7 +3676,26 @@ class FirestoreService {
       'reactionCount': 0,
       'commentCount': 0,
       'createdAt': FieldValue.serverTimestamp(),
-    });
+    };
+    // TEMPORARY DEBUG — remove once the invalid-argument regression is
+    // confirmed fixed. Logs every field's runtimeType + value (imageBase64
+    // truncated — it can be huge) plus its approximate serialized size, so
+    // NaN/Infinity, an unexpected List-of-List, a bad key, or a
+    // too-large document can all be told apart from the actual data.
+    for (final entry in postData.entries) {
+      final v = entry.value;
+      final display = (v is String && v.length > 80)
+          ? '${v.substring(0, 80)}...<${v.length} chars total>'
+          : v;
+      print('[createFeedPost] ${entry.key} '
+          '(${v.runtimeType}) = $display');
+    }
+    if (imageBase64 != null) {
+      print('[createFeedPost] imageBase64 length=${imageBase64.length} '
+          'chars (~${(imageBase64.length / 1024).toStringAsFixed(1)} KB)');
+    }
+
+    await _db.collection(Collections.posts).add(postData);
   }
 
   // ---------------------------------------------------------------------------

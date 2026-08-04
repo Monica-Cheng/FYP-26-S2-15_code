@@ -7,6 +7,7 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../business/coach_dashboard_screen.dart';
 
 const List<String> _kQuickReplies = [
   'My progress this week',
@@ -32,6 +33,13 @@ class _CoachScreenState extends State<CoachScreen> {
   final _auth = AuthService();
   final _firestore = FirestoreService();
 
+  // Only ever true for an approved coach account — gates the
+  // WiseCoach/My Clients toggle below entirely. A normal user (or a
+  // pending, not-yet-approved coach) sees zero visual change to this
+  // screen: no toggle, plain WiseCoach exactly as before.
+  bool _isApprovedCoach = false;
+  bool _showingMyClients = false;
+
   @override
   void initState() {
     super.initState();
@@ -39,6 +47,30 @@ class _CoachScreenState extends State<CoachScreen> {
       'Hi! I am WiseCoach. I can help you with workout advice, exercise tips, and fitness questions. What would you like to know?',
     );
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowConsentPrompt());
+    _checkCoachStatus();
+  }
+
+  // Approved-coach accounts default to the "My Clients" side of the
+  // toggle on first load (that's their primary reason for being on this
+  // tab), but can still switch to WiseCoach — coaches still need their
+  // own personal AI assistant same as any user.
+  Future<void> _checkCoachStatus() async {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final profile = await _firestore.getUserProfile(uid);
+      final role = (profile?['role'] as String?) ?? 'user';
+      if (role != 'coach') return;
+      final partnerProfile = await _firestore.getBusinessPartnerProfile(uid);
+      if (!mounted || partnerProfile?['isApproved'] != true) return;
+      setState(() {
+        _isApprovedCoach = true;
+        _showingMyClients = true;
+      });
+    } catch (_) {
+      // Fails soft — worst case an approved coach just sees plain
+      // WiseCoach with no toggle, same as before this feature existed.
+    }
   }
 
   // One-time personalization consent prompt — shown the first time the
@@ -197,6 +229,7 @@ class _CoachScreenState extends State<CoachScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final showingClients = _isApprovedCoach && _showingMyClients;
     return GestureDetector(
       onTap: () => FocusScope.of(context).unfocus(),
       child: ColoredBox(
@@ -206,8 +239,17 @@ class _CoachScreenState extends State<CoachScreen> {
           child: Column(
             children: [
               _buildTopBar(),
-              Expanded(child: _buildMessageList()),
-              _buildInputArea(),
+              if (_isApprovedCoach) _buildModeToggle(),
+              Expanded(
+                child: showingClients
+                    ? const CoachManagementBody()
+                    : Column(
+                        children: [
+                          Expanded(child: _buildMessageList()),
+                          _buildInputArea(),
+                        ],
+                      ),
+              ),
             ],
           ),
         ),
@@ -294,6 +336,61 @@ class _CoachScreenState extends State<CoachScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  // ── WiseCoach / My Clients toggle (approved coaches only) ─────────────────
+
+  Widget _buildModeToggle() {
+    return Container(
+      color: WW.card,
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: _modeToggleButton(
+              label: 'WiseCoach',
+              active: !_showingMyClients,
+              onTap: () => setState(() => _showingMyClients = false),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _modeToggleButton(
+              label: 'My Clients',
+              active: _showingMyClients,
+              onTap: () => setState(() => _showingMyClients = true),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _modeToggleButton({
+    required String label,
+    required bool active,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 36,
+        decoration: BoxDecoration(
+          color: active ? WW.primary : WW.elevated,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Center(
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: active ? Colors.white : WW.textSec,
+            ),
+          ),
+        ),
       ),
     );
   }

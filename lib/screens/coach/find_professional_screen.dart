@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/app_theme.dart';
+import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
 const List<String> _kFilters = [
@@ -26,6 +27,16 @@ class _FindProfessionalScreenState extends State<FindProfessionalScreen> {
   List<Map<String, dynamic>> _professionals = [];
   bool _isLoading = true;
   int _filterIndex = 0;
+
+  // Tracks which coach uids a request has been sent to THIS screen visit
+  // — purely local/client-side, so the button flips to "Requested" and
+  // disables right away without an extra Firestore round-trip to check
+  // for an existing pending request. Doesn't persist across screen
+  // re-visits (a fresh coachRequests doc could be created if they leave
+  // and come back and tap again) — acceptable for now, matching the
+  // scope of just "add the button," not full request deduplication.
+  final Set<String> _requestedUids = {};
+  bool _isRequesting = false;
 
   @override
   void initState() {
@@ -82,6 +93,50 @@ class _FindProfessionalScreenState extends State<FindProfessionalScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+    }
+  }
+
+  Future<void> _requestAsCoach(String coachUid, String coachName) async {
+    if (_isRequesting || _requestedUids.contains(coachUid)) return;
+    final clientUid = AuthService().getCurrentUser()?.uid;
+    if (clientUid == null) return;
+
+    setState(() => _isRequesting = true);
+    try {
+      final profile = await FirestoreService().getUserProfile(clientUid);
+      final clientDisplayName = (profile?['displayName'] as String?)?.trim();
+      final hasRealName = clientDisplayName != null && clientDisplayName.isNotEmpty;
+      if (!hasRealName) {
+        // Kept — only fires on the fallback path, so it's a cheap way
+        // to spot an account with no displayName set (e.g. onboarding
+        // never completed) rather than assuming a code bug next time
+        // "Someone" shows up somewhere it's sent from.
+        debugPrint('[CoachRequest] clientUid=$clientUid has no displayName set '
+            '(users/{uid} keys=${profile?.keys.toList()}) — request will show as "Someone"');
+      }
+      await FirestoreService().sendCoachRequest(
+        clientUid: clientUid,
+        clientDisplayName: hasRealName ? clientDisplayName : 'Someone',
+        coachUid: coachUid,
+      );
+      if (!mounted) return;
+      setState(() => _requestedUids.add(coachUid));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Request sent to $coachName'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not send request: $e'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isRequesting = false);
     }
   }
 
@@ -230,6 +285,7 @@ class _FindProfessionalScreenState extends State<FindProfessionalScreen> {
   // ── Professional card ──────────────────────────────────────────────────────
 
   Widget _buildCard(Map<String, dynamic> p) {
+    final coachUid = p['id'] as String? ?? '';
     final name = p['name'] as String? ??
         p['displayName'] as String? ??
         'Professional';
@@ -240,6 +296,7 @@ class _FindProfessionalScreenState extends State<FindProfessionalScreen> {
         (p['certifications'] as List<dynamic>?)?.cast<String>() ?? [];
     final color = _colorForType(type);
     final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
+    final alreadyRequested = _requestedUids.contains(coachUid);
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 0),
@@ -376,27 +433,58 @@ class _FindProfessionalScreenState extends State<FindProfessionalScreen> {
 
           const SizedBox(height: 14),
 
-          // ── Contact button ─────────────────────────────────────────────────
-          GestureDetector(
-            onTap: () => _contact(name, email),
-            child: Container(
-              width: double.infinity,
-              height: 44,
-              decoration: BoxDecoration(
-                color: WW.primary,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Center(
-                child: Text(
-                  'Contact $name',
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
+          // ── Request / Contact buttons ─────────────────────────────────────
+          Row(
+            children: [
+              if (coachUid.isNotEmpty) ...[
+                Expanded(
+                  child: GestureDetector(
+                    onTap: alreadyRequested ? null : () => _requestAsCoach(coachUid, name),
+                    child: Container(
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: alreadyRequested ? WW.elevated : WW.primary,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Center(
+                        child: Text(
+                          alreadyRequested ? 'Requested' : 'Request as my coach',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: alreadyRequested ? WW.textSec : Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => _contact(name, email),
+                  child: Container(
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: WW.card,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: WW.border),
+                    ),
+                    child: Center(
+                      child: Text(
+                        'Contact',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: WW.primary,
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
+            ],
           ),
         ],
       ),
