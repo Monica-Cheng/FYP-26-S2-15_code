@@ -1,13 +1,23 @@
 // lib/screens/progress/activity_detail_screen.dart
 
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/share_card_gradients.dart';
+import '../../utils/image_encode.dart';
+import '../../utils/widget_capture.dart';
+import '../../widgets/photo_background_share_card.dart';
+import '../../widgets/quick_add_sheet.dart';
+import '../../widgets/session_share_cards.dart';
+import '../../widgets/share_card_picker.dart';
 
 // Same OpenFreeMap style URL used in outdoor_cardio_screen.dart — duplicated
 // here (not imported) since that file's own constant is library-private and
@@ -25,6 +35,15 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
   bool _exercisesExpanded = true;
   bool _wiseCoachExpanded = false;
   bool _deleteDialogOpen = false;
+  // Share flow state — same shape as post_session_summary_screen.dart's
+  // own _isSharing/_selectedGradientColors, reused via
+  // buildSessionShareCardOptions() (lib/widgets/session_share_cards.dart)
+  // rather than duplicating the card-building logic here. This screen
+  // only wires up Share (native OS share) — no Post to Feed button,
+  // that's still post_session_summary_screen.dart-only, right after a
+  // session finishes.
+  bool _isSharing = false;
+  List<Color> _selectedGradientColors = ShareCardGradients.presets.first.colors;
   // Captured in _onCardioMapCreated, acted on in _onCardioStyleLoaded —
   // onStyleLoadedCallback's signature takes no controller argument (see
   // maplibre_gl's own typedef OnStyleLoadedCallback = void Function()),
@@ -216,6 +235,132 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
     return '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')} /km';
   }
 
+  // ── Share flow ─────────────────────────────────────────────────────────
+  // Same shape as post_session_summary_screen.dart's own
+  // _startCardFlow/_pickPhotoThenContinue/_showCardPickerAndContinue/
+  // _shareCard (share-only — this screen has no Post to Feed button, so
+  // the forPost branching from that screen's version isn't needed here),
+  // pointed at this screen's own _session/_routePoints/_isCardio instead
+  // of duplicating the card-building logic itself, which now lives in
+  // buildSessionShareCardOptions() (lib/widgets/session_share_cards.dart).
+
+  String? get _reusablePhotoBase64 =>
+      PhotoBackgroundShareCard.reusablePhotoBase64(_session);
+
+  Future<void> _startShareFlow() async {
+    if (_isSharing) return;
+
+    final existingPhoto = _reusablePhotoBase64;
+    if (existingPhoto != null) {
+      await _showCardPickerAndShare(photoBase64: existingPhoto);
+      return;
+    }
+
+    if (!mounted) return;
+    await showQuickAddSheet(context, [
+      QuickAddOption(
+        icon: Icons.camera_alt_rounded,
+        iconColor: WW.primary,
+        iconBg: WW.chipBg,
+        title: 'Take Photo',
+        subtitle: 'Use a photo in the Photo card design',
+        onTap: () => _pickPhotoThenContinue(ImageSource.camera),
+      ),
+      QuickAddOption(
+        icon: Icons.photo_library_rounded,
+        iconColor: WW.teal,
+        iconBg: WW.tealBg,
+        title: 'Choose from Gallery',
+        subtitle: 'Pick an existing photo',
+        onTap: () => _pickPhotoThenContinue(ImageSource.gallery),
+      ),
+      QuickAddOption(
+        icon: Icons.arrow_forward_rounded,
+        iconColor: WW.textSec,
+        iconBg: WW.elevated,
+        title: 'Skip Photo',
+        subtitle: 'Only offer the Map/Color card designs',
+        onTap: () => _showCardPickerAndShare(photoBase64: null),
+      ),
+    ]);
+  }
+
+  Future<void> _pickPhotoThenContinue(ImageSource source) async {
+    final picked = await ImagePicker().pickImage(
+      source: source,
+      maxWidth: 1024,
+      imageQuality: 80,
+    );
+    String? encoded;
+    if (picked != null) {
+      encoded = await encodeImageBase64(File(picked.path));
+    }
+    await _showCardPickerAndShare(photoBase64: encoded);
+  }
+
+  Future<void> _showCardPickerAndShare({required String? photoBase64}) async {
+    if (!mounted) return;
+    _selectedGradientColors = ShareCardGradients.presets.first.colors;
+    final cards = buildSessionShareCardOptions(
+      session: _session,
+      isCardio: _isCardio,
+      routePoints: _routePoints,
+      selectedGradientColors: _selectedGradientColors,
+      photoBase64: photoBase64,
+    );
+    final chosenIndex = await showShareCardPicker(
+      context,
+      cards: cards,
+      confirmLabel: 'Share This Design',
+      onGradientChanged: (colors) => _selectedGradientColors = colors,
+    );
+    if (chosenIndex == null || !mounted) return;
+    await _shareCard(cards[chosenIndex]);
+  }
+
+  Future<void> _shareCard(ShareCardOption card) async {
+    if (_isSharing) return;
+    setState(() => _isSharing = true);
+    try {
+      if (!mounted) return;
+      final bytes = await captureWidgetAsPngBytes(
+        context,
+        card.builder(context),
+        size: const Size(360, 640),
+      );
+      if (bytes == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not generate share card.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
+      final tempDir = Directory.systemTemp;
+      final file = File(
+          '${tempDir.path}/wiseworkout_session_'
+          '${DateTime.now().millisecondsSinceEpoch}.png');
+      await file.writeAsBytes(bytes);
+
+      await Share.shareXFiles(
+        [XFile(file.path)],
+        text: 'Just crushed a session on WiseWorkout! 💪',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not share: $e'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSharing = false);
+    }
+  }
+
   // Zero-new-dependency substitute for a VisibilityDetector package (not
   // already a pubspec.yaml dependency — confirmed in an earlier phase) —
   // combined with the NotificationListener<ScrollNotification> below and an
@@ -405,12 +550,7 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
               ),
             ),
             GestureDetector(
-              onTap: () => ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Share coming soon'),
-                  behavior: SnackBarBehavior.floating,
-                ),
-              ),
+              onTap: _startShareFlow,
               child: Container(
                 width: 34,
                 height: 34,
