@@ -14,11 +14,9 @@ function DetailRow({ label, value }) {
   );
 }
 
-// View + Delete only — Edit Challenge hasn't been built yet (not requested
-// so far). The Invite All send action stays disabled: not a permissions
-// issue (the admin UID override covers this write), but because no
-// challenge-invite notification shape exists anywhere in the Flutter app to
-// copy — see chat. The eligibility preview below only ever reads data.
+// View + Delete for global challenges. Private challenges are user-owned.
+// Invite All remains preview-only until its bulk notification workflow is
+// implemented and tested securely.
 function ChallengeDetailPanel({ challenge, categories, users, onClose, onDelete }) {
   const [showInvitePreview, setShowInvitePreview] = useState(false);
 
@@ -104,9 +102,18 @@ function ChallengeDetailPanel({ challenge, categories, users, onClose, onDelete 
       )}
 
       <div className="wwa-cell-actions" style={{ marginTop: 8 }}>
-        <button className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => onDelete(challenge)}>
-          Delete
-        </button>
+        {challenge.isGlobal === true ? (
+          <button
+            className="wwa-btn wwa-btn-sm wwa-btn-danger"
+            onClick={() => onDelete(challenge)}
+          >
+            Delete
+          </button>
+        ) : (
+          <div style={{ fontSize: 12.5, color: '#9ca3af' }}>
+            Private challenges are managed by their creator.
+          </div>
+        )}
       </div>
     </div>
   );

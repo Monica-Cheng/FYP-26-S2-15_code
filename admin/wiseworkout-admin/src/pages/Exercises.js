@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { collection, getDocs, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
+import { db, functions } from '../firebase';
+import { collection, getDocs } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
@@ -105,22 +106,56 @@ function Exercises() {
     setSaving(true);
     setFormError('');
     try {
-      if (editingId) {
-        // updateDoc only touches the keys in `payload` — any field on the
-        // document this form doesn't manage is left completely untouched.
-        await updateDoc(doc(db, 'exercises', editingId), payload);
-        setExercises(prev => prev.map(e => e.id === editingId ? { ...e, ...payload } : e));
+      const wasEditing = Boolean(editingId);
+    
+      if (wasEditing) {
+        const adminUpdateExercise = httpsCallable(
+          functions,
+          'adminUpdateExercise'
+        );
+    
+        const result = await adminUpdateExercise({
+          exerciseId: editingId,
+          exercise: payload,
+        });
+    
+        const savedExercise = result.data.exercise || payload;
+    
+        setExercises(prev =>
+          prev.map(exercise =>
+            exercise.id === editingId
+              ? { ...exercise, ...savedExercise }
+              : exercise
+          )
+        );
+    
         setEditingId(null);
       } else {
-        const docRef = await addDoc(collection(db, 'exercises'), {
-          ...payload,
-          createdAt: new Date().toISOString(),
+        const adminCreateExercise = httpsCallable(
+          functions,
+          'adminCreateExercise'
+        );
+    
+        const result = await adminCreateExercise({
+          exercise: payload,
         });
-        setExercises(prev => [...prev, { id: docRef.id, ...payload }]);
+    
+        setExercises(prev => [
+          ...prev,
+          {
+            id: result.data.exerciseId,
+            ...(result.data.exercise || payload),
+          },
+        ]);
       }
+    
       setForm(emptyForm);
       setShowForm(false);
-      setSuccessMsg(editingId ? 'Exercise updated successfully' : 'Exercise added successfully');
+      setSuccessMsg(
+        wasEditing
+          ? 'Exercise updated successfully'
+          : 'Exercise added successfully'
+      );
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error(err);
@@ -156,12 +191,37 @@ function Exercises() {
   // not a reference to this document — see PlanSessionsEditor.js. So deleting
   // an exercise definition can never orphan or invalidate anything in a plan;
   // existing plan entries simply keep their own embedded historical copy.
-  const handleDelete = async (id) => {
-    if (!window.confirm('Delete this exercise?')) return;
+  const handleDelete = async (exercise) => {
+    const exerciseName = exercise.name || exercise.id;
+  
+    const confirmation = window.prompt(
+      `Permanently delete "${exerciseName}"?\n\n` +
+      `Existing plans keep their embedded copy, but this exercise will ` +
+      `be removed from the shared exercise library.\n\n` +
+      `Type DELETE to continue:`
+    );
+  
+    if (confirmation !== 'DELETE') return;
+  
     try {
-      await deleteDoc(doc(db, 'exercises', id));
-      setExercises(prev => prev.filter(e => e.id !== id));
-      setSelectedExerciseId(prev => (prev === id ? null : prev));
+      const adminDeleteExercise = httpsCallable(
+        functions,
+        'adminDeleteExercise'
+      );
+  
+      await adminDeleteExercise({
+        exerciseId: exercise.id,
+      });
+  
+      setExercises(prev =>
+        prev.filter(existing => existing.id !== exercise.id)
+      );
+  
+      setSelectedExerciseId(prev =>
+        prev === exercise.id ? null : prev
+      );
+  
+      window.alert(`"${exerciseName}" was deleted successfully.`);
     } catch (err) {
       console.error(err);
       const detail = err && err.code ? ` (${err.code})` : '';
@@ -485,7 +545,7 @@ function Exercises() {
                             <button className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={() => handleEdit(ex)}>
                               Edit
                             </button>
-                            <button className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => handleDelete(ex.id)}>
+                            <button className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => handleDelete(ex)}>
                               Delete
                             </button>
                           </div>

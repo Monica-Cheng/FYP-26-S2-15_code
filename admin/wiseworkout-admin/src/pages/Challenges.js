@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { collection, getDocs, addDoc, updateDoc, deleteDoc, doc, Timestamp, serverTimestamp } from 'firebase/firestore';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import Badge from '../components/ui/Badge';
@@ -42,20 +42,40 @@ function Challenges() {
 
   useEffect(() => {
     const fetchData = async () => {
+      setLoading(true);
+  
       try {
-        const [challengesSnap, categoriesSnap, usersSnap] = await Promise.all([
-          getDocs(collection(db, 'challenges')),
-          getDocs(collection(db, 'challengeCategories')),
-          getDocs(collection(db, 'users')),
-        ]);
-        setChallenges(challengesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        setCategories(categoriesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        setUsers(usersSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        const adminListChallengeDashboard = httpsCallable(
+          functions,
+          'adminListChallengeDashboard'
+        );
+  
+        const result = await adminListChallengeDashboard();
+        const data = result.data || {};
+  
+        setChallenges(
+          Array.isArray(data.challenges) ? data.challenges : []
+        );
+  
+        setCategories(
+          Array.isArray(data.categories) ? data.categories : []
+        );
+  
+        setUsers(
+          Array.isArray(data.users) ? data.users : []
+        );
       } catch (err) {
-        console.error(err);
+        console.error('Failed to load challenge dashboard:', err);
+        window.alert(
+          `Failed to load challenge dashboard.${
+            err?.code ? ` (${err.code})` : ''
+          }`
+        );
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
+  
     fetchData();
   }, []);
 
@@ -64,145 +84,315 @@ function Challenges() {
   const countChallengesUsingCategory = (categoryId) =>
     challenges.filter(c => c.categoryId === categoryId).length;
 
-  const handleAddCategory = async () => {
-    const validationError = validateCategoryForm(addCategoryForm);
-    if (validationError) { setAddCategoryError(validationError); return; }
+    const handleAddCategory = async () => {
+      const validationError = validateCategoryForm(addCategoryForm);
+    
+      if (validationError) {
+        setAddCategoryError(validationError);
+        return;
+      }
+    
+      setAddCategorySaving(true);
+      setAddCategoryError('');
+    
+      try {
+        const payload = {
+          name: addCategoryForm.name.trim(),
+          unit: addCategoryForm.unit.trim(),
+          metricType: addCategoryForm.metricType,
+          minGoal: Number(addCategoryForm.minGoal),
+          maxGoal: Number(addCategoryForm.maxGoal),
+        };
+    
+        const adminCreateChallengeCategory = httpsCallable(
+          functions,
+          'adminCreateChallengeCategory'
+        );
+    
+        const result = await adminCreateChallengeCategory({
+          category: payload,
+        });
+    
+        setCategories(prev => [
+          ...prev,
+          {
+            id: result.data.categoryId,
+            ...(result.data.category || payload),
+          },
+        ]);
+    
+        setShowAddCategoryForm(false);
+        setAddCategoryForm(emptyCategoryForm);
+        setCategorySuccessMsg('Category added successfully');
+        setTimeout(() => setCategorySuccessMsg(''), 3000);
+      } catch (err) {
+        console.error(err);
+    
+        const detail = err?.code ? ` (${err.code})` : '';
+    
+        setAddCategoryError(
+          `Failed to add category. Please try again.${detail}`
+        );
+      } finally {
+        setAddCategorySaving(false);
+      }
+    };
 
-    setAddCategorySaving(true);
-    setAddCategoryError('');
-    try {
-      const payload = {
-        name: addCategoryForm.name.trim(),
-        unit: addCategoryForm.unit.trim(),
-        metricType: addCategoryForm.metricType,
-        minGoal: Number(addCategoryForm.minGoal),
-        maxGoal: Number(addCategoryForm.maxGoal),
-      };
-      const docRef = await addDoc(collection(db, 'challengeCategories'), payload);
-      setCategories(prev => [...prev, { id: docRef.id, ...payload }]);
-      setShowAddCategoryForm(false);
-      setAddCategoryForm(emptyCategoryForm);
-      setCategorySuccessMsg('Category added successfully');
-      setTimeout(() => setCategorySuccessMsg(''), 3000);
-    } catch (err) {
-      console.error(err);
-      const detail = err && err.code ? ` (${err.code})` : '';
-      setAddCategoryError(`Failed to add category. Please try again.${detail}`);
-    }
-    setAddCategorySaving(false);
-  };
-
-  const handleSaveCategory = async (categoryId, changes) => {
-    await updateDoc(doc(db, 'challengeCategories', categoryId), changes);
-    setCategories(prev => prev.map(c => c.id === categoryId ? { ...c, ...changes } : c));
-  };
-
-  const handleDeleteCategory = async (categoryId) => {
-    const usageCount = countChallengesUsingCategory(categoryId);
-    if (usageCount > 0) {
-      window.alert(
-        `This category is currently used by ${usageCount} challenge${usageCount === 1 ? '' : 's'}. ` +
-        'Update or delete those challenges before removing the category.'
+    const handleSaveCategory = async (categoryId, changes) => {
+      const adminUpdateChallengeCategory = httpsCallable(
+        functions,
+        'adminUpdateChallengeCategory'
       );
-      return;
-    }
-    if (!window.confirm('Delete this challenge category? This action cannot be undone.')) return;
-    try {
-      await deleteDoc(doc(db, 'challengeCategories', categoryId));
-      setCategories(prev => prev.filter(c => c.id !== categoryId));
-      setSelectedCategoryId(prev => (prev === categoryId ? null : prev));
-      setCategorySuccessMsg('Category deleted successfully');
-      setTimeout(() => setCategorySuccessMsg(''), 3000);
-    } catch (err) {
-      console.error(err);
-      const detail = err && err.code ? ` (${err.code})` : '';
-      window.alert(`Failed to delete category.${detail}`);
-    }
-  };
+    
+      const result = await adminUpdateChallengeCategory({
+        categoryId,
+        changes,
+      });
+    
+      const savedCategory = result.data.category || changes;
+    
+      setCategories(prev =>
+        prev.map(category =>
+          category.id === categoryId
+            ? { ...category, ...savedCategory }
+            : category
+        )
+      );
+    };
+
+    const handleDeleteCategory = async (categoryId) => {
+      const usageCount = countChallengesUsingCategory(categoryId);
+    
+      if (usageCount > 0) {
+        window.alert(
+          `This category is currently used by ${usageCount} ` +
+          `challenge${usageCount === 1 ? '' : 's'}. ` +
+          'Delete those challenges before removing the category.'
+        );
+        return;
+      }
+    
+      const category = categories.find(item => item.id === categoryId);
+      const categoryName = category?.name || categoryId;
+    
+      const confirmation = window.prompt(
+        `Permanently delete category "${categoryName}"?\n\n` +
+        'Type DELETE to continue:'
+      );
+    
+      if (confirmation !== 'DELETE') return;
+    
+      try {
+        const adminDeleteChallengeCategory = httpsCallable(
+          functions,
+          'adminDeleteChallengeCategory'
+        );
+    
+        await adminDeleteChallengeCategory({
+          categoryId,
+        });
+    
+        setCategories(prev =>
+          prev.filter(item => item.id !== categoryId)
+        );
+    
+        setSelectedCategoryId(prev =>
+          prev === categoryId ? null : prev
+        );
+    
+        setCategorySuccessMsg('Category deleted successfully');
+        setTimeout(() => setCategorySuccessMsg(''), 3000);
+      } catch (err) {
+        console.error(err);
+    
+        const detail = err?.code ? ` (${err.code})` : '';
+    
+        window.alert(`Failed to delete category.${detail}`);
+      }
+    };
 
   const selectedCategory = categories.find(c => c.id === selectedCategoryId) || null;
 
-  // ── Challenges ──────────────────────────────────────────────────────────
-  // Admin UID override (HWuRaLKa7rQH8WktVlP0DfPra2n1) already grants create/
-  // update on `challenges` — same client SDK + admin-rule pattern as every
-  // other write in this dashboard, no Admin SDK/service account involved.
+  // Global challenge management uses secure callable Cloud Functions.
+  // Private challenges remain user-owned and read-only in the admin portal.
 
   const selectedChallengeCategory = categories.find(c => c.id === addChallengeForm.categoryId) || null;
 
   const handleAddChallenge = async () => {
-    if (!addChallengeForm.name.trim()) { setAddChallengeError('Challenge Name is required.'); return; }
-    const category = categories.find(c => c.id === addChallengeForm.categoryId);
-    if (!category) { setAddChallengeError('Select a category.'); return; }
-
+    if (!addChallengeForm.name.trim()) {
+      setAddChallengeError('Challenge Name is required.');
+      return;
+    }
+  
+    const category = categories.find(
+      item => item.id === addChallengeForm.categoryId
+    );
+  
+    if (!category) {
+      setAddChallengeError('Select a category.');
+      return;
+    }
+  
     const goalValue = Number(addChallengeForm.goalValue);
-    if (addChallengeForm.goalValue === '' || !Number.isFinite(goalValue)) {
+  
+    if (
+      addChallengeForm.goalValue === '' ||
+      !Number.isFinite(goalValue)
+    ) {
       setAddChallengeError('Goal Value must be a valid number.');
       return;
     }
-    if (goalValue < category.minGoal || goalValue > category.maxGoal) {
-      setAddChallengeError(`Goal Value must be between ${category.minGoal} and ${category.maxGoal} ${category.unit}.`);
+  
+    if (
+      goalValue < category.minGoal ||
+      goalValue > category.maxGoal
+    ) {
+      setAddChallengeError(
+        `Goal Value must be between ${category.minGoal} and ` +
+        `${category.maxGoal} ${category.unit}.`
+      );
       return;
     }
-
-    if (!addChallengeForm.startDate) { setAddChallengeError('Start Date is required.'); return; }
-    if (!addChallengeForm.endDate) { setAddChallengeError('End Date is required.'); return; }
+  
+    if (!addChallengeForm.startDate) {
+      setAddChallengeError('Start Date is required.');
+      return;
+    }
+  
+    if (!addChallengeForm.endDate) {
+      setAddChallengeError('End Date is required.');
+      return;
+    }
+  
     const startDateObj = new Date(addChallengeForm.startDate);
     const endDateObj = new Date(addChallengeForm.endDate);
-    if (Number.isNaN(startDateObj.getTime()) || Number.isNaN(endDateObj.getTime())) {
-      setAddChallengeError('Start Date and End Date must be valid dates.');
+  
+    if (
+      Number.isNaN(startDateObj.getTime()) ||
+      Number.isNaN(endDateObj.getTime())
+    ) {
+      setAddChallengeError(
+        'Start Date and End Date must be valid dates.'
+      );
       return;
     }
+  
     if (endDateObj <= startDateObj) {
       setAddChallengeError('End Date must be after Start Date.');
       return;
     }
-
+  
     setAddChallengeSaving(true);
     setAddChallengeError('');
+  
     try {
-      const payload = {
-        name: addChallengeForm.name.trim(),
-        categoryId: category.id,
-        metricType: category.metricType,
-        unit: category.unit,
-        goalValue,
-        startDate: Timestamp.fromDate(startDateObj),
-        endDate: Timestamp.fromDate(endDateObj),
-        isGlobal: true,
-        createdBy: 'admin',
-        participantUids: [],
-        invitedUids: [],
-        createdAt: serverTimestamp(),
-      };
-      const docRef = await addDoc(collection(db, 'challenges'), payload);
-      setChallenges(prev => [...prev, { id: docRef.id, ...payload, createdAt: new Date() }]);
+      const adminCreateGlobalChallenge = httpsCallable(
+        functions,
+        'adminCreateGlobalChallenge'
+      );
+  
+      const result = await adminCreateGlobalChallenge({
+        challenge: {
+          name: addChallengeForm.name.trim(),
+          categoryId: category.id,
+          metricType: category.metricType,
+          unit: category.unit,
+          goalValue,
+          startDate: startDateObj.toISOString(),
+          endDate: endDateObj.toISOString(),
+        },
+      });
+  
+      const savedChallenge = result.data.challenge || {};
+  
+      setChallenges(prev => [
+        ...prev,
+        {
+          id: result.data.challengeId,
+          ...savedChallenge,
+        },
+      ]);
+  
       setShowAddChallengeForm(false);
       setAddChallengeForm(emptyChallengeForm);
-      setChallengeSuccessMsg('Global challenge created successfully');
+      setChallengeSuccessMsg(
+        'Global challenge created successfully'
+      );
       setTimeout(() => setChallengeSuccessMsg(''), 3000);
     } catch (err) {
       console.error(err);
-      const detail = err && err.code ? ` (${err.code})` : '';
-      setAddChallengeError(`Failed to create challenge. Please try again.${detail}`);
+  
+      const detail = err?.code ? ` (${err.code})` : '';
+  
+      setAddChallengeError(
+        `Failed to create challenge. Please try again.${detail}`
+      );
+    } finally {
+      setAddChallengeSaving(false);
     }
-    setAddChallengeSaving(false);
   };
 
   const handleDeleteChallenge = async (challenge) => {
-    const message = challenge.isGlobal === true
-      ? 'Are you sure you want to permanently delete this global challenge? This action cannot be undone.'
-      : 'Remove this challenge from the platform?';
-    if (!window.confirm(message)) return;
-    try {
-      await deleteDoc(doc(db, 'challenges', challenge.id));
-      setChallenges(prev => prev.filter(c => c.id !== challenge.id));
-      setSelectedChallengeId(prev => (prev === challenge.id ? null : prev));
-    } catch (err) {
-      console.error(err);
-      const detail = err && err.code ? ` (${err.code})` : '';
-      window.alert(`Failed to delete challenge.${detail}`);
-    }
-  };
+  if (challenge.isGlobal !== true) {
+    window.alert(
+      'Private challenges are owned by users and cannot be deleted ' +
+      'from the admin dashboard.'
+    );
+    return;
+  }
+
+  const participantCount = Array.isArray(challenge.participantUids)
+    ? challenge.participantUids.length
+    : 0;
+
+  if (participantCount > 0) {
+    window.alert(
+      'This global challenge already has participants and cannot be ' +
+      'deleted.'
+    );
+    return;
+  }
+
+  const challengeName =
+    challenge.name || challenge.title || challenge.id;
+
+  const confirmation = window.prompt(
+    `Permanently delete global challenge "${challengeName}"?\n\n` +
+    'Type DELETE to continue:'
+  );
+
+  if (confirmation !== 'DELETE') return;
+
+  try {
+    const adminDeleteChallenge = httpsCallable(
+      functions,
+      'adminDeleteChallenge'
+    );
+
+    await adminDeleteChallenge({
+      challengeId: challenge.id,
+    });
+
+    setChallenges(prev =>
+      prev.filter(item => item.id !== challenge.id)
+    );
+
+    setSelectedChallengeId(prev =>
+      prev === challenge.id ? null : prev
+    );
+
+    setChallengeSuccessMsg(
+      'Global challenge deleted successfully'
+    );
+    setTimeout(() => setChallengeSuccessMsg(''), 3000);
+  } catch (err) {
+    console.error(err);
+
+    const detail = err?.code ? ` (${err.code})` : '';
+
+    window.alert(`Failed to delete challenge.${detail}`);
+  }
+};
 
   const filteredChallenges = challenges.filter(c =>
     (c.title || c.name || '').toLowerCase().includes(search.toLowerCase())
@@ -551,12 +741,18 @@ function Challenges() {
                               >
                                 View
                               </button>
-                              <button
-                                className="wwa-btn wwa-btn-sm wwa-btn-danger"
-                                onClick={() => handleDeleteChallenge(challenge)}
-                              >
-                                Delete
-                              </button>
+                              {challenge.isGlobal === true ? (
+                                <button
+                                  className="wwa-btn wwa-btn-sm wwa-btn-danger"
+                                  onClick={() => handleDeleteChallenge(challenge)}
+                                >
+                                  Delete
+                                </button>
+                              ) : (
+                                <span style={{ fontSize: 12, color: '#9ca3af' }}>
+                                  User-owned
+                                </span>
+                              )}
                             </div>
                           </td>
                         </tr>

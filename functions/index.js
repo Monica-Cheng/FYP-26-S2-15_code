@@ -990,6 +990,740 @@ exports.adminDeleteUser = onCall(
   },
 );
 
+/**
+ * Validates and normalizes exercise data sent by the admin dashboard.
+ */
+function normalizeAdminExerciseData(rawData) {
+  const data = rawData || {};
+
+  const name = typeof data.name === "string" ? data.name.trim() : "";
+  const difficulty =
+    typeof data.difficulty === "string" ? data.difficulty.trim() : "Beginner";
+  const equipment =
+    typeof data.equipment === "string" ? data.equipment.trim() : "";
+  const muscle =
+    typeof data.muscle === "string" ? data.muscle.trim() : "";
+  const muscleGroup =
+    typeof data.muscleGroup === "string" ? data.muscleGroup.trim() : "";
+  const gifUrl =
+    typeof data.gifUrl === "string" ? data.gifUrl.trim() : "";
+
+  if (!name) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Exercise name is required.",
+    );
+  }
+
+  if (!["Beginner", "Intermediate", "Advanced"].includes(difficulty)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Difficulty must be Beginner, Intermediate, or Advanced.",
+    );
+  }
+
+  const secondaryMuscles = Array.isArray(data.secondaryMuscles) ?
+    data.secondaryMuscles
+        .filter((value) => typeof value === "string")
+        .map((value) => value.trim())
+        .filter(Boolean) :
+    [];
+
+  const injuryRisk = Array.isArray(data.injuryRisk) ?
+    data.injuryRisk
+        .filter((value) => typeof value === "string")
+        .map((value) => value.trim())
+        .filter(Boolean) :
+    [];
+
+  const instructionSteps = Array.isArray(data.instructionSteps) ?
+    data.instructionSteps
+        .filter((value) => typeof value === "string")
+        .map((value) => value.trim())
+        .filter(Boolean) :
+    [];
+
+  const minReps = Number(data.minReps);
+  const maxReps = Number(data.maxReps);
+  const minKg = Number(data.minKg);
+  const maxKg = Number(data.maxKg);
+
+  if (!Number.isFinite(minReps) || minReps < 1) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Minimum reps must be at least 1.",
+    );
+  }
+
+  if (!Number.isFinite(maxReps) || maxReps < minReps) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Maximum reps must be greater than or equal to minimum reps.",
+    );
+  }
+
+  if (!Number.isFinite(minKg) || minKg < 0) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Minimum weight cannot be negative.",
+    );
+  }
+
+  if (!Number.isFinite(maxKg) || maxKg < minKg) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Maximum weight must be greater than or equal to minimum weight.",
+    );
+  }
+
+  if (instructionSteps.length === 0) {
+    throw new HttpsError(
+      "invalid-argument",
+      "At least one instruction step is required.",
+    );
+  }
+
+  return {
+    name,
+    difficulty,
+    equipment,
+    muscle,
+    muscleGroup,
+    secondaryMuscles,
+    injuryRisk,
+    instructionSteps,
+    minReps,
+    maxReps,
+    minKg,
+    maxKg,
+    gifUrl: gifUrl || null,
+  };
+}
+
+/**
+ * Creates a new exercise in the shared exercise library.
+ */
+exports.adminCreateExercise = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+  const exerciseData = normalizeAdminExerciseData(
+      request.data?.exercise,
+  );
+
+  const documentRef = await db.collection("exercises").add({
+    ...exerciseData,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+    createdByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    exerciseId: documentRef.id,
+    exercise: exerciseData,
+  };
+});
+
+/**
+ * Updates an existing exercise without replacing unrelated fields.
+ */
+exports.adminUpdateExercise = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+  const exerciseId = request.data?.exerciseId;
+
+  if (typeof exerciseId !== "string" || !exerciseId.trim()) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Exercise ID is required.",
+    );
+  }
+
+  const exerciseData = normalizeAdminExerciseData(
+      request.data?.exercise,
+  );
+
+  const documentRef = db
+      .collection("exercises")
+      .doc(exerciseId.trim());
+
+  const snapshot = await documentRef.get();
+
+  if (!snapshot.exists) {
+    throw new HttpsError(
+      "not-found",
+      "Exercise not found.",
+    );
+  }
+
+  await documentRef.update({
+    ...exerciseData,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    exerciseId: exerciseId.trim(),
+    exercise: exerciseData,
+  };
+});
+
+/**
+ * Permanently deletes an exercise definition.
+ *
+ * Existing plans retain their embedded exercise copies.
+ */
+exports.adminDeleteExercise = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+  const exerciseId = request.data?.exerciseId;
+
+  if (typeof exerciseId !== "string" || !exerciseId.trim()) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Exercise ID is required.",
+    );
+  }
+
+  const documentRef = db
+      .collection("exercises")
+      .doc(exerciseId.trim());
+
+  const snapshot = await documentRef.get();
+
+  if (!snapshot.exists) {
+    throw new HttpsError(
+      "not-found",
+      "Exercise not found.",
+    );
+  }
+
+  await documentRef.delete();
+
+  console.log(
+      `adminDeleteExercise: ${adminUid} deleted ${exerciseId.trim()}`,
+  );
+
+  return {
+    success: true,
+    exerciseId: exerciseId.trim(),
+  };
+});
+
+/**
+ * Converts Firestore values into data that can safely be returned through
+ * a callable Cloud Function.
+ */
+function serializeAdminFirestoreValue(value) {
+  if (value === null || value === undefined) return value;
+
+  if (value && typeof value.toDate === "function") {
+    return value.toDate().toISOString();
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => serializeAdminFirestoreValue(item));
+  }
+
+  if (typeof value === "object") {
+    const converted = {};
+
+    for (const [key, nestedValue] of Object.entries(value)) {
+      converted[key] = serializeAdminFirestoreValue(nestedValue);
+    }
+
+    return converted;
+  }
+
+  return value;
+}
+
+/**
+ * Returns everything required by the React Challenges dashboard.
+ *
+ * Admin SDK bypasses client Firestore rules, so this includes private
+ * challenges as well as global challenges.
+ */
+exports.adminListChallengeDashboard = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const [
+    challengeSnapshot,
+    categorySnapshot,
+    userSnapshot,
+  ] = await Promise.all([
+    db.collection("challenges").get(),
+    db.collection("challengeCategories").orderBy("name").get(),
+    db.collection("users").get(),
+  ]);
+
+  const challenges = challengeSnapshot.docs.map((challengeDoc) => ({
+    id: challengeDoc.id,
+    ...serializeAdminFirestoreValue(challengeDoc.data()),
+  }));
+
+  const categories = categorySnapshot.docs.map((categoryDoc) => ({
+    id: categoryDoc.id,
+    ...serializeAdminFirestoreValue(categoryDoc.data()),
+  }));
+
+  const users = userSnapshot.docs.map((userDoc) => {
+    const data = userDoc.data();
+
+    return {
+      id: userDoc.id,
+      displayName: data.displayName || "",
+      username: data.username || "",
+      email: data.email || "",
+      accountStatus:
+        data.accountStatus === "suspended" ? "suspended" : "active",
+    };
+  });
+
+  return {
+    challenges,
+    categories,
+    users,
+  };
+});
+
+const ADMIN_CHALLENGE_METRIC_TYPES = [
+  "distance",
+  "calories",
+  "duration",
+];
+
+function normalizeChallengeCategoryData(rawData) {
+  const data = rawData || {};
+
+  const name =
+    typeof data.name === "string" ? data.name.trim() : "";
+
+  const unit =
+    typeof data.unit === "string" ? data.unit.trim() : "";
+
+  const metricType =
+    typeof data.metricType === "string" ?
+      data.metricType.trim() :
+      "";
+
+  const minGoal = Number(data.minGoal);
+  const maxGoal = Number(data.maxGoal);
+
+  if (!name) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Category name is required.",
+    );
+  }
+
+  if (!unit) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Category unit is required.",
+    );
+  }
+
+  if (!ADMIN_CHALLENGE_METRIC_TYPES.includes(metricType)) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Metric type must be distance, calories, or duration.",
+    );
+  }
+
+  if (!Number.isFinite(minGoal) || minGoal < 0) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Minimum goal must be a non-negative number.",
+    );
+  }
+
+  if (!Number.isFinite(maxGoal) || maxGoal < minGoal) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Maximum goal must be greater than or equal to minimum goal.",
+    );
+  }
+
+  return {
+    name,
+    unit,
+    metricType,
+    minGoal,
+    maxGoal,
+  };
+}
+
+/**
+ * Creates an admin-managed challenge category.
+ */
+exports.adminCreateChallengeCategory = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const categoryData = normalizeChallengeCategoryData(
+      request.data?.category,
+  );
+
+  const categoryRef = await db
+      .collection("challengeCategories")
+      .add({
+        ...categoryData,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+        createdByAdminUid: adminUid,
+      });
+
+  return {
+    success: true,
+    categoryId: categoryRef.id,
+    category: categoryData,
+  };
+});
+
+/**
+ * Updates an existing challenge category.
+ */
+exports.adminUpdateChallengeCategory = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+  const categoryId = request.data?.categoryId;
+  const requestedChanges = request.data?.changes || {};
+
+  if (typeof categoryId !== "string" || !categoryId.trim()) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Category ID is required.",
+    );
+  }
+
+  const categoryRef = db
+      .collection("challengeCategories")
+      .doc(categoryId.trim());
+
+  const categorySnapshot = await categoryRef.get();
+
+  if (!categorySnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Challenge category not found.",
+    );
+  }
+
+  const existingData = categorySnapshot.data() || {};
+
+  const normalizedData = normalizeChallengeCategoryData({
+    name:
+      requestedChanges.name !== undefined ?
+        requestedChanges.name :
+        existingData.name,
+    unit:
+      requestedChanges.unit !== undefined ?
+        requestedChanges.unit :
+        existingData.unit,
+    metricType:
+      requestedChanges.metricType !== undefined ?
+        requestedChanges.metricType :
+        existingData.metricType,
+    minGoal:
+      requestedChanges.minGoal !== undefined ?
+        requestedChanges.minGoal :
+        existingData.minGoal,
+    maxGoal:
+      requestedChanges.maxGoal !== undefined ?
+        requestedChanges.maxGoal :
+        existingData.maxGoal,
+  });
+
+  await categoryRef.update({
+    ...normalizedData,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    categoryId: categoryId.trim(),
+    category: normalizedData,
+  };
+});
+
+/**
+ * Deletes an unused challenge category.
+ */
+exports.adminDeleteChallengeCategory = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+  const categoryId = request.data?.categoryId;
+
+  if (typeof categoryId !== "string" || !categoryId.trim()) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Category ID is required.",
+    );
+  }
+
+  const normalizedCategoryId = categoryId.trim();
+
+  const categoryRef = db
+      .collection("challengeCategories")
+      .doc(normalizedCategoryId);
+
+  const categorySnapshot = await categoryRef.get();
+
+  if (!categorySnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Challenge category not found.",
+    );
+  }
+
+  const challengeSnapshot = await db
+      .collection("challenges")
+      .where("categoryId", "==", normalizedCategoryId)
+      .limit(1)
+      .get();
+
+  if (!challengeSnapshot.empty) {
+    throw new HttpsError(
+        "failed-precondition",
+        "This category is still used by at least one challenge.",
+    );
+  }
+
+  await categoryRef.delete();
+
+  console.log(
+      `adminDeleteChallengeCategory: ${adminUid} deleted ` +
+      `${normalizedCategoryId}`,
+  );
+
+  return {
+    success: true,
+    categoryId: normalizedCategoryId,
+  };
+});
+
+function normalizeGlobalChallengeData(rawData) {
+  const data = rawData || {};
+
+  const name =
+    typeof data.name === "string" ? data.name.trim() : "";
+
+  const categoryId =
+    typeof data.categoryId === "string" ? data.categoryId.trim() : "";
+
+  const metricType =
+    typeof data.metricType === "string" ? data.metricType.trim() : "";
+
+  const unit =
+    typeof data.unit === "string" ? data.unit.trim() : "";
+
+  const goalValue = Number(data.goalValue);
+
+  const startDate = new Date(data.startDate);
+  const endDate = new Date(data.endDate);
+
+  if (!name) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Challenge name is required.",
+    );
+  }
+
+  if (!categoryId) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Challenge category is required.",
+    );
+  }
+
+  if (!ADMIN_CHALLENGE_METRIC_TYPES.includes(metricType)) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Metric type must be distance, calories, or duration.",
+    );
+  }
+
+  if (!unit) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Challenge unit is required.",
+    );
+  }
+
+  if (!Number.isFinite(goalValue)) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Goal value must be a valid number.",
+    );
+  }
+
+  if (
+    Number.isNaN(startDate.getTime()) ||
+    Number.isNaN(endDate.getTime())
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Start date and end date must be valid.",
+    );
+  }
+
+  if (endDate <= startDate) {
+    throw new HttpsError(
+        "invalid-argument",
+        "End date must be after start date.",
+    );
+  }
+
+  return {
+    name,
+    categoryId,
+    metricType,
+    unit,
+    goalValue,
+    startDate,
+    endDate,
+  };
+}
+
+/**
+ * Creates a global challenge that users can discover and join.
+ */
+exports.adminCreateGlobalChallenge = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const challengeData = normalizeGlobalChallengeData(
+      request.data?.challenge,
+  );
+
+  const categoryRef = db
+      .collection("challengeCategories")
+      .doc(challengeData.categoryId);
+
+  const categorySnapshot = await categoryRef.get();
+
+  if (!categorySnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Challenge category not found.",
+    );
+  }
+
+  const category = categorySnapshot.data() || {};
+
+  if (
+    category.metricType !== challengeData.metricType ||
+    category.unit !== challengeData.unit
+  ) {
+    throw new HttpsError(
+        "failed-precondition",
+        "Challenge category values do not match.",
+    );
+  }
+
+  const minGoal = Number(category.minGoal);
+  const maxGoal = Number(category.maxGoal);
+
+  if (
+    challengeData.goalValue < minGoal ||
+    challengeData.goalValue > maxGoal
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        `Goal value must be between ${minGoal} and ${maxGoal} ${category.unit}.`,
+    );
+  }
+
+  const challengeRef = await db.collection("challenges").add({
+    name: challengeData.name,
+    categoryId: challengeData.categoryId,
+    metricType: challengeData.metricType,
+    unit: challengeData.unit,
+    goalValue: challengeData.goalValue,
+    startDate: challengeData.startDate,
+    endDate: challengeData.endDate,
+    isGlobal: true,
+    createdBy: adminUid,
+    participantUids: [],
+    invitedUids: [],
+    createdAt: FieldValue.serverTimestamp(),
+  });
+
+
+  return {
+    success: true,
+    challengeId: challengeRef.id,
+    challenge: {
+      name: challengeData.name,
+      categoryId: challengeData.categoryId,
+      metricType: challengeData.metricType,
+      unit: challengeData.unit,
+      goalValue: challengeData.goalValue,
+      startDate: challengeData.startDate.toISOString(),
+      endDate: challengeData.endDate.toISOString(),
+      isGlobal: true,
+      createdBy: adminUid,
+      participantUids: [],
+      invitedUids: [],
+    },
+  };
+});
+
+/**
+ * Permanently deletes a challenge.
+ */
+exports.adminDeleteChallenge = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+  const challengeId = request.data?.challengeId;
+
+  if (typeof challengeId !== "string" || !challengeId.trim()) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Challenge ID is required.",
+    );
+  }
+
+  const challengeRef = db
+      .collection("challenges")
+      .doc(challengeId.trim());
+
+  const challengeSnapshot = await challengeRef.get();
+
+  if (!challengeSnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Challenge not found.",
+    );
+  }
+
+  const challenge = challengeSnapshot.data() || {};
+
+  if (challenge.isGlobal !== true) {
+    throw new HttpsError(
+        "failed-precondition",
+        "Admin deletion is limited to global challenges.",
+    );
+  }
+
+  const participantUids = Array.isArray(challenge.participantUids)
+    ? challenge.participantUids
+    : [];
+
+  if (participantUids.length > 0) {
+    throw new HttpsError(
+        "failed-precondition",
+        "Cannot delete a global challenge after users have joined.",
+    );
+  }
+
+  await challengeRef.delete();
+
+  console.log(
+      `adminDeleteChallenge: ${adminUid} deleted ${challengeId.trim()}`,
+  );
+
+  return {
+    success: true,
+    challengeId: challengeId.trim(),
+  };
+});
+
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
 // plaintext .env value — the previous approach in the Flutter app bundled
 // .env as a Flutter asset (pubspec.yaml's flutter:assets:), which ships it
