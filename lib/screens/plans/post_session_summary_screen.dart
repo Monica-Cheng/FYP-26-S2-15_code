@@ -21,10 +21,8 @@ import '../../utils/widget_capture.dart';
 import '../../widgets/caption_sheet.dart';
 import '../../widgets/photo_background_share_card.dart';
 import '../../widgets/quick_add_sheet.dart';
-import '../../widgets/route_map_share_card.dart';
-import '../../widgets/route_overlay.dart';
+import '../../widgets/session_share_cards.dart';
 import '../../widgets/share_card_picker.dart';
-import '../../widgets/share_card_widget.dart';
 
 // Same OpenFreeMap style URL used in activity_detail_screen.dart/
 // outdoor_cardio_screen.dart — duplicated here (not imported, since that's
@@ -423,124 +421,24 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     }
   }
 
-  String _fmtStatDuration(int secs) {
-    final h = secs ~/ 3600;
-    final m = (secs % 3600) ~/ 60;
-    return h > 0 ? '${h}h ${m}m' : '${m}m';
-  }
-
-  // Builds whichever of the 3 card designs are actually available for
-  // this session — Map only for a pure-cardio session with a route or
-  // snapshot (RouteMapShareCard.isAvailable — always false for combined
-  // sessions, since _isCardio is false there and route/snapshot data
-  // lives nested per-block instead, out of this feature's scope per
-  // Part 1), Photo only if photoBase64 was resolved (reused or picked),
-  // Color always (the universal fallback).
+  // Card-building logic itself now lives in
+  // lib/widgets/session_share_cards.dart — shared with
+  // activity_detail_screen.dart, which reads from the same Firestore
+  // session document shape when sharing a PAST session. This is now a
+  // thin wrapper supplying this screen's own state.
   List<ShareCardOption> _buildCardOptions({required String? photoBase64}) {
-    final sessionName = _session['sessionName'] as String? ?? 'Workout';
-    final elapsedSeconds = (_session['durationSeconds'] as num?)?.toInt() ?? 0;
-    final date = (_session['date'] as Timestamp?)?.toDate() ?? DateTime.now();
-    final totalSets = (_session['totalSets'] as num?)?.toInt() ?? 0;
-    final totalVolume = (_session['totalVolume'] as num?)?.toDouble() ?? 0;
-    final caloriesBurned = (_session['caloriesBurned'] as num?)?.toInt() ?? 0;
-    final cardioActivity = _session['activity'] as String? ?? '';
-    final activityLabel = cardioActivity.isNotEmpty ? cardioActivity : 'Cardio';
-    final distanceMeters = (_session['distanceMeters'] as num?)?.toDouble() ?? 0;
     final mapSnapshotBase64 = _session['mapSnapshotBase64'] as String?;
-
     debugPrint('[RouteOverlay] _routePoints.length=${_routePoints.length}'
         '${_routePoints.isNotEmpty ? ' first=${_routePoints.first.latitude},${_routePoints.first.longitude} last=${_routePoints.last.latitude},${_routePoints.last.longitude}' : ''}'
         ' hasSnapshot=${mapSnapshotBase64?.isNotEmpty ?? false} isCardio=$_isCardio');
 
-    final cards = <ShareCardOption>[];
-
-    if (_isCardio &&
-        RouteMapShareCard.isAvailable(
-          mapSnapshotBase64: mapSnapshotBase64,
-          routePoints: _routePoints,
-        )) {
-      cards.add(ShareCardOption(
-        label: 'Map',
-        builder: (_) => RouteMapShareCard(
-          mapSnapshotBase64: mapSnapshotBase64,
-          routePoints: _routePoints,
-          sessionName: sessionName,
-          activityLabel: activityLabel,
-          distanceMeters: distanceMeters,
-          durationSeconds: elapsedSeconds,
-          calories: caloriesBurned,
-          paceLabel: _avgPaceLabel(distanceMeters, elapsedSeconds),
-          date: date,
-        ),
-      ));
-    }
-
-    if (photoBase64 != null) {
-      final stats = _isCardio
-          ? [
-              (_fmtStatDuration(elapsedSeconds), 'Duration'),
-              ('$caloriesBurned', 'Calories'),
-              (_avgPaceLabel(distanceMeters, elapsedSeconds) ?? '--:--', 'Pace'),
-            ]
-          : [
-              (_fmtStatDuration(elapsedSeconds), 'Duration'),
-              ('$caloriesBurned', 'Calories'),
-              ('$totalSets', 'Sets'),
-            ];
-      cards.add(ShareCardOption(
-        label: 'Photo',
-        builder: (_) => SizedBox(
-          width: RouteMapShareCard.width,
-          height: RouteMapShareCard.height,
-          child: Stack(
-            children: [
-              PhotoBackgroundShareCard(
-                photoBase64: photoBase64,
-                title: sessionName,
-                badgeLabel: _isCardio ? activityLabel : 'Gym',
-                stats: stats,
-                date: date,
-              ),
-              if (_hasRoute)
-                Positioned.fill(child: RouteOverlay(routePoints: _routePoints)),
-            ],
-          ),
-        ),
-      ));
-    }
-
-    cards.add(ShareCardOption(
-      label: 'Color',
-      supportsColorPicker: true,
-      builder: (_) => SizedBox(
-        width: RouteMapShareCard.width,
-        height: RouteMapShareCard.height,
-        child: Stack(
-          children: [
-            ShareCardWidget(
-              sessionName: sessionName,
-              isCardio: _isCardio,
-              cardioActivity: cardioActivity,
-              elapsedSeconds: elapsedSeconds,
-              calories: caloriesBurned,
-              totalSets: totalSets,
-              volume: totalVolume,
-              // Not stored on the finalized session doc anywhere (it was
-              // always just cardio_session_screen.dart's own local,
-              // ephemeral "+5 min" goal state) — 0 matches the "no goal
-              // set" display elsewhere.
-              goalMinutes: 0,
-              date: date,
-              gradientColors: _selectedGradientColors,
-            ),
-            if (_hasRoute)
-              Positioned.fill(child: RouteOverlay(routePoints: _routePoints)),
-          ],
-        ),
-      ),
-    ));
-
-    return cards;
+    return buildSessionShareCardOptions(
+      session: _session,
+      isCardio: _isCardio,
+      routePoints: _routePoints,
+      selectedGradientColors: _selectedGradientColors,
+      photoBase64: photoBase64,
+    );
   }
 
   Future<void> _shareCard(ShareCardOption card) async {
