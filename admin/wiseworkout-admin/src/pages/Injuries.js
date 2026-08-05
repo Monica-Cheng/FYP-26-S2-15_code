@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { collection, getDocs, addDoc, updateDoc, deleteDoc, doc } from 'firebase/firestore';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import EmptyState from '../components/ui/EmptyState';
@@ -24,21 +24,37 @@ function Injuries() {
 
   useEffect(() => {
     const fetchData = async () => {
+      setLoading(true);
+  
       try {
-        // Also loads exercises (read-only) so Delete can check for references
-        // in exercise.injuryRisk before removing a category — see
-        // countExercisesUsingInjury below.
-        const [injurySnap, exercisesSnap] = await Promise.all([
-          getDocs(collection(db, 'injuryCategories')),
-          getDocs(collection(db, 'exercises')),
-        ]);
-        setInjuries(injurySnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        setExercises(exercisesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        const adminListInjuriesDashboard = httpsCallable(
+          functions,
+          'adminListInjuriesDashboard'
+        );
+  
+        const result = await adminListInjuriesDashboard();
+        const data = result.data || {};
+  
+        setInjuries(
+          Array.isArray(data.injuries) ? data.injuries : []
+        );
+  
+        setExercises(
+          Array.isArray(data.exercises) ? data.exercises : []
+        );
       } catch (err) {
-        console.error(err);
+        console.error('Failed to load injuries dashboard:', err);
+  
+        const detail = err?.code ? ` (${err.code})` : '';
+  
+        window.alert(
+          `Failed to load injuries dashboard.${detail}`
+        );
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
+  
     fetchData();
   }, []);
 
@@ -52,50 +68,128 @@ function Injuries() {
   };
 
   const handleAddInjury = async () => {
-    if (!addForm.name.trim()) { setAddError('Name is required.'); return; }
-    if (!addForm.bodyPart.trim()) { setAddError('Body Part is required.'); return; }
-    if (!addForm.description.trim()) { setAddError('Description is required.'); return; }
-
+    if (!addForm.name.trim()) {
+      setAddError('Name is required.');
+      return;
+    }
+  
+    if (!addForm.bodyPart.trim()) {
+      setAddError('Body Part is required.');
+      return;
+    }
+  
+    if (!addForm.description.trim()) {
+      setAddError('Description is required.');
+      return;
+    }
+  
     setAddSaving(true);
     setAddError('');
+  
     try {
       const payload = {
         name: addForm.name.trim(),
         bodyPart: addForm.bodyPart.trim(),
         description: addForm.description.trim(),
       };
-      const docRef = await addDoc(collection(db, 'injuryCategories'), payload);
-      setInjuries(prev => [...prev, { id: docRef.id, ...payload }]);
+  
+      const adminCreateInjuryCategory = httpsCallable(
+        functions,
+        'adminCreateInjuryCategory'
+      );
+  
+      const result = await adminCreateInjuryCategory({
+        category: payload,
+      });
+  
+      setInjuries(prev => [
+        ...prev,
+        {
+          id: result.data.categoryId,
+          ...(result.data.category || payload),
+        },
+      ]);
+  
       setShowAddForm(false);
       setAddForm(emptyForm);
       setSuccessMsg('Injury category added successfully');
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
-      console.error(err);
-      setAddError('Failed to add injury category. Please try again.');
+      console.error('Failed to add injury category:', err);
+  
+      const detail = err?.code ? ` (${err.code})` : '';
+  
+      setAddError(
+        `Failed to add injury category. Please try again.${detail}`
+      );
+    } finally {
+      setAddSaving(false);
     }
-    setAddSaving(false);
   };
 
   const handleSaveInjury = async (injuryId, changes) => {
-    await updateDoc(doc(db, 'injuryCategories', injuryId), changes);
-    setInjuries(prev => prev.map(i => i.id === injuryId ? { ...i, ...changes } : i));
+    const adminUpdateInjuryCategory = httpsCallable(
+      functions,
+      'adminUpdateInjuryCategory'
+    );
+  
+    const result = await adminUpdateInjuryCategory({
+      categoryId: injuryId,
+      changes,
+    });
+  
+    const savedCategory = result.data?.category || changes;
+  
+    setInjuries(prev =>
+      prev.map(injury =>
+        injury.id === injuryId
+          ? { ...injury, ...savedCategory }
+          : injury
+      )
+    );
   };
 
   const handleDeleteInjury = async (injuryId) => {
-    const injury = injuries.find(i => i.id === injuryId);
-    const usageCount = injury ? countExercisesUsingInjury(injury.name) : 0;
+    const injury = injuries.find(item => item.id === injuryId);
+  
+    if (!injury) return;
+  
+    const usageCount = countExercisesUsingInjury(injury.name);
+  
     if (usageCount > 0) {
       window.alert(
-        `"${injury.name}" is currently used by ${usageCount} exercise${usageCount === 1 ? '' : 's'}. ` +
+        `"${injury.name}" is currently used by ` +
+        `${usageCount} exercise${usageCount === 1 ? '' : 's'}. ` +
         'Remove this injury risk from those exercises before deleting the category.'
       );
       return;
     }
-    if (!window.confirm('Are you sure you want to delete this injury category? This action cannot be undone.')) return;
-    await deleteDoc(doc(db, 'injuryCategories', injuryId));
-    setInjuries(prev => prev.filter(i => i.id !== injuryId));
-    setSelectedInjuryId(prev => (prev === injuryId ? null : prev));
+  
+    const confirmation = window.prompt(
+      `Permanently delete "${injury.name}"?\n\n` +
+      'Type DELETE INJURY exactly to continue:'
+    );
+  
+    if (confirmation !== 'DELETE INJURY') return;
+  
+    const adminDeleteInjuryCategory = httpsCallable(
+      functions,
+      'adminDeleteInjuryCategory'
+    );
+  
+    await adminDeleteInjuryCategory({
+      categoryId: injuryId,
+      confirmation,
+    });
+  
+    setInjuries(prev =>
+      prev.filter(item => item.id !== injuryId)
+    );
+  
+    setSelectedInjuryId(prev =>
+      prev === injuryId ? null : prev
+    );
+  
     setSuccessMsg('Injury category deleted successfully');
     setTimeout(() => setSuccessMsg(''), 3000);
   };

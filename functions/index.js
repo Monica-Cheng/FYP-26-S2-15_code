@@ -2564,6 +2564,387 @@ exports.adminDeletePost = onCall(async (request) => {
   };
 });
 
+function normalizeInjuryCategoryInput(rawData) {
+  const data =
+    rawData && typeof rawData === "object" && !Array.isArray(rawData) ?
+      rawData :
+      {};
+
+  const name =
+    typeof data.name === "string" ?
+      data.name.trim() :
+      "";
+
+  const bodyPart =
+    typeof data.bodyPart === "string" ?
+      data.bodyPart.trim() :
+      "";
+
+  const description =
+    typeof data.description === "string" ?
+      data.description.trim() :
+      "";
+
+  if (!name) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Injury category name is required.",
+    );
+  }
+
+  if (!bodyPart) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Body part is required.",
+    );
+  }
+
+  if (!description) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Description is required.",
+    );
+  }
+
+  if (name.length > 100) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Injury category name cannot exceed 100 characters.",
+    );
+  }
+
+  if (bodyPart.length > 100) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Body part cannot exceed 100 characters.",
+    );
+  }
+
+  if (description.length > 500) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Description cannot exceed 500 characters.",
+    );
+  }
+
+  return {
+    name,
+    bodyPart,
+    description,
+  };
+}
+
+async function ensureUniqueInjuryCategoryName(
+    name,
+    excludedCategoryId = null,
+) {
+  const snapshot = await db.collection("injuryCategories").get();
+  const normalizedName = name.trim().toLowerCase();
+
+  const duplicate = snapshot.docs.find((categoryDoc) => {
+    if (excludedCategoryId && categoryDoc.id === excludedCategoryId) {
+      return false;
+    }
+
+    const existingName = categoryDoc.data()?.name;
+
+    return (
+      typeof existingName === "string" &&
+      existingName.trim().toLowerCase() === normalizedName
+    );
+  });
+
+  if (duplicate) {
+    throw new HttpsError(
+        "already-exists",
+        `An injury category named "${name}" already exists.`,
+    );
+  }
+}
+
+function exerciseUsesInjuryName(exerciseData, injuryName) {
+  const injuryRisks = exerciseData?.injuryRisk;
+
+  if (!Array.isArray(injuryRisks)) return false;
+
+  const normalizedName = injuryName.trim().toLowerCase();
+
+  return injuryRisks.some((risk) =>
+    typeof risk === "string" &&
+    risk.trim().toLowerCase() === normalizedName
+  );
+}
+
+/**
+ * Returns the injury categories and the limited exercise data required
+ * by the React Injuries dashboard.
+ */
+exports.adminListInjuriesDashboard = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const [injuriesSnapshot, exercisesSnapshot] = await Promise.all([
+    db.collection("injuryCategories").get(),
+    db.collection("exercises").get(),
+  ]);
+
+  const injuries = injuriesSnapshot.docs.map((categoryDoc) => ({
+    id: categoryDoc.id,
+    ...serializeAdminFirestoreValue(categoryDoc.data()),
+  }));
+
+  injuries.sort((a, b) =>
+    String(a.name || "").localeCompare(String(b.name || ""))
+  );
+
+  const exercises = exercisesSnapshot.docs.map((exerciseDoc) => {
+    const data = exerciseDoc.data();
+
+    return {
+      id: exerciseDoc.id,
+      name:
+        typeof data.name === "string" ?
+          data.name :
+          "",
+      injuryRisk:
+        Array.isArray(data.injuryRisk) ?
+          data.injuryRisk :
+          [],
+    };
+  });
+
+  return {
+    injuries,
+    exercises,
+  };
+});
+
+/**
+ * Creates one admin-managed injury category.
+ */
+exports.adminCreateInjuryCategory = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const category = normalizeInjuryCategoryInput(
+      request.data?.category,
+  );
+
+  await ensureUniqueInjuryCategoryName(category.name);
+
+  const categoryRef = await db.collection("injuryCategories").add({
+    ...category,
+    createdAt: FieldValue.serverTimestamp(),
+    createdByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    categoryId: categoryRef.id,
+    category,
+  };
+});
+
+/**
+ * Updates one admin-managed injury category.
+ *
+ * Renaming is blocked while exercises still reference the previous name,
+ * because exercise.injuryRisk stores category names rather than document IDs.
+ */
+exports.adminUpdateInjuryCategory = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const categoryId =
+    typeof request.data?.categoryId === "string" ?
+      request.data.categoryId.trim() :
+      "";
+
+  const requestedChanges = request.data?.changes;
+
+  if (!categoryId) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Injury category ID is required.",
+    );
+  }
+
+  if (
+    !requestedChanges ||
+    typeof requestedChanges !== "object" ||
+    Array.isArray(requestedChanges)
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Injury category changes are required.",
+    );
+  }
+
+  const allowedFields = new Set([
+    "name",
+    "bodyPart",
+    "description",
+  ]);
+
+  const unsafeField = Object.keys(requestedChanges)
+      .find((field) => !allowedFields.has(field));
+
+  if (unsafeField) {
+    throw new HttpsError(
+        "invalid-argument",
+        `Injury category field "${unsafeField}" cannot be changed.`,
+    );
+  }
+
+  const categoryRef =
+    db.collection("injuryCategories").doc(categoryId);
+
+  const categorySnapshot = await categoryRef.get();
+
+  if (!categorySnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Injury category not found.",
+    );
+  }
+
+  const existing = categorySnapshot.data() || {};
+
+  const mergedCategory = normalizeInjuryCategoryInput({
+    name:
+      requestedChanges.name !== undefined ?
+        requestedChanges.name :
+        existing.name,
+    bodyPart:
+      requestedChanges.bodyPart !== undefined ?
+        requestedChanges.bodyPart :
+        existing.bodyPart,
+    description:
+      requestedChanges.description !== undefined ?
+        requestedChanges.description :
+        existing.description,
+  });
+
+  const oldName =
+    typeof existing.name === "string" ?
+      existing.name.trim() :
+      "";
+
+  const nameChanged =
+    mergedCategory.name.toLowerCase() !== oldName.toLowerCase();
+
+  if (nameChanged) {
+    await ensureUniqueInjuryCategoryName(
+        mergedCategory.name,
+        categoryId,
+    );
+
+    const exercisesSnapshot =
+      await db.collection("exercises").get();
+
+    const usageCount = exercisesSnapshot.docs.filter((exerciseDoc) =>
+      exerciseUsesInjuryName(exerciseDoc.data(), oldName)
+    ).length;
+
+    if (usageCount > 0) {
+      throw new HttpsError(
+          "failed-precondition",
+          `"${oldName}" is used by ${usageCount} exercise` +
+          `${usageCount === 1 ? "" : "s"}. Update those exercises ` +
+          "before renaming this category.",
+      );
+    }
+  }
+
+  await categoryRef.update({
+    ...mergedCategory,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    categoryId,
+    category: mergedCategory,
+  };
+});
+
+/**
+ * Deletes one injury category only when no exercise still references it.
+ */
+exports.adminDeleteInjuryCategory = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const categoryId =
+    typeof request.data?.categoryId === "string" ?
+      request.data.categoryId.trim() :
+      "";
+
+  const confirmation = request.data?.confirmation;
+
+  if (!categoryId) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Injury category ID is required.",
+    );
+  }
+
+  if (confirmation !== "DELETE INJURY") {
+    throw new HttpsError(
+        "failed-precondition",
+        "Injury category deletion confirmation is incorrect.",
+    );
+  }
+
+  const categoryRef =
+    db.collection("injuryCategories").doc(categoryId);
+
+  const categorySnapshot = await categoryRef.get();
+
+  if (!categorySnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Injury category not found.",
+    );
+  }
+
+  const category = categorySnapshot.data() || {};
+  const injuryName =
+    typeof category.name === "string" ?
+      category.name.trim() :
+      "";
+
+  const exercisesSnapshot =
+    await db.collection("exercises").get();
+
+  const referencingExercises = exercisesSnapshot.docs
+      .filter((exerciseDoc) =>
+        exerciseUsesInjuryName(exerciseDoc.data(), injuryName)
+      )
+      .map((exerciseDoc) => ({
+        id: exerciseDoc.id,
+        name: exerciseDoc.data()?.name || exerciseDoc.id,
+      }));
+
+  if (referencingExercises.length > 0) {
+    throw new HttpsError(
+        "failed-precondition",
+        `"${injuryName}" is still used by ` +
+        `${referencingExercises.length} exercise` +
+        `${referencingExercises.length === 1 ? "" : "s"}. ` +
+        "Remove the injury risk from those exercises first.",
+    );
+  }
+
+  await categoryRef.delete();
+
+  console.log(
+      `adminDeleteInjuryCategory: ${adminUid} deleted ${categoryId}`,
+  );
+
+  return {
+    success: true,
+    categoryId,
+  };
+});
+
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
 // plaintext .env value — the previous approach in the Flutter app bundled
 // .env as a Flutter asset (pubspec.yaml's flutter:assets:), which ships it
