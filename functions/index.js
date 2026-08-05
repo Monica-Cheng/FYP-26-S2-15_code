@@ -3703,6 +3703,299 @@ exports.adminUpdateSettings = onCall(async (request) => {
   };
 });
 
+function adminAnalyticsAverage(items, fieldName) {
+  const values = items
+      .map((item) => Number(item?.[fieldName]))
+      .filter((value) => Number.isFinite(value));
+
+  if (values.length === 0) return null;
+
+  const total = values.reduce(
+      (sum, value) => sum + value,
+      0,
+  );
+
+  return Math.round((total / values.length) * 10) / 10;
+}
+
+function isAdminAnalyticsMealPost(post) {
+  const postType =
+    typeof post?.type === "string" ?
+      post.type.trim().toLowerCase() :
+      "";
+
+  if (postType === "meal") return true;
+
+  const hasFoodName =
+    typeof post?.foodName === "string" &&
+    post.foodName.trim().length > 0;
+
+  const hasNutrition =
+    ["proteinG", "carbsG", "fatG"].some(
+        (field) => Number.isFinite(Number(post?.[field])),
+    );
+
+  return hasFoodName && hasNutrition;
+}
+
+function normalizeAdminPartnerStatus(partner) {
+  const rawStatus =
+    typeof partner?.status === "string" ?
+      partner.status.trim().toLowerCase() :
+      "";
+
+  if (
+    rawStatus === "approved" ||
+    partner?.isApproved === true
+  ) {
+    return "approved";
+  }
+
+  if (
+    rawStatus === "rejected" ||
+    partner?.isRejected === true
+  ) {
+    return "rejected";
+  }
+
+  return "pending";
+}
+
+/**
+ * Returns aggregated platform analytics to the React admin dashboard.
+ *
+ * Raw user and platform documents remain on the server. The browser receives
+ * only the counts, distributions and recent-activity fields needed by the UI.
+ */
+exports.adminGetAnalyticsDashboard = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const [
+    usersSnapshot,
+    plansSnapshot,
+    exercisesSnapshot,
+    partnersSnapshot,
+    challengesSnapshot,
+    postsSnapshot,
+  ] = await Promise.all([
+    db.collection("users").get(),
+    db.collection("plans").get(),
+    db.collection("exercises").get(),
+    db.collection("businessPartners").get(),
+    db.collection("challenges").get(),
+    db.collection("posts").get(),
+  ]);
+
+  const users = usersSnapshot.docs.map(
+      (document) => document.data(),
+  );
+
+  const exercises = exercisesSnapshot.docs.map(
+      (document) => document.data(),
+  );
+
+  const challenges = challengesSnapshot.docs.map(
+      (document) => document.data(),
+  );
+
+  const posts = postsSnapshot.docs.map(
+      (document) => document.data(),
+  );
+
+  const partners = partnersSnapshot.docs.map(
+      (document) => document.data(),
+  );
+
+  const levelCounts = {};
+
+  for (const user of users) {
+    const rawLevel = Number(user?.level);
+    const level =
+      Number.isInteger(rawLevel) && rawLevel > 0 ?
+        rawLevel :
+        1;
+
+    levelCounts[level] = (levelCounts[level] || 0) + 1;
+  }
+
+  const levelDistribution = Object.keys(levelCounts)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .map((level) => ({
+        label: `Lvl ${level}`,
+        value: levelCounts[level],
+      }));
+
+  const difficultyCounts = {
+    Beginner: 0,
+    Intermediate: 0,
+    Advanced: 0,
+  };
+
+  for (const exercise of exercises) {
+    const difficulty =
+      typeof exercise?.difficulty === "string" &&
+      exercise.difficulty.trim() ?
+        exercise.difficulty.trim() :
+        "Beginner";
+
+    difficultyCounts[difficulty] =
+      (difficultyCounts[difficulty] || 0) + 1;
+  }
+
+  const challengeTypeCounts = {
+    Global: 0,
+    Private: 0,
+  };
+
+  for (const challenge of challenges) {
+    if (challenge?.isGlobal === true) {
+      challengeTypeCounts.Global += 1;
+    } else {
+      challengeTypeCounts.Private += 1;
+    }
+  }
+
+  const mealPosts = posts.filter(
+      isAdminAnalyticsMealPost,
+  );
+
+  const totalReactions = posts.reduce(
+      (sum, post) =>
+        sum + (Number(post?.reactionCount) || 0),
+      0,
+  );
+
+  const totalComments = posts.reduce(
+      (sum, post) =>
+        sum + (Number(post?.commentCount) || 0),
+      0,
+  );
+
+  const partnerStatuses = partners.map(
+      normalizeAdminPartnerStatus,
+  );
+
+  const recentActivity = [];
+
+  for (const postDocument of postsSnapshot.docs) {
+    const post = postDocument.data();
+
+    if (!post?.createdAt) continue;
+
+    recentActivity.push({
+      createdAt:
+        serializeAdminFirestoreValue(post.createdAt),
+      icon: "📝",
+      text:
+        `${post.authorName || "A user"} posted` +
+        `${post.foodName ? ` "${post.foodName}"` : ""}`,
+    });
+  }
+
+  for (const planDocument of plansSnapshot.docs) {
+    const plan = planDocument.data();
+
+    if (!plan?.createdAt) continue;
+
+    recentActivity.push({
+      createdAt:
+        serializeAdminFirestoreValue(plan.createdAt),
+      icon: "📋",
+      text:
+        `New plan created: ` +
+        `"${plan.name || "Untitled plan"}"`,
+    });
+  }
+
+  for (const partnerDocument of partnersSnapshot.docs) {
+    const partner = partnerDocument.data();
+
+    if (!partner?.createdAt) continue;
+
+    recentActivity.push({
+      createdAt:
+        serializeAdminFirestoreValue(
+            partner.createdAt,
+        ),
+      icon: "🤝",
+      text:
+        "New business partner application: " +
+        (
+          partner.displayName ||
+          partner.businessName ||
+          partner.email ||
+          "Unknown"
+        ),
+    });
+  }
+
+  recentActivity.sort((first, second) => {
+    const firstDate = new Date(first.createdAt);
+    const secondDate = new Date(second.createdAt);
+
+    return secondDate.getTime() - firstDate.getTime();
+  });
+
+  return {
+    stats: {
+      totalUsers: usersSnapshot.size,
+      totalPlans: plansSnapshot.size,
+      totalExercises: exercisesSnapshot.size,
+      totalBP: partnersSnapshot.size,
+      totalChallenges: challengesSnapshot.size,
+
+      approvedBP: partnerStatuses.filter(
+          (status) => status === "approved",
+      ).length,
+
+      pendingBP: partnerStatuses.filter(
+          (status) => status === "pending",
+      ).length,
+
+      healthConnected: users.filter(
+          (user) => user?.healthConnected === true,
+      ).length,
+
+      onboarded: users.filter(
+          (user) => user?.onboardingComplete === true,
+      ).length,
+
+      suspended: users.filter(
+          (user) =>
+            user?.accountStatus === "suspended",
+      ).length,
+
+      premiumUsers: users.filter(
+          (user) => user?.isPremium === true,
+      ).length,
+
+      levelDistribution,
+      difficultyCounts,
+      challengeTypeCounts,
+
+      totalPosts: postsSnapshot.size,
+      totalMealPosts: mealPosts.length,
+      totalReactions,
+      totalComments,
+
+      avgCalories:
+        adminAnalyticsAverage(mealPosts, "calories"),
+
+      avgProtein:
+        adminAnalyticsAverage(mealPosts, "proteinG"),
+
+      avgCarbs:
+        adminAnalyticsAverage(mealPosts, "carbsG"),
+
+      avgFat:
+        adminAnalyticsAverage(mealPosts, "fatG"),
+
+      recentActivity: recentActivity.slice(0, 8),
+    },
+  };
+});
+
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
 // plaintext .env value — the previous approach in the Flutter app bundled
 // .env as a Flutter asset (pubspec.yaml's flutter:assets:), which ships it

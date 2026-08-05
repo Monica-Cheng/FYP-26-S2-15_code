@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { collection, getDocs } from 'firebase/firestore';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
 import AdminStyles, { COLORS } from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
@@ -19,17 +19,6 @@ const NEUTRAL_GRAY = '#9ca3af';
 
 const pct = (num, den) => (den > 0 ? Math.round((num / den) * 100) : 0);
 
-const isFiniteNumber = (v) => v !== undefined && v !== null && v !== '' && Number.isFinite(Number(v));
-
-// Rounds to one decimal only when a fraction actually appears, so whole
-// numbers don't grow a trailing ".0".
-const average = (items, key) => {
-  const valid = items.filter(item => isFiniteNumber(item[key])).map(item => Number(item[key]));
-  if (valid.length === 0) return null;
-  const mean = valid.reduce((sum, v) => sum + v, 0) / valid.length;
-  return Math.round(mean * 10) / 10;
-};
-
 function StatCard({ label, value, sub, icon, color }) {
   return (
     <div className="wwa-stat-card" style={{ '--accent': color.base, '--accent-light': color.light }}>
@@ -46,122 +35,68 @@ function StatCard({ label, value, sub, icon, color }) {
 function Analytics() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
-    const fetch = async () => {
+    const fetchAnalytics = async () => {
+      setLoading(true);
+      setLoadError('');
+  
       try {
-        const [usersSnap, plansSnap, exSnap, bpSnap, chSnap, postsSnap] = await Promise.all([
-          getDocs(collection(db, 'users')),
-          getDocs(collection(db, 'plans')),
-          getDocs(collection(db, 'exercises')),
-          getDocs(collection(db, 'businessPartners')),
-          getDocs(collection(db, 'challenges')),
-          getDocs(collection(db, 'posts')),
-        ]);
-        const users = usersSnap.docs.map(d => d.data());
-        const exercises = exSnap.docs.map(d => d.data());
-        const challenges = chSnap.docs.map(d => d.data());
-        const posts = postsSnap.docs.map(d => d.data());
-
-        // Level distribution — only levels actually present in the data,
-        // sorted numerically (same "no hardcoded list" approach as Users.js).
-        const levelCounts = {};
-        users.forEach(u => {
-          const lvl = u.level || 1;
-          levelCounts[lvl] = (levelCounts[lvl] || 0) + 1;
-        });
-        const levelDistribution = Object.keys(levelCounts)
-          .map(Number)
-          .sort((a, b) => a - b)
-          .map(lvl => ({ label: `Lvl ${lvl}`, value: levelCounts[lvl] }));
-
-        const difficultyCounts = { Beginner: 0, Intermediate: 0, Advanced: 0 };
-        exercises.forEach(e => {
-          const diff = e.difficulty || 'Beginner';
-          difficultyCounts[diff] = (difficultyCounts[diff] || 0) + 1;
-        });
-
-        const challengeTypeCounts = {};
-        challenges.forEach(c => {
-          const type = c.type || 'Uncategorized';
-          challengeTypeCounts[type] = (challengeTypeCounts[type] || 0) + 1;
-        });
-
-        // A "meal post" is defined by actually carrying nutrition data, not by
-        // a guessed `type` string — some posts may not log calories at all.
-        const mealPosts = posts.filter(p => isFiniteNumber(p.calories));
-        const totalReactions = posts.reduce((sum, p) => sum + (Number(p.reactionCount) || 0), 0);
-        const totalComments = posts.reduce((sum, p) => sum + (Number(p.commentCount) || 0), 0);
-
-        // Recent Activity — only from collections/fields that reliably carry
-        // a real timestamp. Plans and business partner docs may or may not
-        // have createdAt depending on how they were created, so each source
-        // is included opportunistically rather than assumed present; user
-        // documents have no registration timestamp anywhere in the app, so
-        // "recent registrations" is intentionally not offered here.
-        const events = [];
-        posts.forEach(p => {
-          const date = toDate(p.createdAt);
-          if (date) {
-            events.push({
-              date,
-              icon: '📝',
-              text: `${p.authorName || 'A user'} posted${p.foodName ? ` "${p.foodName}"` : ''}`,
-            });
-          }
-        });
-        plansSnap.docs.forEach(d => {
-          const data = d.data();
-          const date = toDate(data.createdAt);
-          if (date) {
-            events.push({ date, icon: '📋', text: `New plan created: "${data.name || 'Untitled plan'}"` });
-          }
-        });
-        bpSnap.docs.forEach(d => {
-          const data = d.data();
-          const date = toDate(data.createdAt);
-          if (date) {
-            events.push({
-              date,
-              icon: '🤝',
-              text: `New business partner application: ${data.displayName || data.businessName || data.email || 'Unknown'}`,
-            });
-          }
-        });
-        events.sort((a, b) => b.date - a.date);
-        const recentActivity = events.slice(0, 8).map(e => ({ ...e, dateLabel: formatDate(e.date) }));
-
+        const adminGetAnalyticsDashboard = httpsCallable(
+          functions,
+          'adminGetAnalyticsDashboard'
+        );
+  
+        const result = await adminGetAnalyticsDashboard();
+        const receivedStats = result.data?.stats;
+  
+        if (!receivedStats) {
+          throw new Error('Analytics data was missing from the server response.');
+        }
+  
+        const recentActivity = Array.isArray(receivedStats.recentActivity)
+          ? receivedStats.recentActivity.map(event => {
+              const date = toDate(event.createdAt);
+  
+              return {
+                ...event,
+                dateLabel: date ? formatDate(date) : '—',
+              };
+            })
+          : [];
+  
         setStats({
-          totalUsers: usersSnap.size,
-          totalPlans: plansSnap.size,
-          totalExercises: exSnap.size,
-          totalBP: bpSnap.size,
-          totalChallenges: chSnap.size,
-          approvedBP: bpSnap.docs.filter(d => d.data().status === 'approved').length,
-          pendingBP: bpSnap.docs.filter(d => d.data().status === 'pending').length,
-          healthConnected: users.filter(u => u.healthConnected).length,
-          onboarded: users.filter(u => u.onboardingComplete).length,
-          suspended: users.filter(u => u.accountStatus === 'suspended').length,
-          premiumUsers: users.filter(u => u.isPremium).length,
-          levelDistribution,
-          difficultyCounts,
-          challengeTypeCounts,
-          totalPosts: postsSnap.size,
-          totalMealPosts: mealPosts.length,
-          totalReactions,
-          totalComments,
-          avgCalories: average(mealPosts, 'calories'),
-          avgProtein: average(mealPosts, 'proteinG'),
-          avgCarbs: average(mealPosts, 'carbsG'),
-          avgFat: average(mealPosts, 'fatG'),
+          ...receivedStats,
+          levelDistribution: Array.isArray(receivedStats.levelDistribution)
+            ? receivedStats.levelDistribution
+            : [],
+          difficultyCounts:
+            receivedStats.difficultyCounts &&
+            typeof receivedStats.difficultyCounts === 'object'
+              ? receivedStats.difficultyCounts
+              : {},
+          challengeTypeCounts:
+            receivedStats.challengeTypeCounts &&
+            typeof receivedStats.challengeTypeCounts === 'object'
+              ? receivedStats.challengeTypeCounts
+              : {},
           recentActivity,
         });
       } catch (err) {
-        console.error(err);
+        console.error('Failed to load analytics:', err);
+  
+        const detail = err?.code ? ` (${err.code})` : '';
+  
+        setLoadError(
+          `Failed to load analytics.${detail}`
+        );
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
-    fetch();
+  
+    fetchAnalytics();
   }, []);
 
   const onboardedPct = stats ? pct(stats.onboarded, stats.totalUsers) : 0;
@@ -214,15 +149,7 @@ function Analytics() {
     },
   ] : [];
 
-  // Only surfaces sentences the loaded data can actually support — nothing
-  // here is a guess, each is a direct percentage of already-fetched fields.
-  const insights = stats && stats.totalUsers > 0 ? [
-    `${onboardedPct}% of registered users have completed onboarding.`,
-    `${healthPct}% of users have connected health data.`,
-    `${activePct}% of users are currently active.`,
-    `${premiumPct}% of users are currently premium.`,
-  ] : [];
-
+  
   // Only zero-value item that still warrants a callout is "no premium
   // users" — every other zero is a good outcome and is omitted.
   const attentionItems = [];
@@ -323,117 +250,154 @@ function Analytics() {
   return (
     <div>
       <AdminStyles />
+  
       <PageHeader
         title="Analytics"
-        subtitle={loading ? 'Loading analytics…' : 'Platform overview — live from Firebase'}
-        actions={!loading && stats && (
-          <button className="wwa-btn wwa-btn-sm wwa-btn-success" onClick={handleExport}>
-            📤 Export to Excel
-          </button>
-        )}
+        subtitle={
+          loading
+            ? 'Loading analytics…'
+            : 'Platform overview — live from Firebase'
+        }
+        actions={
+          !loading &&
+          stats && (
+            <button
+              className="wwa-btn wwa-btn-sm wwa-btn-success"
+              onClick={handleExport}
+            >
+              📤 Export to Excel
+            </button>
+          )
+        }
       />
-
+  
       {loading ? (
         <div className="wwa-stats-grid">
-          {Array.from({ length: 10 }).map((_, i) => <SkeletonBlock key={i} height={110} />)}
+          {Array.from({ length: 10 }).map((_, i) => (
+            <SkeletonBlock key={i} height={110} />
+          ))}
+        </div>
+      ) : loadError ? (
+        <div className="wwa-panel">
+          <div className="wwa-alert-error">
+            {loadError}
+          </div>
+        </div>
+      ) : !stats ? (
+        <div className="wwa-panel">
+          <EmptyState
+            icon="📊"
+            title="No analytics available"
+            message="The analytics data could not be loaded."
+          />
         </div>
       ) : (
         <>
           <div className="wwa-stats-grid">
             {cards.map(card => (
-              <StatCard key={card.label} label={card.label} value={card.value} sub={card.sub} icon={card.icon} color={card.color} />
+              <StatCard
+                key={card.label}
+                label={card.label}
+                value={card.value}
+                sub={card.sub}
+                icon={card.icon}
+                color={card.color}
+              />
             ))}
           </div>
-
+  
           <div className="wwa-charts-grid">
             <DonutChart
               title="Premium vs Free Users"
               data={[
-                { label: 'Premium', value: stats.premiumUsers, color: BRAND_PURPLE },
-                { label: 'Free', value: stats.totalUsers - stats.premiumUsers, color: NEUTRAL_GRAY },
+                {
+                  label: 'Premium',
+                  value: stats.premiumUsers,
+                  color: BRAND_PURPLE,
+                },
+                {
+                  label: 'Free',
+                  value:
+                    stats.totalUsers -
+                    stats.premiumUsers,
+                  color: NEUTRAL_GRAY,
+                },
               ]}
             />
+  
             <DonutChart
               title="Active vs Suspended Users"
               data={[
-                { label: 'Active', value: stats.totalUsers - stats.suspended, color: STATUS_GREEN },
-                { label: 'Suspended', value: stats.suspended, color: STATUS_RED },
+                {
+                  label: 'Active',
+                  value:
+                    stats.totalUsers -
+                    stats.suspended,
+                  color: STATUS_GREEN,
+                },
+                {
+                  label: 'Suspended',
+                  value: stats.suspended,
+                  color: STATUS_RED,
+                },
               ]}
             />
+  
             <DonutChart
               title="Health Connected"
               data={[
-                { label: 'Connected', value: stats.healthConnected, color: STATUS_GREEN },
-                { label: 'Not Connected', value: stats.totalUsers - stats.healthConnected, color: NEUTRAL_GRAY },
+                {
+                  label: 'Connected',
+                  value: stats.healthConnected,
+                  color: STATUS_GREEN,
+                },
+                {
+                  label: 'Not Connected',
+                  value:
+                    stats.totalUsers -
+                    stats.healthConnected,
+                  color: NEUTRAL_GRAY,
+                },
               ]}
             />
+  
             {stats.levelDistribution.length > 0 && (
-              <BarChart title="User Level Distribution" data={stats.levelDistribution} color={BRAND_PURPLE} />
+              <BarChart
+                title="User Level Distribution"
+                data={stats.levelDistribution}
+                color={BRAND_PURPLE}
+              />
             )}
           </div>
-
+  
           {contentCards.length > 0 && (
             <div className="wwa-panel">
-              <div className="wwa-panel-title">Content Analytics</div>
-              <div className="wwa-panel-subtitle">Derived from the posts collection</div>
+              <div className="wwa-panel-title">
+                Content Analytics
+              </div>
+  
+              <div className="wwa-panel-subtitle">
+                Derived from the posts collection
+              </div>
+  
               <div className="wwa-stats-grid">
                 {contentCards.map(card => (
-                  <StatCard key={card.label} label={card.label} value={card.value} icon={card.icon} color={card.color} />
+                  <StatCard
+                    key={card.label}
+                    label={card.label}
+                    value={card.value}
+                    icon={card.icon}
+                    color={card.color}
+                  />
                 ))}
               </div>
             </div>
           )}
-
-          <div className="wwa-insights-grid">
-            <div className="wwa-panel">
-              <div className="wwa-panel-title">Platform Insights</div>
-              <div className="wwa-panel-subtitle">Automatically generated from current data</div>
-              {insights.length > 0 ? (
-                insights.map(text => (
-                  <div key={text} className="wwa-insight-row">
-                    <span className="wwa-insight-icon">💡</span>
-                    <span>{text}</span>
-                  </div>
-                ))
-              ) : (
-                <EmptyState icon="💡" message="Not enough data yet to generate insights." />
-              )}
-            </div>
-
-            <div className="wwa-panel wwa-attention-panel">
-              <div className="wwa-panel-title">Needs Attention</div>
-              <div className="wwa-panel-subtitle">Actionable items for the admin team</div>
-              {attentionItems.length > 0 ? (
-                attentionItems.map(text => (
-                  <div key={text} className="wwa-attention-row">
-                    <span>{text}</span>
-                  </div>
-                ))
-              ) : (
-                <EmptyState icon="✅" message="Nothing needs attention right now." />
-              )}
-            </div>
-          </div>
-
-          <div className="wwa-panel">
-            <div className="wwa-panel-title">Recent Activity</div>
-            <div className="wwa-panel-subtitle">Latest timestamped events across the platform</div>
-            {stats.recentActivity.length > 0 ? (
-              stats.recentActivity.map((event, i) => (
-                <div key={i} className="wwa-recent-row">
-                  <span className="wwa-recent-icon">{event.icon}</span>
-                  <span className="wwa-recent-text">{event.text}</span>
-                  <span className="wwa-recent-date">{event.dateLabel}</span>
-                </div>
-              ))
-            ) : (
-              <EmptyState icon="🕒" message="No recent activity with a reliable timestamp yet." />
-            )}
-          </div>
+  
+          
         </>
       )}
     </div>
   );
-}
-
+  }
 export default Analytics;

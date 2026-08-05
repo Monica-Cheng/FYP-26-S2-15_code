@@ -25,7 +25,8 @@ function App() {
 
   const renderPage = () => {
     switch (currentPage) {
-      case 'dashboard': return <Dashboard />;
+      case 'dashboard':
+        return <Dashboard setCurrentPage={setCurrentPage} />;
       case 'users': return <Users />;
       case 'businessPartners': return <BusinessPartners />;
       case 'exercises': return <Exercises />;
@@ -37,7 +38,7 @@ function App() {
       case 'injuries': return <Injuries />;
       case 'broadcasts': return <Broadcasts />;
       case 'badges': return <Badges />;
-      default: return <Dashboard />;
+      default: return <Dashboard setCurrentPage={setCurrentPage} />;
     }
   };
 
