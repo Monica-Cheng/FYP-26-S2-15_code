@@ -1,9 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import SkeletonBlock from '../components/ui/SkeletonBlock';
+
+const adminGetSettingsDashboard = httpsCallable(
+  functions,
+  'adminGetSettingsDashboard'
+);
+
+const adminUpdateSettings = httpsCallable(
+  functions,
+  'adminUpdateSettings'
+);
 
 const defaultSubscription = {
   freeTierAIMessages: 10,
@@ -223,6 +233,7 @@ function SettingRow({ label, sub, children }) {
 
 function Settings() {
   const [subscription, setSubscription] = useState(defaultSubscription);
+  const [loadedSubscription, setLoadedSubscription] = useState(defaultSubscription);
 
   const [config, setConfig] = useState(null);
   const [loadedConfig, setLoadedConfig] = useState(null);
@@ -238,10 +249,28 @@ function Settings() {
   useEffect(() => {
     const fetchConfig = async () => {
       try {
-        const snap = await getDoc(doc(db, 'appConfig', 'gamification'));
-        const merged = mergeConfig(snap.exists() ? snap.data() : null);
+        const result = await adminGetSettingsDashboard();
+
+        const gamification = result.data.gamification;
+        const subscription = result.data.subscription;
+
+        const merged = mergeConfig(gamification);
+
         setConfig(merged);
         setLoadedConfig(merged);
+        const loadedSubscriptionData = {
+          freeTierAIMessages:
+            Number.isInteger(subscription?.freeTierAIMessages)
+              ? subscription.freeTierAIMessages
+              : defaultSubscription.freeTierAIMessages,
+          premiumPrice:
+            Number.isFinite(Number(subscription?.premiumPrice))
+              ? Number(subscription.premiumPrice)
+              : defaultSubscription.premiumPrice,
+        };
+        
+        setSubscription(loadedSubscriptionData);
+        setLoadedSubscription(loadedSubscriptionData);
       } catch (err) {
         console.error(err);
         const detail = err && err.code ? ` (${err.code})` : '';
@@ -264,6 +293,21 @@ function Settings() {
 
   const handleSaveClick = () => {
     const errors = validateConfig(config);
+    if (
+      !Number.isInteger(subscription.freeTierAIMessages) ||
+      subscription.freeTierAIMessages < 0
+    ) {
+      errors['subscription.freeTierAIMessages'] =
+        'Free-tier AI messages must be a non-negative whole number.';
+    }
+    
+    if (
+      !Number.isFinite(subscription.premiumPrice) ||
+      subscription.premiumPrice < 0
+    ) {
+      errors['subscription.premiumPrice'] =
+        'Premium price must be a non-negative number.';
+    }
     setFieldErrors(errors);
     setSaveError('');
     setSaveSuccess('');
@@ -278,33 +322,42 @@ function Settings() {
 
   const handleConfirmSave = async () => {
     const updates = buildUpdates(config, loadedConfig);
+  
     setConfirmingSave(false);
     setSaving(true);
     setSaveError('');
     setSaveSuccess('');
-
-    const tasks = [setDoc(doc(db, 'adminSettings', 'global'), subscription)];
-    if (Object.keys(updates).length > 0) {
-      tasks.push(updateDoc(doc(db, 'appConfig', 'gamification'), updates));
-    }
-
-    const results = await Promise.allSettled(tasks);
-    const failed = results.filter(r => r.status === 'rejected');
-
-    if (failed.length === 0) {
+  
+    try {
+      await adminUpdateSettings({
+        subscription,
+        gamificationUpdates: updates,
+      });
+  
       setLoadedConfig(config);
+      setLoadedSubscription(subscription);
+  
       setSaveSuccess('Settings saved successfully.');
       setTimeout(() => setSaveSuccess(''), 3000);
-    } else {
-      failed.forEach(f => console.error(f.reason));
-      const detail = failed[0].reason && failed[0].reason.code ? ` (${failed[0].reason.code})` : '';
-      setSaveError(`Some settings failed to save.${detail} Please try again.`);
+    } catch (err) {
+      console.error('Failed to save settings:', err);
+  
+      const detail = err?.code ? ` (${err.code})` : '';
+  
+      setSaveError(
+        `Failed to save settings.${detail} Please try again.`
+      );
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const handleReset = () => {
-    if (loadedConfig) setConfig(loadedConfig);
+    if (loadedConfig) {
+      setConfig(loadedConfig);
+    }
+  
+    setSubscription(loadedSubscription);
     setFieldErrors({});
     setSaveError('');
     setSaveSuccess('');
@@ -611,19 +664,82 @@ function Settings() {
         </>
       )}
 
-      <div className="wwa-panel">
-        <div className="wwa-panel-title">Subscription</div>
-        <div className="wwa-panel-subtitle">Free vs premium tier limits</div>
+<div className="wwa-panel">
+  <div className="wwa-panel-title">Subscription</div>
+  <div className="wwa-panel-subtitle">Free vs premium tier limits</div>
 
-        <SettingRow label="Free tier AI messages/month" sub="Cap for free users on WiseCoach chat">
-          <input type="number" className="wwa-input wwa-input-sm" value={subscription.freeTierAIMessages}
-            onChange={e => setSubscription(p => ({ ...p, freeTierAIMessages: Number(e.target.value) }))} />
-        </SettingRow>
-        <SettingRow label="Premium price (USD/month)" sub="Monthly subscription price">
-          <input type="number" className="wwa-input wwa-input-sm" value={subscription.premiumPrice}
-            onChange={e => setSubscription(p => ({ ...p, premiumPrice: Number(e.target.value) }))} />
-        </SettingRow>
-      </div>
+  <SettingRow
+    label="Free tier AI messages/month"
+    sub="Cap for free users on WiseCoach chat"
+  >
+    <div>
+      <input
+        type="number"
+        min="0"
+        step="1"
+        className="wwa-input wwa-input-sm"
+        value={subscription.freeTierAIMessages}
+        onChange={e =>
+          setSubscription(prev => ({
+            ...prev,
+            freeTierAIMessages:
+              e.target.value === ''
+                ? 0
+                : Number(e.target.value),
+          }))
+        }
+      />
+
+      {fieldErrors['subscription.freeTierAIMessages'] && (
+        <div
+          style={{
+            color: '#cc3333',
+            fontSize: 12,
+            marginTop: 4,
+          }}
+        >
+          {fieldErrors['subscription.freeTierAIMessages']}
+        </div>
+      )}
+    </div>
+  </SettingRow>
+
+  <SettingRow
+    label="Premium price (USD/month)"
+    sub="Monthly subscription price"
+  >
+    <div>
+      <input
+        type="number"
+        min="0"
+        step="0.01"
+        className="wwa-input wwa-input-sm"
+        value={subscription.premiumPrice}
+        onChange={e =>
+          setSubscription(prev => ({
+            ...prev,
+            premiumPrice:
+              e.target.value === ''
+                ? 0
+                : Number(e.target.value),
+          }))
+        }
+      />
+
+      {fieldErrors['subscription.premiumPrice'] && (
+        <div
+          style={{
+            color: '#cc3333',
+            fontSize: 12,
+            marginTop: 4,
+          }}
+        >
+          {fieldErrors['subscription.premiumPrice']}
+        </div>
+      )}
+    </div>
+  </SettingRow>
+</div>
     </div>
   );
 }

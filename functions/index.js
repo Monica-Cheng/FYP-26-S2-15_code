@@ -3333,6 +3333,376 @@ exports.adminDeleteBadge = onCall(async (request) => {
   };
 });
 
+const ADMIN_GAMIFICATION_UPDATE_PATHS = new Set([
+  "cardioAntiCheat.indoor.accrualPauseDebounceTicks",
+  "cardioAntiCheat.indoor.accrualResumeDebounceTicks",
+  "cardioAntiCheat.indoor.stillnessVarianceThreshold",
+  "cardioAntiCheat.indoor.stillnessWindowSeconds",
+
+  "cardioAntiCheat.outdoor.accrualPauseDebounceTicks",
+  "cardioAntiCheat.outdoor.accrualResumeDebounceTicks",
+  "cardioAntiCheat.outdoor.defaultMaxSpeedKmh",
+  "cardioAntiCheat.outdoor.maxSpeedKmhByActivity.Cycle",
+  "cardioAntiCheat.outdoor.maxSpeedKmhByActivity.Run",
+  "cardioAntiCheat.outdoor.maxSpeedKmhByActivity.Walk",
+  "cardioAntiCheat.outdoor.speedRollingWindowSeconds",
+  "cardioAntiCheat.outdoor.stationaryThresholdMeters",
+  "cardioAntiCheat.outdoor.stationaryWindowSeconds",
+
+  "gymCalories.minCalories",
+  "gymCalories.maxCalories",
+  "gymCalories.setsCoefficient",
+  "gymCalories.volumeCoefficient",
+
+  "gymTiming.minSecondsPerRep",
+  "gymTiming.minSetTransitionSeconds",
+
+  "xp.cardioMinXp",
+  "xp.cardioMaxXp",
+  "xp.cardioPerCalorieRate",
+  "xp.gymPerSet",
+
+  "levelThresholds",
+]);
+
+const ADMIN_INTEGER_CONFIG_PATHS = new Set([
+  "cardioAntiCheat.indoor.accrualPauseDebounceTicks",
+  "cardioAntiCheat.indoor.accrualResumeDebounceTicks",
+  "cardioAntiCheat.outdoor.accrualPauseDebounceTicks",
+  "cardioAntiCheat.outdoor.accrualResumeDebounceTicks",
+  "xp.gymPerSet",
+]);
+
+const ADMIN_POSITIVE_CONFIG_PATHS = new Set([
+  "cardioAntiCheat.outdoor.defaultMaxSpeedKmh",
+  "cardioAntiCheat.outdoor.maxSpeedKmhByActivity.Cycle",
+  "cardioAntiCheat.outdoor.maxSpeedKmhByActivity.Run",
+  "cardioAntiCheat.outdoor.maxSpeedKmhByActivity.Walk",
+]);
+
+function normalizeAdminSubscription(rawSubscription) {
+  const data =
+    rawSubscription &&
+    typeof rawSubscription === "object" &&
+    !Array.isArray(rawSubscription) ?
+      rawSubscription :
+      {};
+
+  const freeTierAIMessages = Number(data.freeTierAIMessages);
+  const premiumPrice = Number(data.premiumPrice);
+
+  if (
+    !Number.isInteger(freeTierAIMessages) ||
+    freeTierAIMessages < 0
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Free-tier AI messages must be a non-negative whole number.",
+    );
+  }
+
+  if (
+    !Number.isFinite(premiumPrice) ||
+    premiumPrice < 0
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Premium price must be a valid non-negative number.",
+    );
+  }
+
+  return {
+    freeTierAIMessages,
+    premiumPrice,
+  };
+}
+
+function normalizeAdminLevelThresholds(rawThresholds) {
+  if (
+    !Array.isArray(rawThresholds) ||
+    rawThresholds.length === 0
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "At least one level threshold is required.",
+    );
+  }
+
+  const thresholds = rawThresholds.map((rawValue, index) => {
+    const value = Number(rawValue);
+
+    if (
+      !Number.isInteger(value) ||
+      value < 0
+    ) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Level ${index + 1} threshold must be a non-negative whole number.`,
+      );
+    }
+
+    return value;
+  });
+
+  if (thresholds[0] !== 0) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Level 1 threshold must remain 0.",
+    );
+  }
+
+  for (let index = 1; index < thresholds.length; index++) {
+    if (thresholds[index] <= thresholds[index - 1]) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Level ${index + 1} threshold must be greater than Level ${index}.`,
+      );
+    }
+  }
+
+  return thresholds;
+}
+
+function normalizeAdminGamificationUpdates(rawUpdates) {
+  if (
+    !rawUpdates ||
+    typeof rawUpdates !== "object" ||
+    Array.isArray(rawUpdates)
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Gamification updates must be an object.",
+    );
+  }
+
+  const updateEntries = Object.entries(rawUpdates);
+
+  const unsupportedPath = updateEntries.find(
+      ([path]) => !ADMIN_GAMIFICATION_UPDATE_PATHS.has(path),
+  );
+
+  if (unsupportedPath) {
+    throw new HttpsError(
+        "invalid-argument",
+        `Configuration field "${unsupportedPath[0]}" cannot be changed.`,
+    );
+  }
+
+  const normalized = {};
+
+  for (const [path, rawValue] of updateEntries) {
+    if (path === "levelThresholds") {
+      normalized[path] =
+        normalizeAdminLevelThresholds(rawValue);
+      continue;
+    }
+
+    const value = Number(rawValue);
+
+    if (!Number.isFinite(value)) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Configuration field "${path}" must be a valid number.`,
+      );
+    }
+
+    if (
+      ADMIN_INTEGER_CONFIG_PATHS.has(path) &&
+      (!Number.isInteger(value) || value < 0)
+    ) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Configuration field "${path}" must be a non-negative whole number.`,
+      );
+    }
+
+    if (
+      ADMIN_POSITIVE_CONFIG_PATHS.has(path) &&
+      value <= 0
+    ) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Configuration field "${path}" must be greater than 0.`,
+      );
+    }
+
+    if (
+      !ADMIN_POSITIVE_CONFIG_PATHS.has(path) &&
+      !ADMIN_INTEGER_CONFIG_PATHS.has(path) &&
+      value < 0
+    ) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Configuration field "${path}" cannot be negative.`,
+      );
+    }
+
+    normalized[path] = value;
+  }
+
+  if (
+    normalized["gymCalories.minCalories"] !== undefined ||
+    normalized["gymCalories.maxCalories"] !== undefined
+  ) {
+    // The final relationship is also checked again against the stored
+    // document inside adminUpdateSettings.
+  }
+
+  return normalized;
+}
+
+/**
+ * Returns the system configuration used by the Settings dashboard.
+ */
+exports.adminGetSettingsDashboard = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const [gamificationSnapshot, subscriptionSnapshot] =
+    await Promise.all([
+      db.collection("appConfig")
+          .doc("gamification")
+          .get(),
+      db.collection("adminSettings")
+          .doc("global")
+          .get(),
+    ]);
+
+  return {
+    gamification: gamificationSnapshot.exists ?
+      serializeAdminFirestoreValue(
+          gamificationSnapshot.data(),
+      ) :
+      null,
+
+    subscription: subscriptionSnapshot.exists ?
+      serializeAdminFirestoreValue(
+          subscriptionSnapshot.data(),
+      ) :
+      {
+        freeTierAIMessages: 10,
+        premiumPrice: 9.99,
+      },
+  };
+});
+
+/**
+ * Securely updates the gamification configuration and subscription settings.
+ *
+ * Only the explicitly supported paths used by Settings.js may be changed.
+ */
+exports.adminUpdateSettings = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const subscription =
+    normalizeAdminSubscription(
+        request.data?.subscription,
+    );
+
+  const gamificationUpdates =
+    normalizeAdminGamificationUpdates(
+        request.data?.gamificationUpdates || {},
+    );
+
+  const gamificationRef =
+    db.collection("appConfig").doc("gamification");
+
+  const gamificationSnapshot =
+    await gamificationRef.get();
+
+  if (!gamificationSnapshot.exists) {
+    throw new HttpsError(
+        "failed-precondition",
+        "The gamification configuration document does not exist.",
+    );
+  }
+
+  const existing = gamificationSnapshot.data() || {};
+
+  const currentMinimumCalories =
+    Number(existing.gymCalories?.minCalories);
+
+  const currentMaximumCalories =
+    Number(existing.gymCalories?.maxCalories);
+
+  const nextMinimumCalories =
+    gamificationUpdates["gymCalories.minCalories"] ??
+    currentMinimumCalories;
+
+  const nextMaximumCalories =
+    gamificationUpdates["gymCalories.maxCalories"] ??
+    currentMaximumCalories;
+
+  if (
+    Number.isFinite(nextMinimumCalories) &&
+    Number.isFinite(nextMaximumCalories) &&
+    nextMaximumCalories < nextMinimumCalories
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Maximum gym calories must be greater than or equal to minimum gym calories.",
+    );
+  }
+
+  const currentMinimumXp =
+    Number(existing.xp?.cardioMinXp);
+
+  const currentMaximumXp =
+    Number(existing.xp?.cardioMaxXp);
+
+  const nextMinimumXp =
+    gamificationUpdates["xp.cardioMinXp"] ??
+    currentMinimumXp;
+
+  const nextMaximumXp =
+    gamificationUpdates["xp.cardioMaxXp"] ??
+    currentMaximumXp;
+
+  if (
+    Number.isFinite(nextMinimumXp) &&
+    Number.isFinite(nextMaximumXp) &&
+    nextMaximumXp < nextMinimumXp
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Maximum cardio XP must be greater than or equal to minimum cardio XP.",
+    );
+  }
+
+  const batch = db.batch();
+
+  const subscriptionRef =
+    db.collection("adminSettings").doc("global");
+
+  batch.set(
+      subscriptionRef,
+      {
+        ...subscription,
+        updatedAt: FieldValue.serverTimestamp(),
+        updatedByAdminUid: adminUid,
+      },
+      {merge: true},
+  );
+
+  if (Object.keys(gamificationUpdates).length > 0) {
+    batch.update(
+        gamificationRef,
+        {
+          ...gamificationUpdates,
+          updatedAt: FieldValue.serverTimestamp(),
+          updatedByAdminUid: adminUid,
+        },
+    );
+  }
+
+  await batch.commit();
+
+  return {
+    success: true,
+    subscription,
+    gamificationUpdates,
+  };
+});
+
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
 // plaintext .env value — the previous approach in the Flutter app bundled
 // .env as a Flutter asset (pubspec.yaml's flutter:assets:), which ships it
