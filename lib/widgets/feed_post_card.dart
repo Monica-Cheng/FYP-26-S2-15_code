@@ -12,11 +12,13 @@ import 'package:go_router/go_router.dart';
 import '../core/app_theme.dart';
 import '../core/router.dart';
 import '../services/firestore_service.dart';
+import 'user_avatar.dart';
 
 class FeedPostCard extends StatelessWidget {
   final Map<String, dynamic> post;
   final String currentUid;
   final String currentUserName;
+  final String? currentUserPhotoBase64;
   final FirestoreService firestoreService;
 
   const FeedPostCard({
@@ -24,6 +26,7 @@ class FeedPostCard extends StatelessWidget {
     required this.post,
     required this.currentUid,
     required this.currentUserName,
+    this.currentUserPhotoBase64,
     required this.firestoreService,
   });
 
@@ -53,39 +56,6 @@ class FeedPostCard extends StatelessWidget {
     return '$n';
   }
 
-  // Real photo when the poster has one (authorPhotoBase64, denormalized
-  // onto the post the same way authorName/authorInitial already are —
-  // see createFeedPost()), falling back to the initials circle
-  // otherwise. Scoped to just this header for now — comment avatars and
-  // every other initials-circle elsewhere in the app (leaderboard,
-  // friend rows, etc.) still use initials only; updating those is a
-  // separate, larger follow-up, not part of this pass.
-  Widget _buildAvatar(String? photoBase64, String initial) {
-    if (photoBase64 != null && photoBase64.isNotEmpty) {
-      try {
-        return CircleAvatar(
-          radius: 18,
-          backgroundColor: WW.primary,
-          backgroundImage: MemoryImage(base64Decode(photoBase64)),
-        );
-      } catch (_) {
-        // Falls through to the initials circle below.
-      }
-    }
-    return CircleAvatar(
-      radius: 18,
-      backgroundColor: WW.primary,
-      child: Text(
-        initial,
-        style: const TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.w700,
-          fontSize: 14,
-        ),
-      ),
-    );
-  }
-
   void _openProfile(BuildContext context) {
     final uid = post['uid'] as String?;
     if (uid == null || uid.isEmpty) return;
@@ -107,6 +77,7 @@ class FeedPostCard extends StatelessWidget {
         postId: post['id'] as String,
         currentUid: currentUid,
         currentUserName: currentUserName,
+        currentUserPhotoBase64: currentUserPhotoBase64,
         firestoreService: firestoreService,
       ),
     );
@@ -235,7 +206,11 @@ class FeedPostCard extends StatelessWidget {
                     onTap: () => _openProfile(context),
                     child: Row(
                       children: [
-                        _buildAvatar(authorPhotoBase64, authorInitial),
+                        UserAvatar(
+                          photoBase64: authorPhotoBase64,
+                          initial: authorInitial,
+                          size: 36,
+                        ),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Column(
@@ -420,12 +395,14 @@ class _CommentsSheet extends StatefulWidget {
   final String postId;
   final String currentUid;
   final String currentUserName;
+  final String? currentUserPhotoBase64;
   final FirestoreService firestoreService;
 
   const _CommentsSheet({
     required this.postId,
     required this.currentUid,
     required this.currentUserName,
+    this.currentUserPhotoBase64,
     required this.firestoreService,
   });
 
@@ -452,6 +429,7 @@ class _CommentsSheetState extends State<_CommentsSheet> {
         widget.postId,
         uid: widget.currentUid,
         authorName: widget.currentUserName,
+        authorPhotoBase64: widget.currentUserPhotoBase64,
         text: text,
       );
       _controller.clear();
@@ -507,13 +485,16 @@ class _CommentsSheetState extends State<_CommentsSheet> {
           bottom: MediaQuery.of(context).viewInsets.bottom,
         ),
         child: Container(
-          height: MediaQuery.of(context).size.height * 0.65,
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.65,
+          ),
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
           decoration: const BoxDecoration(
             color: WW.card,
             borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
           ),
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
               Container(
                 width: 40,
@@ -529,43 +510,53 @@ class _CommentsSheetState extends State<_CommentsSheet> {
                 child: Text('Comments', style: WW.titleLarge),
               ),
               const SizedBox(height: 10),
-              Expanded(
+              // Flexible + shrinkWrap (not Expanded) so the sheet's
+              // comment area sizes to its actual content — with 0-1
+              // comments it used to still claim the full 65%-of-screen
+              // Expanded space, leaving a large empty gap above the
+              // input field. Still bounded/scrollable via the outer
+              // Container's maxHeight once there are enough comments to
+              // need it.
+              Flexible(
                 child: StreamBuilder<List<Map<String, dynamic>>>(
                   stream: widget.firestoreService.getCommentsStream(widget.postId),
                   builder: (context, snapshot) {
                     final comments = snapshot.data ?? [];
                     if (!snapshot.hasData) {
-                      return const Center(
-                        child: CircularProgressIndicator(color: WW.primary),
+                      return const SizedBox(
+                        height: 100,
+                        child: Center(
+                          child: CircularProgressIndicator(color: WW.primary),
+                        ),
                       );
                     }
                     if (comments.isEmpty) {
-                      return const Center(
-                        child: Text('No comments yet — be the first!',
-                            style: WW.labelMed),
+                      return const SizedBox(
+                        height: 60,
+                        child: Center(
+                          child: Text('No comments yet — be the first!',
+                              style: WW.labelMed),
+                        ),
                       );
                     }
                     return ListView.builder(
+                      shrinkWrap: true,
                       itemCount: comments.length,
                       itemBuilder: (context, i) {
                         final c = comments[i];
+                        final authorName = (c['authorName'] as String?) ?? '?';
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 12),
                           child: Row(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              CircleAvatar(
-                                radius: 14,
-                                backgroundColor: WW.primary,
-                                child: Text(
-                                  ((c['authorName'] as String?) ?? '?')
-                                      .substring(0, 1)
-                                      .toUpperCase(),
-                                  style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w700),
-                                ),
+                              UserAvatar(
+                                photoBase64: c['authorPhotoBase64'] as String?,
+                                initial: authorName.isNotEmpty
+                                    ? authorName[0].toUpperCase()
+                                    : '?',
+                                size: 28,
+                                initialFontSize: 11,
                               ),
                               const SizedBox(width: 10),
                               Expanded(
@@ -603,6 +594,7 @@ class _CommentsSheetState extends State<_CommentsSheet> {
                   },
                 ),
               ),
+              const SizedBox(height: 12),
               Row(
                 children: [
                   Expanded(

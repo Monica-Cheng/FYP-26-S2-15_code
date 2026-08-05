@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/app_theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../widgets/user_avatar.dart';
 
 // Full-page Friends screen — search, pending requests, and the friends
 // list. Reached via context.push(Routes.friends) from club_screen.dart's
@@ -95,12 +96,43 @@ class _FriendsScreenState extends State<FriendsScreen> {
     if (uid == null) return;
     _friendsSub = _firestoreService.getFriendsStream(uid).listen((friends) {
       if (mounted) setState(() => _friends = friends);
+      _enrichWithPhotos(friends, key: 'uid', onDone: (enriched) {
+        if (mounted) setState(() => _friends = enriched);
+      });
     });
     _friendRequestsSub = _firestoreService.getFriendRequestsStream(uid).listen((
       requests,
     ) {
       if (mounted) setState(() => _friendRequests = requests);
+      _enrichWithPhotos(requests, key: 'requesterUid', onDone: (enriched) {
+        if (mounted) setState(() => _friendRequests = enriched);
+      });
     });
+  }
+
+  // The friends/friendRequests subcollection docs are denormalized once at
+  // request/accept time (see acceptFriendRequest()/sendFriendRequest()) and
+  // never refreshed — so a photo uploaded afterwards wouldn't show up for
+  // any friend/request that predates it. Overlays a live photoBase64 from
+  // publicProfiles/{uid} onto each row instead, so this works retroactively
+  // for existing relationships too, not just new ones.
+  Future<void> _enrichWithPhotos(
+    List<Map<String, dynamic>> rows, {
+    required String key,
+    required void Function(List<Map<String, dynamic>>) onDone,
+  }) async {
+    final uids = rows
+        .map((r) => r[key] as String?)
+        .whereType<String>()
+        .toList();
+    if (uids.isEmpty) return;
+    final photos = await _firestoreService.getPublicPhotosByUids(uids);
+    if (photos.isEmpty) return;
+    onDone(rows.map((r) {
+      final uid = r[key] as String?;
+      final photo = uid != null ? photos[uid] : null;
+      return photo != null ? {...r, 'photoBase64': photo} : r;
+    }).toList());
   }
 
   void _onSearchChanged(String value) {
@@ -244,24 +276,14 @@ class _FriendsScreenState extends State<FriendsScreen> {
   // since Friends is now its own top-level widget/route rather than a
   // method sharing _ClubScreenState; the isMe branch is kept for parity
   // even though nothing here currently passes isMe: true.
-  Widget _avatar(String initial, {bool isMe = false}) {
-    return Container(
-      width: 40,
-      height: 40,
-      decoration: BoxDecoration(
-        color: isMe ? WW.primary : WW.elevated,
-        shape: BoxShape.circle,
-      ),
-      child: Center(
-        child: Text(
-          initial,
-          style: TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w700,
-            color: isMe ? Colors.white : WW.text,
-          ),
-        ),
-      ),
+  Widget _avatar(String initial, {String? photoBase64, bool isMe = false}) {
+    return UserAvatar(
+      photoBase64: photoBase64,
+      initial: initial,
+      size: 40,
+      backgroundColor: isMe ? WW.primary : WW.elevated,
+      initialColor: isMe ? Colors.white : WW.text,
+      initialFontSize: 15,
     );
   }
 
@@ -413,6 +435,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
     final name = user['displayName'] as String? ?? 'User';
     final username = user['username'] as String? ?? '';
     final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
+    final photoBase64 = user['photoBase64'] as String?;
     final uid = user['uid'] as String?;
     final isFriend = uid != null && _friends.any((f) => f['uid'] == uid);
     final isPending = uid != null && _pendingRequestUids.contains(uid);
@@ -473,7 +496,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
       ),
       child: Row(
         children: [
-          _avatar(initial),
+          _avatar(initial, photoBase64: photoBase64),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -572,6 +595,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
     final name = request['fromDisplayName'] as String? ?? 'User';
     final username = request['fromUsername'] as String? ?? '';
     final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
+    final photoBase64 = request['photoBase64'] as String?;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
@@ -581,7 +605,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
       ),
       child: Row(
         children: [
-          _avatar(initial),
+          _avatar(initial, photoBase64: photoBase64),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -638,6 +662,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
     final name = f['displayName'] as String? ?? 'Friend';
     final username = f['username'] as String? ?? '';
     final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
+    final photoBase64 = f['photoBase64'] as String?;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
@@ -647,7 +672,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
       ),
       child: Row(
         children: [
-          _avatar(initial),
+          _avatar(initial, photoBase64: photoBase64),
           const SizedBox(width: 12),
           // Name, username
           Expanded(

@@ -10,6 +10,7 @@ import '../../core/xp_levels.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/feed_post_card.dart';
+import '../../widgets/user_avatar.dart';
 
 class UserProfileScreen extends StatefulWidget {
   final String uid;
@@ -30,6 +31,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   final _firestoreService = FirestoreService();
 
   String? _displayName;
+  String? _photoBase64;
   bool _isLoading = true;
   String _myName = 'You';
 
@@ -98,6 +100,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       if (mounted) {
         setState(() {
           if (name != null && name.isNotEmpty) _displayName = name;
+          _photoBase64 = profile?['photoBase64'] as String?;
           _totalXp = (profile?['totalXp'] as num?)?.toInt() ?? 0;
           _level = (profile?['level'] as num?)?.toInt() ?? 1;
           _isLoading = false;
@@ -225,33 +228,31 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       decoration: WW.cardDecoration,
       child: Column(
         children: [
-          Container(
-            width: 72,
-            height: 72,
-            decoration: const BoxDecoration(
-              color: WW.primary,
-              shape: BoxShape.circle,
-            ),
-            child: Center(
-              child: _isLoading
-                  ? const SizedBox(
+          _isLoading
+              ? Container(
+                  width: 72,
+                  height: 72,
+                  decoration: const BoxDecoration(
+                    color: WW.primary,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Center(
+                    child: SizedBox(
                       width: 24,
                       height: 24,
                       child: CircularProgressIndicator(
                         color: Colors.white,
                         strokeWidth: 2.5,
                       ),
-                    )
-                  : Text(
-                      _initial,
-                      style: const TextStyle(
-                        fontSize: 26,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white,
-                      ),
                     ),
-            ),
-          ),
+                  ),
+                )
+              : UserAvatar(
+                  photoBase64: _photoBase64,
+                  initial: _initial,
+                  size: 72,
+                  initialFontSize: 26,
+                ),
           const SizedBox(height: 10),
           Text(
             _nameDisplay,

@@ -20,6 +20,7 @@ import '../../services/notification_service.dart';
 import '../../widgets/common/month_calendar.dart';
 import '../../widgets/quick_add_sheet.dart';
 import '../../widgets/session_resume_prompt.dart';
+import '../../widgets/user_avatar.dart';
 import '../business/coach_dashboard_screen.dart';
 import '../plans/plans_screen.dart';
 import '../coach/coach_screen.dart';
@@ -266,6 +267,7 @@ class _HomeTabState extends State<_HomeTab> {
   final _firestoreService = FirestoreService();
 
   String? _displayName;
+  String? _photoBase64;
   bool _isLoadingName = true;
   // Covers the whole "profile group" (display name, calorie goal settings,
   // tracked plan id/name) — see _loadProfileGroup(). One flag for the
@@ -340,6 +342,7 @@ class _HomeTabState extends State<_HomeTab> {
           _trackedPlanId = newPlanId;
           _displayName =
               doc.data()?['displayName'] as String? ?? _displayName;
+          _photoBase64 = doc.data()?['photoBase64'] as String?;
         });
         if (planChanged && newPlanId.isNotEmpty) {
           _startProgressStream(uid, newPlanId);
@@ -707,6 +710,7 @@ class _HomeTabState extends State<_HomeTab> {
 
       setState(() {
         _displayName = profile?['displayName'] as String?;
+        _photoBase64 = profile?['photoBase64'] as String?;
         _isLoadingName = false;
         _profileError = false;
         _calorieGoalActive = profile?['calorieGoalActive'] as bool? ?? false;
@@ -1414,24 +1418,14 @@ class _HomeTabState extends State<_HomeTab> {
           // Avatar → Profile screen
           GestureDetector(
             onTap: () => context.push(Routes.profile).then((_) => _loadUserData()),
-            child: Container(
-              width: 38,
-              height: 38,
-              decoration: BoxDecoration(
-                color: WW.chipBg,
-                shape: BoxShape.circle,
-                border: Border.all(color: WW.primary, width: 1.5),
-              ),
-              child: Center(
-                child: Text(
-                  initials,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w800,
-                    color: WW.primary,
-                  ),
-                ),
-              ),
+            child: UserAvatar(
+              photoBase64: _photoBase64,
+              initial: initials,
+              size: 38,
+              backgroundColor: WW.chipBg,
+              initialColor: WW.primary,
+              initialFontSize: 15,
+              border: Border.all(color: WW.primary, width: 1.5),
             ),
           ),
         ],
