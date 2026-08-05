@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { collection, getDocs, addDoc, updateDoc, deleteDoc, doc } from 'firebase/firestore';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import EmptyState from '../components/ui/EmptyState';
@@ -27,74 +27,185 @@ function Badges() {
 
   useEffect(() => {
     const fetchBadges = async () => {
+      setLoading(true);
+      setLoadError('');
+  
       try {
-        const snap = await getDocs(collection(db, 'badges'));
-        setBadges(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        const adminListBadgesDashboard = httpsCallable(
+          functions,
+          'adminListBadgesDashboard'
+        );
+  
+        const result = await adminListBadgesDashboard();
+        const data = result.data || {};
+  
+        setBadges(
+          Array.isArray(data.badges) ? data.badges : []
+        );
       } catch (err) {
-        console.error(err);
-        const detail = err && err.code ? ` (${err.code})` : '';
-        setLoadError(`Failed to load badges.${detail}`);
+        console.error('Failed to load badges dashboard:', err);
+  
+        const detail = err?.code ? ` (${err.code})` : '';
+  
+        setLoadError(
+          `Failed to load badges.${detail}`
+        );
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
+  
     fetchBadges();
   }, []);
 
   const handleAddBadge = async () => {
-    if (!addForm.name.trim()) { setAddError('Badge Name is required.'); return; }
-    if (!addForm.description.trim()) { setAddError('Description is required.'); return; }
-    if (addForm.imageUrl.trim() && !isValidImageUrl(addForm.imageUrl)) {
-      setAddError('Image URL must start with http:// or https://.');
+    if (!addForm.name.trim()) {
+      setAddError('Badge Name is required.');
       return;
     }
-    const conditionsError = validateConditions(addForm.conditions);
-    if (conditionsError) { setAddError(conditionsError); return; }
-
+  
+    if (!addForm.description.trim()) {
+      setAddError('Description is required.');
+      return;
+    }
+  
+    if (
+      addForm.imageUrl.trim() &&
+      !isValidImageUrl(addForm.imageUrl)
+    ) {
+      setAddError(
+        'Image URL must start with http:// or https://.'
+      );
+      return;
+    }
+  
+    const conditionsError = validateConditions(
+      addForm.conditions
+    );
+  
+    if (conditionsError) {
+      setAddError(conditionsError);
+      return;
+    }
+  
     setAddSaving(true);
     setAddError('');
+  
     try {
       const payload = {
         name: addForm.name.trim(),
         description: addForm.description.trim(),
         imageUrl: addForm.imageUrl.trim(),
-        conditions: normalizeConditionsForSave(addForm.conditions),
+        conditions: normalizeConditionsForSave(
+          addForm.conditions
+        ),
       };
-      const docRef = await addDoc(collection(db, 'badges'), payload);
-      setBadges(prev => [...prev, { id: docRef.id, ...payload }]);
+  
+      const adminCreateBadge = httpsCallable(
+        functions,
+        'adminCreateBadge'
+      );
+  
+      const result = await adminCreateBadge({
+        badge: payload,
+      });
+  
+      setBadges(prev => [
+        ...prev,
+        {
+          id: result.data.badgeId,
+          ...(result.data.badge || payload),
+        },
+      ]);
+  
       setShowAddForm(false);
       setAddForm(emptyForm);
       setSuccessMsg('Badge added successfully');
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
-      console.error(err);
-      const detail = err && err.code ? ` (${err.code})` : '';
-      setAddError(`Failed to add badge. Please try again.${detail}`);
+      console.error('Failed to add badge:', err);
+  
+      const detail = err?.code ? ` (${err.code})` : '';
+  
+      setAddError(
+        `Failed to add badge. Please try again.${detail}`
+      );
+    } finally {
+      setAddSaving(false);
     }
-    setAddSaving(false);
   };
 
   // Partial update via the badge's existing document ID — never replaces
   // the whole document.
   const handleSaveBadge = async (badgeId, changes) => {
-    await updateDoc(doc(db, 'badges', badgeId), changes);
-    setBadges(prev => prev.map(b => b.id === badgeId ? { ...b, ...changes } : b));
+    const adminUpdateBadge = httpsCallable(
+      functions,
+      'adminUpdateBadge'
+    );
+  
+    const result = await adminUpdateBadge({
+      badgeId,
+      changes,
+    });
+  
+    const savedBadge =
+      result.data?.badge || changes;
+  
+    setBadges(prev =>
+      prev.map(badge =>
+        badge.id === badgeId
+          ? { ...badge, ...savedBadge }
+          : badge
+      )
+    );
   };
 
   // Deletes only the badge definition doc — users/{uid}/earnedBadges records
   // (if any exist) are never touched here; no cleanup logic for them exists
   // anywhere in this app today.
   const handleDeleteBadge = async (badgeId) => {
-    if (!window.confirm('Are you sure you want to permanently delete this badge? This action cannot be undone.')) return;
+    const badge = badges.find(item => item.id === badgeId);
+  
+    if (!badge) return;
+  
+    const confirmation = window.prompt(
+      `Permanently delete "${badge.name || badgeId}"?\n\n` +
+      'Deletion will be blocked if any user has already earned this badge.\n\n' +
+      'Type DELETE BADGE exactly to continue:'
+    );
+  
+    if (confirmation !== 'DELETE BADGE') return;
+  
     try {
-      await deleteDoc(doc(db, 'badges', badgeId));
-      setBadges(prev => prev.filter(b => b.id !== badgeId));
-      setSelectedBadgeId(prev => (prev === badgeId ? null : prev));
+      const adminDeleteBadge = httpsCallable(
+        functions,
+        'adminDeleteBadge'
+      );
+  
+      await adminDeleteBadge({
+        badgeId,
+        confirmation,
+      });
+  
+      setBadges(prev =>
+        prev.filter(item => item.id !== badgeId)
+      );
+  
+      setSelectedBadgeId(prev =>
+        prev === badgeId ? null : prev
+      );
+  
       setSuccessMsg('Badge deleted successfully');
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
-      console.error(err);
-      const detail = err && err.code ? ` (${err.code})` : '';
-      window.alert(`Failed to delete badge.${detail}`);
+      console.error('Failed to delete badge:', err);
+  
+      const detail = err?.code ? ` (${err.code})` : '';
+  
+      window.alert(
+        `Failed to delete badge.${detail}\n\n` +
+        'The badge may already have been earned by a user.'
+      );
     }
   };
 

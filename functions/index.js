@@ -2945,6 +2945,394 @@ exports.adminDeleteInjuryCategory = onCall(async (request) => {
   };
 });
 
+const ADMIN_BADGE_STAT_TYPES = [
+  "level",
+  "totalXp",
+  "sessionCount",
+  "totalVolume",
+  "totalDistance",
+  "streak",
+  "gymSessionCount",
+  "cardioSessionCount",
+  "combinedSessionCount",
+];
+
+function normalizeAdminBadgeConditions(rawConditions) {
+  if (!Array.isArray(rawConditions) || rawConditions.length === 0) {
+    throw new HttpsError(
+        "invalid-argument",
+        "At least one badge condition is required.",
+    );
+  }
+
+  const seenStatTypes = new Set();
+
+  return rawConditions.map((rawCondition, index) => {
+    const condition =
+      rawCondition &&
+      typeof rawCondition === "object" &&
+      !Array.isArray(rawCondition) ?
+        rawCondition :
+        {};
+
+    const statType =
+      typeof condition.statType === "string" ?
+        condition.statType.trim() :
+        "";
+
+    if (!ADMIN_BADGE_STAT_TYPES.includes(statType)) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Condition ${index + 1} has an unsupported stat type.`,
+      );
+    }
+
+    if (seenStatTypes.has(statType)) {
+      throw new HttpsError(
+          "invalid-argument",
+          `The stat type "${statType}" is used more than once.`,
+      );
+    }
+
+    seenStatTypes.add(statType);
+
+    const value = Number(condition.value);
+
+    if (!Number.isFinite(value) || value < 0) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Condition ${index + 1} requires a valid non-negative value.`,
+      );
+    }
+
+    return {
+      statType,
+      value,
+    };
+  });
+}
+
+function normalizeAdminBadgeInput(rawData) {
+  const data =
+    rawData &&
+    typeof rawData === "object" &&
+    !Array.isArray(rawData) ?
+      rawData :
+      {};
+
+  const name =
+    typeof data.name === "string" ?
+      data.name.trim() :
+      "";
+
+  const description =
+    typeof data.description === "string" ?
+      data.description.trim() :
+      "";
+
+  const imageUrl =
+    typeof data.imageUrl === "string" ?
+      data.imageUrl.trim() :
+      "";
+
+  if (!name) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Badge name is required.",
+    );
+  }
+
+  if (!description) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Badge description is required.",
+    );
+  }
+
+  if (name.length > 100) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Badge name cannot exceed 100 characters.",
+    );
+  }
+
+  if (description.length > 500) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Badge description cannot exceed 500 characters.",
+    );
+  }
+
+  if (
+    imageUrl &&
+    !/^https?:\/\//i.test(imageUrl)
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Badge image URL must begin with http:// or https://.",
+    );
+  }
+
+  return {
+    name,
+    description,
+    imageUrl,
+    conditions: normalizeAdminBadgeConditions(data.conditions),
+  };
+}
+
+async function ensureUniqueAdminBadgeName(
+    badgeName,
+    excludedBadgeId = null,
+) {
+  const badgesSnapshot = await db.collection("badges").get();
+  const normalizedName = badgeName.trim().toLowerCase();
+
+  const duplicate = badgesSnapshot.docs.find((badgeDoc) => {
+    if (excludedBadgeId && badgeDoc.id === excludedBadgeId) {
+      return false;
+    }
+
+    const existingName = badgeDoc.data()?.name;
+
+    return (
+      typeof existingName === "string" &&
+      existingName.trim().toLowerCase() === normalizedName
+    );
+  });
+
+  if (duplicate) {
+    throw new HttpsError(
+        "already-exists",
+        `A badge named "${badgeName}" already exists.`,
+    );
+  }
+}
+
+/**
+ * Returns all badge definitions for the React admin dashboard.
+ */
+exports.adminListBadgesDashboard = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const badgesSnapshot = await db.collection("badges").get();
+
+  const badges = badgesSnapshot.docs.map((badgeDoc) => ({
+    id: badgeDoc.id,
+    ...serializeAdminFirestoreValue(badgeDoc.data()),
+  }));
+
+  badges.sort((a, b) =>
+    String(a.name || "").localeCompare(String(b.name || ""))
+  );
+
+  return {
+    badges,
+    supportedStatTypes: ADMIN_BADGE_STAT_TYPES,
+  };
+});
+
+/**
+ * Creates one admin-managed badge definition.
+ */
+exports.adminCreateBadge = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const badge = normalizeAdminBadgeInput(
+      request.data?.badge,
+  );
+
+  await ensureUniqueAdminBadgeName(badge.name);
+
+  const badgeRef = await db.collection("badges").add({
+    ...badge,
+    createdAt: FieldValue.serverTimestamp(),
+    createdByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    badgeId: badgeRef.id,
+    badge,
+  };
+});
+
+/**
+ * Updates one badge definition.
+ *
+ * Users who already earned the badge keep it. Edited conditions only affect
+ * users who have not earned the badge yet, matching the Flutter logic.
+ */
+exports.adminUpdateBadge = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const badgeId =
+    typeof request.data?.badgeId === "string" ?
+      request.data.badgeId.trim() :
+      "";
+
+  const requestedChanges = request.data?.changes;
+
+  if (!badgeId) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Badge ID is required.",
+    );
+  }
+
+  if (
+    !requestedChanges ||
+    typeof requestedChanges !== "object" ||
+    Array.isArray(requestedChanges)
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Badge changes are required.",
+    );
+  }
+
+  const allowedFields = new Set([
+    "name",
+    "description",
+    "imageUrl",
+    "conditions",
+  ]);
+
+  const unsafeField = Object.keys(requestedChanges)
+      .find((field) => !allowedFields.has(field));
+
+  if (unsafeField) {
+    throw new HttpsError(
+        "invalid-argument",
+        `Badge field "${unsafeField}" cannot be changed.`,
+    );
+  }
+
+  const badgeRef = db.collection("badges").doc(badgeId);
+  const badgeSnapshot = await badgeRef.get();
+
+  if (!badgeSnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Badge not found.",
+    );
+  }
+
+  const existing = badgeSnapshot.data() || {};
+
+  const mergedBadge = normalizeAdminBadgeInput({
+    name:
+      requestedChanges.name !== undefined ?
+        requestedChanges.name :
+        existing.name,
+    description:
+      requestedChanges.description !== undefined ?
+        requestedChanges.description :
+        existing.description,
+    imageUrl:
+      requestedChanges.imageUrl !== undefined ?
+        requestedChanges.imageUrl :
+        existing.imageUrl,
+    conditions:
+      requestedChanges.conditions !== undefined ?
+        requestedChanges.conditions :
+        existing.conditions,
+  });
+
+  await ensureUniqueAdminBadgeName(
+      mergedBadge.name,
+      badgeId,
+  );
+
+  await badgeRef.update({
+    ...mergedBadge,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    badgeId,
+    badge: mergedBadge,
+  };
+});
+
+/**
+ * Deletes a badge only when no user has already earned it.
+ *
+ * Earned-badge documents use the badge ID as their document ID. Removing an
+ * earned badge definition would make it disappear from the user's badge grid,
+ * so deletion is blocked instead of silently breaking existing achievements.
+ */
+exports.adminDeleteBadge = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const badgeId =
+    typeof request.data?.badgeId === "string" ?
+      request.data.badgeId.trim() :
+      "";
+
+  const confirmation = request.data?.confirmation;
+
+  if (!badgeId) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Badge ID is required.",
+    );
+  }
+
+  if (confirmation !== "DELETE BADGE") {
+    throw new HttpsError(
+        "failed-precondition",
+        "Badge deletion confirmation is incorrect.",
+    );
+  }
+
+  const badgeRef = db.collection("badges").doc(badgeId);
+  const badgeSnapshot = await badgeRef.get();
+
+  if (!badgeSnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Badge not found.",
+    );
+  }
+
+  const usersSnapshot = await db.collection("users").get();
+
+  const earnedChecks = await Promise.all(
+      usersSnapshot.docs.map((userDoc) =>
+        userDoc.ref
+            .collection("earnedBadges")
+            .doc(badgeId)
+            .get(),
+      ),
+  );
+
+  const earnedCount = earnedChecks.filter(
+      (earnedDoc) => earnedDoc.exists,
+  ).length;
+
+  if (earnedCount > 0) {
+    throw new HttpsError(
+        "failed-precondition",
+        `This badge has already been earned by ${earnedCount} user` +
+        `${earnedCount === 1 ? "" : "s"} and cannot be deleted.`,
+    );
+  }
+
+  await badgeRef.delete();
+
+  console.log(
+      `adminDeleteBadge: ${adminUid} deleted ${badgeId}`,
+  );
+
+  return {
+    success: true,
+    badgeId,
+  };
+});
+
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
 // plaintext .env value — the previous approach in the Flutter app bundled
 // .env as a Flutter asset (pubspec.yaml's flutter:assets:), which ships it
