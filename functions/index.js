@@ -2323,6 +2323,247 @@ exports.adminCreateBroadcast = onCall(async (request) => {
   };
 });
 
+/**
+ * Returns all posts required by the React admin Posts dashboard.
+ */
+exports.adminListPostsDashboard = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const postsSnapshot = await db.collection("posts").get();
+
+  const posts = postsSnapshot.docs.map((postDoc) => ({
+    id: postDoc.id,
+    ...serializeAdminFirestoreValue(postDoc.data()),
+  }));
+
+  posts.sort((a, b) => {
+    const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return dateB - dateA;
+  });
+
+  return {posts};
+});
+
+/**
+ * Updates admin-editable post content.
+ *
+ * Ownership, image, reaction counts, comment counts and timestamps are
+ * deliberately protected from arbitrary admin edits.
+ */
+exports.adminUpdatePost = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const postId =
+    typeof request.data?.postId === "string" ?
+      request.data.postId.trim() :
+      "";
+
+  const requestedChanges = request.data?.changes;
+
+  if (!postId) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Post ID is required.",
+    );
+  }
+
+  if (
+    !requestedChanges ||
+    typeof requestedChanges !== "object" ||
+    Array.isArray(requestedChanges)
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Post changes are required.",
+    );
+  }
+
+  const postRef = db.collection("posts").doc(postId);
+  const postSnapshot = await postRef.get();
+
+  if (!postSnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Post not found.",
+    );
+  }
+
+  const allowedFields = new Set([
+    "foodName",
+    "caption",
+    "calories",
+    "proteinG",
+    "carbsG",
+    "fatG",
+  ]);
+
+  const unsafeField = Object.keys(requestedChanges)
+      .find((field) => !allowedFields.has(field));
+
+  if (unsafeField) {
+    throw new HttpsError(
+        "invalid-argument",
+        `Post field "${unsafeField}" cannot be changed.`,
+    );
+  }
+
+  const updateData = {};
+
+  for (const field of ["foodName", "caption"]) {
+    if (requestedChanges[field] !== undefined) {
+      if (requestedChanges[field] === null) {
+        updateData[field] = null;
+      } else if (typeof requestedChanges[field] === "string") {
+        updateData[field] = requestedChanges[field].trim();
+      } else {
+        throw new HttpsError(
+            "invalid-argument",
+            `${field} must be text.`,
+        );
+      }
+    }
+  }
+
+  for (const field of ["calories", "proteinG", "carbsG", "fatG"]) {
+    if (requestedChanges[field] === undefined) continue;
+
+    if (requestedChanges[field] === null) {
+      updateData[field] = null;
+      continue;
+    }
+
+    const value = Number(requestedChanges[field]);
+
+    if (!Number.isFinite(value) || value < 0) {
+      throw new HttpsError(
+          "invalid-argument",
+          `${field} must be a valid non-negative number.`,
+      );
+    }
+
+    updateData[field] = value;
+  }
+
+  if (Object.keys(updateData).length === 0) {
+    throw new HttpsError(
+        "invalid-argument",
+        "No valid post changes were supplied.",
+    );
+  }
+
+  await postRef.update({
+    ...updateData,
+    adminUpdatedAt: FieldValue.serverTimestamp(),
+    updatedByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    postId,
+    changes: updateData,
+  };
+});
+
+/**
+ * Hides or unhides one post.
+ */
+exports.adminSetPostHidden = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const postId =
+    typeof request.data?.postId === "string" ?
+      request.data.postId.trim() :
+      "";
+
+  const isHidden = request.data?.isHidden;
+
+  if (!postId) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Post ID is required.",
+    );
+  }
+
+  if (typeof isHidden !== "boolean") {
+    throw new HttpsError(
+        "invalid-argument",
+        "isHidden must be true or false.",
+    );
+  }
+
+  const postRef = db.collection("posts").doc(postId);
+  const postSnapshot = await postRef.get();
+
+  if (!postSnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Post not found.",
+    );
+  }
+
+  await postRef.update({
+    isHidden,
+    moderationUpdatedAt: FieldValue.serverTimestamp(),
+    moderatedByAdminUid: adminUid,
+  });
+
+  return {
+    success: true,
+    postId,
+    isHidden,
+  };
+});
+
+/**
+ * Permanently deletes a post and its reactions/comments subcollections.
+ */
+exports.adminDeletePost = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const postId =
+    typeof request.data?.postId === "string" ?
+      request.data.postId.trim() :
+      "";
+
+  const confirmation = request.data?.confirmation;
+
+  if (!postId) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Post ID is required.",
+    );
+  }
+
+  if (confirmation !== "DELETE POST") {
+    throw new HttpsError(
+        "failed-precondition",
+        "Post deletion confirmation is incorrect.",
+    );
+  }
+
+  const postRef = db.collection("posts").doc(postId);
+  const postSnapshot = await postRef.get();
+
+  if (!postSnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Post not found.",
+    );
+  }
+
+  await db.recursiveDelete(postRef);
+
+  console.log(
+      `adminDeletePost: ${adminUid} permanently deleted ${postId}`,
+  );
+
+  return {
+    success: true,
+    postId,
+  };
+});
+
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
 // plaintext .env value — the previous approach in the Flutter app bundled
 // .env as a Flutter asset (pubspec.yaml's flutter:assets:), which ships it

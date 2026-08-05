@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { collection, getDocs, doc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
@@ -21,15 +21,33 @@ function Posts() {
 
   useEffect(() => {
     const fetchPosts = async () => {
+      setLoading(true);
+  
       try {
-        const snap = await getDocs(collection(db, 'posts'));
-        const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        setPosts(data);
+        const adminListPostsDashboard = httpsCallable(
+          functions,
+          'adminListPostsDashboard'
+        );
+  
+        const result = await adminListPostsDashboard();
+        const data = result.data || {};
+  
+        setPosts(
+          Array.isArray(data.posts) ? data.posts : []
+        );
       } catch (err) {
-        console.error(err);
+        console.error('Failed to load posts dashboard:', err);
+  
+        const detail = err?.code ? ` (${err.code})` : '';
+  
+        window.alert(
+          `Failed to load posts dashboard.${detail}`
+        );
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
+  
     fetchPosts();
   }, []);
 
@@ -37,20 +55,82 @@ function Posts() {
   // absence-as-default convention (e.g. onboardingComplete, healthConnected).
   const toggleHidden = async (postId, currentlyHidden) => {
     const isHidden = !currentlyHidden;
-    await updateDoc(doc(db, 'posts', postId), { isHidden });
-    setPosts(prev => prev.map(p => p.id === postId ? { ...p, isHidden } : p));
+  
+    const adminSetPostHidden = httpsCallable(
+      functions,
+      'adminSetPostHidden'
+    );
+  
+    await adminSetPostHidden({
+      postId,
+      isHidden,
+    });
+  
+    setPosts(prev =>
+      prev.map(post =>
+        post.id === postId
+          ? { ...post, isHidden }
+          : post
+      )
+    );
   };
 
   const handleDelete = async (postId) => {
-    if (!window.confirm('Are you sure you want to permanently delete this post? This action cannot be undone.')) return;
-    await deleteDoc(doc(db, 'posts', postId));
-    setPosts(prev => prev.filter(p => p.id !== postId));
-    setSelectedPostId(prev => (prev === postId ? null : prev));
+    const post = posts.find(item => item.id === postId);
+  
+    const label =
+      post?.foodName ||
+      post?.caption ||
+      postId;
+  
+    const confirmation = window.prompt(
+      `Permanently delete this post?\n\n` +
+      `"${label}"\n\n` +
+      'Its reactions and comments will also be removed.\n\n' +
+      'Type DELETE POST exactly to continue:'
+    );
+  
+    if (confirmation !== 'DELETE POST') return;
+  
+    const adminDeletePost = httpsCallable(
+      functions,
+      'adminDeletePost'
+    );
+  
+    await adminDeletePost({
+      postId,
+      confirmation,
+    });
+  
+    setPosts(prev =>
+      prev.filter(postItem => postItem.id !== postId)
+    );
+  
+    setSelectedPostId(prev =>
+      prev === postId ? null : prev
+    );
   };
 
   const handleSavePost = async (postId, changes) => {
-    await updateDoc(doc(db, 'posts', postId), changes);
-    setPosts(prev => prev.map(p => p.id === postId ? { ...p, ...changes } : p));
+    const adminUpdatePost = httpsCallable(
+      functions,
+      'adminUpdatePost'
+    );
+  
+    const result = await adminUpdatePost({
+      postId,
+      changes,
+    });
+  
+    const savedChanges = result.data?.changes || changes;
+  
+    setPosts(prev =>
+      prev.map(post =>
+        post.id === postId
+          ? { ...post, ...savedChanges }
+          : post
+      )
+    );
   };
 
   // Distinct post types actually present in the loaded data — no hardcoded list.
