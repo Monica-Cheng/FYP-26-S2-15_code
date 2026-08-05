@@ -1,11 +1,17 @@
 // lib/screens/profile/edit_profile_screen.dart
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../core/app_theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../utils/image_encode.dart';
+import '../../widgets/quick_add_sheet.dart';
 
 class EditProfileScreen extends StatefulWidget {
   const EditProfileScreen({super.key});
@@ -26,6 +32,8 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   String _origUsername = '';
   String _origHometown = '';
   String _origBio = '';
+  String? _photoBase64;
+  bool _isUploadingPhoto = false;
 
   late final TextEditingController _nameCtrl;
   late final TextEditingController _usernameCtrl;
@@ -170,9 +178,72 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       _hometownCtrl.text = hometown;
       _bioCtrl.text = bio;
 
-      setState(() => _isLoadingProfile = false);
+      setState(() {
+        _photoBase64 = profile?['photoBase64'] as String?;
+        _isLoadingProfile = false;
+      });
     } catch (_) {
       if (mounted) setState(() => _isLoadingProfile = false);
+    }
+  }
+
+  // ── Profile photo upload ──────────────────────────────────────────────────
+  // Same Take Photo / Choose from Gallery -> encode -> write pattern as
+  // profile_screen.dart's _pickAndUploadPhoto() — this screen previously had
+  // no working photo picker at all (camera icon/"Change photo" just showed a
+  // "coming soon" snackbar).
+
+  Future<void> _promptChangePhoto() async {
+    if (_isUploadingPhoto) return;
+    await showQuickAddSheet(
+      context,
+      [
+        QuickAddOption(
+          icon: Icons.camera_alt_rounded,
+          iconColor: WW.primary,
+          iconBg: WW.chipBg,
+          title: 'Take Photo',
+          subtitle: 'Use your camera',
+          onTap: () => _pickAndUploadPhoto(ImageSource.camera),
+        ),
+        QuickAddOption(
+          icon: Icons.photo_library_rounded,
+          iconColor: WW.teal,
+          iconBg: WW.tealBg,
+          title: 'Choose from Gallery',
+          subtitle: 'Pick an existing photo',
+          onTap: () => _pickAndUploadPhoto(ImageSource.gallery),
+        ),
+      ],
+      title: 'Change Profile Photo',
+      subtitle: 'Choose how to update your photo',
+    );
+  }
+
+  Future<void> _pickAndUploadPhoto(ImageSource source) async {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    final picked = await ImagePicker().pickImage(
+      source: source,
+      maxWidth: 1024,
+      imageQuality: 80,
+    );
+    if (picked == null) return;
+
+    setState(() => _isUploadingPhoto = true);
+    try {
+      final encoded = await encodeImageBase64(File(picked.path), targetWidth: 200);
+      if (encoded == null) {
+        if (mounted) _snack('Could not process that photo. Try another.');
+        return;
+      }
+      await _firestore.updateUserProfile(uid, {'photoBase64': encoded});
+      if (!mounted) return;
+      setState(() => _photoBase64 = encoded);
+    } catch (e) {
+      if (mounted) _snack('Could not save photo: $e');
+    } finally {
+      if (mounted) setState(() => _isUploadingPhoto = false);
     }
   }
 
@@ -365,10 +436,41 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
   // ── Avatar section ─────────────────────────────────────────────────────────
 
-  Widget _buildAvatarSection() {
+  Widget _buildAvatarContent() {
+    final photo = _photoBase64;
+    if (photo != null && photo.isNotEmpty) {
+      try {
+        return Image.memory(
+          base64Decode(photo),
+          width: 80,
+          height: 80,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _buildInitialAvatar(),
+        );
+      } catch (_) {
+        return _buildInitialAvatar();
+      }
+    }
+    return _buildInitialAvatar();
+  }
+
+  Widget _buildInitialAvatar() {
     final initial = _nameCtrl.text.trim().isNotEmpty
         ? _nameCtrl.text.trim()[0].toUpperCase()
         : '?';
+    return Center(
+      child: Text(
+        initial,
+        style: const TextStyle(
+          fontSize: 28,
+          fontWeight: FontWeight.w700,
+          color: Colors.white,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAvatarSection() {
     return Padding(
       padding: const EdgeInsets.only(top: 20, bottom: 16),
       child: Column(
@@ -383,22 +485,13 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                   color: WW.primary,
                   shape: BoxShape.circle,
                 ),
-                child: Center(
-                  child: Text(
-                    initial,
-                    style: const TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
+                child: ClipOval(child: _buildAvatarContent()),
               ),
               Positioned(
                 bottom: 0,
                 right: 0,
                 child: GestureDetector(
-                  onTap: () => _snack('Photo upload coming soon'),
+                  onTap: _isUploadingPhoto ? null : _promptChangePhoto,
                   child: Container(
                     width: 28,
                     height: 28,
@@ -407,12 +500,21 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                       shape: BoxShape.circle,
                       border: Border.all(color: WW.primary, width: 1.5),
                     ),
-                    child: const Center(
-                      child: Icon(
-                        Icons.camera_alt_rounded,
-                        size: 14,
-                        color: WW.primary,
-                      ),
+                    child: Center(
+                      child: _isUploadingPhoto
+                          ? const SizedBox(
+                              width: 12,
+                              height: 12,
+                              child: CircularProgressIndicator(
+                                color: WW.primary,
+                                strokeWidth: 1.5,
+                              ),
+                            )
+                          : const Icon(
+                              Icons.camera_alt_rounded,
+                              size: 14,
+                              color: WW.primary,
+                            ),
                     ),
                   ),
                 ),
@@ -421,7 +523,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           ),
           const SizedBox(height: 6),
           GestureDetector(
-            onTap: () => _snack('Photo upload coming soon'),
+            onTap: _isUploadingPhoto ? null : _promptChangePhoto,
             child: const Text(
               'Change photo',
               style: TextStyle(fontSize: 13, color: WW.primary),

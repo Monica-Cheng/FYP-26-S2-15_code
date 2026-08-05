@@ -59,7 +59,21 @@ class FirestoreService {
     'level',
     'leaderboardVisible',
     'lastWeeklyXpUpdate',
+// Mirrored so a user's photo can eventually be read cross-user (e.g.
+    // viewing someone else's profile) without opening up users/{uid}'s
+    // owner-only read rule — see user_profile_screen.dart / firestore.rules
+    // investigation notes. Not yet consumed cross-user by any call site;
+    // this only makes the data available on the next photo write.
     'photoBase64',
+    // Mirrored so user_profile_screen.dart can show another user's real
+    // Level + XP progress bar (via getPublicProfile()) instead of a fake
+    // Lv.1/0 XP default — see that screen's _loadProfile(). NOTE: the
+    // actual XP-earning path is addXpToUser(), which writes its own
+    // explicit publicProfiles batch rather than going through
+    // updateUserProfile() below — that write was updated in the same
+    // change to also include totalXp, so this entry alone is not
+    // sufficient on its own; see addXpToUser()'s doc comment.
+    'totalXp',
   };
 
   // ---------------------------------------------------------------------------
@@ -968,6 +982,55 @@ class FirestoreService {
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // Returns this-calendar-month-scoped session count + total duration for
+  // users/{uid} — same explicit start/end Timestamp range-query shape as
+  // getMonthActivity()/computeChallengeProgress(), but returning aggregate
+  // sums instead of per-date sets. Added for profile_screen.dart's
+  // Sessions/Workout Time stat cards, which used to read getLifetimeStats()
+  // (unscoped, lifetime) and produced meaninglessly huge numbers on a
+  // long-lived account (e.g. "5,222,977 kg Lifted").
+  //
+  // sessionCount mirrors getLifetimeStats()'s own definition exactly (every
+  // doc in range counts, manually-logged included) — a count of activity,
+  // not a validated-only anti-cheat metric.
+  //
+  // durationSeconds sums every doc's durationSeconds field unfiltered
+  // (manually-logged sessions included too, unlike
+  // computeChallengeProgress()'s duration metric, which deliberately
+  // excludes them for anti-cheat reasons — that exclusion doesn't apply
+  // here, this is just "how much time did you spend" across every activity
+  // type). gym/cardio/manual/combined sessions all write durationSeconds
+  // the same way (see saveGymSession()/finalizeInProgressSession()/the
+  // cardio session save paths), so no per-type branching is needed.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, int>> getMonthlyStats(
+    String uid,
+    int year,
+    int month,
+  ) async {
+    final startDate = DateTime(year, month, 1);
+    final endDate = DateTime(year, month + 1, 1);
+
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(startDate))
+        .where('date', isLessThan: Timestamp.fromDate(endDate))
+        .get();
+
+    int durationSeconds = 0;
+    for (final doc in snapshot.docs) {
+      durationSeconds += (doc.data()['durationSeconds'] as num?)?.toInt() ?? 0;
+    }
+
+    return {
+      'sessionCount': snapshot.docs.length,
+      'durationSeconds': durationSeconds,
+    };
+  }
+
   // ═══════════════════════════════════════════════════════════════════════
   // BADGES
   // badges/{badgeId} is admin-managed reference data (name, description,
@@ -1462,12 +1525,17 @@ class FirestoreService {
   // Adds xpEarned to the user's totalXp and weeklyXp, then recalculates and
   // updates their level. Uses merge:true so unrelated fields are untouched.
   //
-  // weeklyXp/level/lastWeeklyXpUpdate are also mirrored into
+  // weeklyXp/level/lastWeeklyXpUpdate/totalXp are also mirrored into
   // publicProfiles/{uid} in the same batch (weekStartDate is not — it's
   // purely an internal anchor for this method's own lazy-reset math below,
   // never read by getFriendsLeaderboardStream(), so it has no reason to
-  // exist on the public doc). totalXp is deliberately not mirrored either —
-  // it isn't one of the 6 fields the leaderboard stream reads.
+  // exist on the public doc). totalXp used to be excluded here too (it
+  // isn't one of the fields the leaderboard stream reads), but
+  // user_profile_screen.dart now needs it to show another user's real XP
+  // progress bar via getPublicProfile() — this method writes its own
+  // explicit batch rather than going through updateUserProfile(), so
+  // adding 'totalXp' to _publicProfileFields alone wouldn't have covered
+  // this, the actual XP-earning path.
   // ---------------------------------------------------------------------------
   Future<void> addXpToUser(String uid, int xpEarned) async {
     final config = await getGamificationConfig();
@@ -1502,6 +1570,7 @@ class FirestoreService {
       'weeklyXp': newWeekly,
       'level': newLevel,
       'lastWeeklyXpUpdate': now,
+      'totalXp': newTotal,
     }, SetOptions(merge: true));
     await batch.commit();
   }

@@ -71,7 +71,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   int _level = 1;
 
   int _sessionCount = 0;
-  double _totalVolume = 0;
+  int _workoutSeconds = 0;
   int _streak = 0;
   bool _statsLoading = true;
 
@@ -139,12 +139,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
       return;
     }
     try {
-      final stats = await _firestore.getLifetimeStats(uid);
+      final now = DateTime.now();
+      final stats = await _firestore.getMonthlyStats(uid, now.year, now.month);
       final streak = await _firestore.calculateStreak(uid);
       if (mounted) {
         setState(() {
-          _sessionCount = stats['sessionCount'] as int? ?? 0;
-          _totalVolume = (stats['totalVolume'] as num?)?.toDouble() ?? 0;
+          _sessionCount = stats['sessionCount'] ?? 0;
+          _workoutSeconds = stats['durationSeconds'] ?? 0;
           _streak = streak;
           _statsLoading = false;
         });
@@ -152,6 +153,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
     } catch (_) {
       if (mounted) setState(() => _statsLoading = false);
     }
+  }
+
+  // Same '${h}h ${m}m'/'${m}m' convention already used privately in
+  // post_session_summary_screen.dart's _fmtStatDuration(), feed_post_card
+  // .dart's _fmtDuration(), etc. — no shared formatter exists to import.
+  String _fmtWorkoutTime(int totalSeconds) {
+    final mins = totalSeconds ~/ 60;
+    final h = mins ~/ 60;
+    final m = mins % 60;
+    return h > 0 ? '${h}h ${m}m' : '${m}m';
   }
 
   Future<void> _loadBadges() async {
@@ -184,24 +195,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> _promptChangePhoto() async {
     if (_isUploadingPhoto) return;
-    await showQuickAddSheet(context, [
-      QuickAddOption(
-        icon: Icons.camera_alt_rounded,
-        iconColor: WW.primary,
-        iconBg: WW.chipBg,
-        title: 'Take Photo',
-        subtitle: 'Use your camera',
-        onTap: () => _pickAndUploadPhoto(ImageSource.camera),
-      ),
-      QuickAddOption(
-        icon: Icons.photo_library_rounded,
-        iconColor: WW.teal,
-        iconBg: WW.tealBg,
-        title: 'Choose from Gallery',
-        subtitle: 'Pick an existing photo',
-        onTap: () => _pickAndUploadPhoto(ImageSource.gallery),
-      ),
-    ]);
+    await showQuickAddSheet(
+      context,
+      [
+        QuickAddOption(
+          icon: Icons.camera_alt_rounded,
+          iconColor: WW.primary,
+          iconBg: WW.chipBg,
+          title: 'Take Photo',
+          subtitle: 'Use your camera',
+          onTap: () => _pickAndUploadPhoto(ImageSource.camera),
+        ),
+        QuickAddOption(
+          icon: Icons.photo_library_rounded,
+          iconColor: WW.teal,
+          iconBg: WW.tealBg,
+          title: 'Choose from Gallery',
+          subtitle: 'Pick an existing photo',
+          onTap: () => _pickAndUploadPhoto(ImageSource.gallery),
+        ),
+      ],
+      title: 'Change Profile Photo',
+      subtitle: 'Choose how to update your photo',
+    );
   }
 
   Future<void> _pickAndUploadPhoto(ImageSource source) async {
@@ -560,7 +576,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Widget _buildStatsRow() {
     final stats = [
       (Icons.fitness_center_rounded, '$_sessionCount', 'Sessions', WW.primary),
-      (Icons.show_chart_rounded, _totalVolume.toStringAsFixed(0), 'kg', WW.teal),
+      (Icons.timer_rounded, _fmtWorkoutTime(_workoutSeconds), 'Workout Time', WW.teal),
       (Icons.local_fire_department_rounded, '$_streak', 'Day streak', WW.teal),
     ];
 
@@ -633,7 +649,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
       return const SizedBox.shrink();
     }
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      // Bottom trimmed from 12 -> 4: the XP card right below has its own
+      // 0 top margin, so the old value read as a bigger gap here than the
+      // 12-16 used between every other section on this screen.
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

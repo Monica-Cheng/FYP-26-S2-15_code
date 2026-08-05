@@ -333,18 +333,424 @@ exports.sendAdminBroadcast = onDocumentCreated(
     },
 );
 
+// ---------------------------------------------------------------------------
+// Shared helpers for the week-over-week delta (chat) and the 3 insight
+// lines (chat + post-session summary) — see buildInsights() below for the
+// orchestrator and callWiseCoachOpenAI for how the two features wire these
+// in differently (consent-gated vs always-on).
+// ---------------------------------------------------------------------------
+
+/**
+ * Monday-start week boundaries, weekOffset weeks from `now`'s week
+ * (0 = this week, -1 = last week). Mirrors firestore_service.dart's
+ * getWeeklySessionStats(): `today.subtract(Duration(days: today.weekday -
+ * 1))`, i.e. Mon..Sun, [weekStart, weekEnd) half-open like every other
+ * date-range query in this file.
+ *
+ * @param {Date} now
+ * @param {number} weekOffset
+ * @return {{weekStart: Date, weekEnd: Date}}
+ */
+function getWeekRange(now, weekOffset) {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const jsDay = today.getDay(); // 0=Sun..6=Sat
+  const isoWeekday = jsDay === 0 ? 7 : jsDay; // 1=Mon..7=Sun
+  const weekStart = new Date(today);
+  weekStart.setDate(today.getDate() - (isoWeekday - 1) + weekOffset * 7);
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 7);
+  return {weekStart, weekEnd};
+}
+
+/**
+ * Totals-only mirror of getSessionStats() in firestore_service.dart for a
+ * [startDate, endDate) range — same fields summed the same way (no
+ * isManuallyLogged exclusion, matching that method exactly since it backs
+ * the Progress tab's chart filters). The bucket/day-array breakdown that
+ * method also computes is omitted here — nothing downstream needs it.
+ *
+ * @param {string} uid
+ * @param {Date} startDate
+ * @param {Date} endDate
+ * @return {Promise<{totalCalories: number, totalVolume: number,
+ *   totalSessions: number, gymSessions: number, cardioSessions: number}>}
+ */
+async function computeSessionStats(uid, startDate, endDate) {
+  const snapshot = await db
+      .collection("users")
+      .doc(uid)
+      .collection("sessions")
+      .where("date", ">=", startDate)
+      .where("date", "<", endDate)
+      .get();
+
+  let totalCalories = 0;
+  let totalVolume = 0;
+  let totalSessions = 0;
+  let gymSessions = 0;
+  let cardioSessions = 0;
+
+  snapshot.forEach((doc) => {
+    const data = doc.data();
+    const cals = Number(data.caloriesBurned) || 0;
+    const vol = Number(data.totalVolume) || 0;
+    const type = data.type || "";
+    totalCalories += Math.round(cals);
+    totalVolume += vol;
+    totalSessions++;
+    if (type === "gym") gymSessions++;
+    if (type === "cardio") cardioSessions++;
+  });
+
+  return {
+    totalCalories,
+    totalVolume: Math.round(totalVolume),
+    totalSessions,
+    gymSessions,
+    cardioSessions,
+  };
+}
+
+/**
+ * Formats the week-over-week delta line for chat's personalization
+ * context (decision: replaces the old flat "last 5 sessions" list) — the
+ * percentage is pre-computed here, not left for the LLM to derive from
+ * two raw numbers.
+ *
+ * @param {{totalSessions: number, totalVolume: number}} thisWeek
+ * @param {{totalSessions: number, totalVolume: number}} lastWeek
+ * @return {string}
+ */
+function formatWeekDeltaLine(thisWeek, lastWeek) {
+  const plural = (n) => (n === 1 ? "session" : "sessions");
+  let deltaPart = "";
+  if (lastWeek.totalVolume > 0) {
+    const pct = Math.round(
+        ((thisWeek.totalVolume - lastWeek.totalVolume) / lastWeek.totalVolume) * 100,
+    );
+    const sign = pct >= 0 ? "+" : "";
+    deltaPart = ` (${sign}${pct}% vs last week: ${lastWeek.totalSessions} ` +
+        `${plural(lastWeek.totalSessions)}, ${lastWeek.totalVolume}kg)`;
+  } else if (lastWeek.totalSessions > 0) {
+    deltaPart = ` (vs last week: ${lastWeek.totalSessions} ` +
+        `${plural(lastWeek.totalSessions)}, ${lastWeek.totalVolume}kg)`;
+  }
+  return `This week: ${thisWeek.totalSessions} ${plural(thisWeek.totalSessions)}, ` +
+      `${thisWeek.totalVolume}kg volume${deltaPart}.`;
+}
+
+/**
+ * Total distance for one session doc, handling the 3-way branch other
+ * server-side code in this file already uses (computeAndNotify() above):
+ * cardio reads its own top-level distanceMeters; combined has to sum
+ * cardioBlocks[].distanceMeters instead, since combined sessions never get
+ * a top-level distanceMeters field. Fixes the bug where earlier insight
+ * code (and buildPersonalizationContext's old flat session list) only
+ * checked top-level distanceMeters and silently read 0 for combined
+ * sessions with real cardio blocks.
+ *
+ * @param {FirebaseFirestore.DocumentData} data
+ * @return {number}
+ */
+function sessionDistanceMeters(data) {
+  const type = data.type || "";
+  if (type === "cardio") {
+    return Number(data.distanceMeters) || 0;
+  }
+  if (type === "combined") {
+    const blocks = data.cardioBlocks;
+    let total = 0;
+    if (Array.isArray(blocks)) {
+      blocks.forEach((b) => {
+        if (b && typeof b === "object") total += Number(b.distanceMeters) || 0;
+      });
+    }
+    return total;
+  }
+  return 0;
+}
+
+// Which prior session types are a meaningful comparison for a given
+// just-completed session type — decision: "compare whatever data types
+// actually overlap". 'manual' is deliberately absent as a key AND never
+// appears in any value list — manual logs have no volume/distance/exercise
+// data worth comparing, so they're excluded by construction rather than an
+// extra isManuallyLogged check at every call site.
+const COMPARABLE_TYPES = {
+  gym: ["gym", "combined"],
+  cardio: ["cardio", "combined"],
+  combined: ["gym", "cardio", "combined"],
+};
+
+/**
+ * Finds up to `count` prior sessions comparable to `latestType`, per
+ * decision 2's type-matching rules (COMPARABLE_TYPES above), excluding
+ * `excludeId` (the just-completed/most-recent session itself). Reuses
+ * getSessionsPage()'s plain orderBy('date','desc') shape (no equality
+ * filter alongside it, so no composite index needed) rather than a new
+ * query shape — the type/manual filtering happens in-memory over one
+ * fetched page, same "filter the already-fetched set" approach
+ * checkChallengeProgressOnSessionCreate uses above for its own composite-
+ * index-avoidance reasons.
+ *
+ * @param {string} uid
+ * @param {string} excludeId
+ * @param {string} latestType
+ * @param {number} count
+ * @return {Promise<FirebaseFirestore.DocumentData[]>}
+ */
+async function findSimilarSessions(uid, excludeId, latestType, count) {
+  const compatibleTypes = COMPARABLE_TYPES[latestType];
+  if (!compatibleTypes) return [];
+
+  const snapshot = await db
+      .collection("users")
+      .doc(uid)
+      .collection("sessions")
+      .orderBy("date", "desc")
+      .limit(30)
+      .get();
+
+  const results = [];
+  for (const doc of snapshot.docs) {
+    if (doc.id === excludeId) continue;
+    const data = doc.data();
+    if (!compatibleTypes.includes(data.type)) continue;
+    results.push({id: doc.id, ...data});
+    if (results.length >= count) break;
+  }
+  return results;
+}
+
+/**
+ * Insight (a): volume trend (gym/combined) and/or distance trend
+ * (cardio/combined) for `latest` against `comparable` sessions — a
+ * combined-type `latest` can produce both lines since it has both kinds of
+ * data. Each trend line is only built when there's at least one comparable
+ * session with real (>0) data for that metric — per decision 2, never
+ * force a comparison using a field a prior session doesn't meaningfully
+ * have.
+ *
+ * @param {FirebaseFirestore.DocumentData} latest
+ * @param {FirebaseFirestore.DocumentData[]} comparable
+ * @return {string[]}
+ */
+function buildVolumeTrendLines(latest, comparable) {
+  const average = (nums) =>
+    nums.reduce((a, b) => a + b, 0) / nums.length;
+  const type = latest.type || "";
+  const lines = [];
+
+  if (type === "gym" || type === "combined") {
+    const curVolume = Number(latest.totalVolume) || 0;
+    const priorVolumes = comparable
+        .filter((s) => s.type === "gym" || s.type === "combined")
+        .map((s) => Number(s.totalVolume) || 0)
+        .filter((v) => v > 0);
+    if (curVolume > 0 && priorVolumes.length > 0) {
+      const avg = average(priorVolumes);
+      const pct = avg > 0 ? Math.round(((curVolume - avg) / avg) * 100) : 0;
+      const trendWord = pct >= 0 ? `up ~${pct}%` : `down ~${Math.abs(pct)}%`;
+      lines.push(
+          `Volume: ${Math.round(curVolume)}kg - ${trendWord} from your last ` +
+          `${priorVolumes.length} comparable session${priorVolumes.length === 1 ? "" : "s"} ` +
+          `(avg ${Math.round(avg)}kg).`,
+      );
+    }
+  }
+
+  if (type === "cardio" || type === "combined") {
+    const curDistance = sessionDistanceMeters(latest);
+    const priorDistances = comparable
+        .map((s) => sessionDistanceMeters(s))
+        .filter((d) => d > 0);
+    if (curDistance > 0 && priorDistances.length > 0) {
+      const avg = average(priorDistances);
+      const pct = avg > 0 ? Math.round(((curDistance - avg) / avg) * 100) : 0;
+      const trendWord = pct >= 0 ? `up ~${pct}%` : `down ~${Math.abs(pct)}%`;
+      lines.push(
+          `Distance: ${(curDistance / 1000).toFixed(1)}km - ${trendWord} from your last ` +
+          `${priorDistances.length} comparable session${priorDistances.length === 1 ? "" : "s"} ` +
+          `(avg ${(avg / 1000).toFixed(1)}km).`,
+      );
+    }
+  }
+
+  return lines;
+}
+
+/**
+ * Insight (b): plan-frequency adherence — this week's totalSessions
+ * (already computed by the caller via computeSessionStats(), not
+ * recomputed here) against the tracked plan's daysPerWeek field. Returns
+ * null (omit this insight) when there's no tracked plan or the plan doc
+ * has no usable daysPerWeek, same "omit rather than send a placeholder"
+ * convention buildPersonalizationContext's other categories already use.
+ *
+ * @param {FirebaseFirestore.DocumentData} userData
+ * @param {number} thisWeekSessions
+ * @return {Promise<string|null>}
+ */
+async function buildPlanAdherenceLine(userData, thisWeekSessions) {
+  const trackedPlanId = userData.trackedPlanId;
+  if (typeof trackedPlanId !== "string" || trackedPlanId === "") return null;
+  try {
+    const planDoc = await db.collection("plans").doc(trackedPlanId).get();
+    if (!planDoc.exists) return null;
+    const daysPerWeek = Number(planDoc.data().daysPerWeek) || 0;
+    if (daysPerWeek <= 0) return null;
+    return `${thisWeekSessions} of your planned ${daysPerWeek} sessions this week.`;
+  } catch (err) {
+    console.error(
+        `buildPlanAdherenceLine: plan read failed for planId ${trackedPlanId}:`,
+        err,
+    );
+    return null;
+  }
+}
+
+function dateKey(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Insight (c): streak/rest-day consistency — a JS port of
+ * calculateStreakDates() in firestore_service.dart (same backward walk
+ * from today/yesterday, same isManuallyLogged exclusion on session dates,
+ * same dailyActivityLog isRestDay-protected rest days), plus a count of
+ * how many of the in-progress streak's dates fall in the current week and
+ * were rest days rather than real sessions, for the "including N protected
+ * rest days this week" clause.
+ *
+ * @param {string} uid
+ * @param {Date} now
+ * @return {Promise<string|null>} null if there's no active streak at all.
+ */
+async function buildStreakLine(uid, now) {
+  const sessionsSnap = await db
+      .collection("users")
+      .doc(uid)
+      .collection("sessions")
+      .get();
+  const sessionDates = new Set();
+  sessionsSnap.forEach((doc) => {
+    const data = doc.data();
+    if (data.isManuallyLogged === true) return;
+    const ts = data.date;
+    if (ts && typeof ts.toDate === "function") {
+      sessionDates.add(dateKey(ts.toDate()));
+    }
+  });
+
+  const restLogSnap = await db
+      .collection("users")
+      .doc(uid)
+      .collection("dailyActivityLog")
+      .get();
+  const restDates = new Set();
+  restLogSnap.forEach((doc) => {
+    if (doc.data().isRestDay === true) restDates.add(doc.id);
+  });
+
+  if (sessionDates.size === 0 && restDates.size === 0) return null;
+
+  const dayCounts = (d) =>
+    sessionDates.has(dateKey(d)) || restDates.has(dateKey(d));
+
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let check = dayCounts(today) ?
+    new Date(today) :
+    new Date(today.getTime() - 86400000);
+  if (!dayCounts(check)) return null;
+
+  const streakDates = [];
+  while (dayCounts(check)) {
+    streakDates.push(new Date(check));
+    check = new Date(check.getTime() - 86400000);
+  }
+
+  const {weekStart, weekEnd} = getWeekRange(now, 0);
+  const restDaysThisWeekInStreak = streakDates.filter(
+      (d) => d >= weekStart && d < weekEnd && restDates.has(dateKey(d)),
+  ).length;
+
+  const restPart = restDaysThisWeekInStreak > 0 ?
+    `, including ${restDaysThisWeekInStreak} protected rest day` +
+      `${restDaysThisWeekInStreak === 1 ? "" : "s"} this week` :
+    "";
+  return `${streakDates.length}-day active streak${restPart}.`;
+}
+
+/**
+ * Orchestrates the 3 shared insight lines (decision 3) used by BOTH chat's
+ * personalization context and post-session summary — see
+ * callWiseCoachOpenAI for how each feature wires this in differently
+ * (consent-gated for chat, always-on for post-session summary; that
+ * distinction lives entirely in the caller, not here).
+ *
+ * "Just completed" session, for insight (a)'s comparison, is always this
+ * user's single most-recent session doc: literally true when called right
+ * after post-session summary saves a session, and "the last session you
+ * logged" is the correct analogous reference point for an ongoing chat
+ * too — so both features share this one fetch instead of the caller having
+ * to pass a session in.
+ *
+ * @param {string} uid
+ * @param {FirebaseFirestore.DocumentData} userData
+ * @param {Date} now
+ * @return {Promise<{insightLines: string[], thisWeekStats: object}>}
+ */
+async function buildInsights(uid, userData, now) {
+  const insightLines = [];
+
+  const recentSnap = await db
+      .collection("users")
+      .doc(uid)
+      .collection("sessions")
+      .orderBy("date", "desc")
+      .limit(1)
+      .get();
+  if (!recentSnap.empty) {
+    const doc = recentSnap.docs[0];
+    const latest = {id: doc.id, ...doc.data()};
+    if (latest.isManuallyLogged !== true) {
+      const similar = await findSimilarSessions(uid, latest.id, latest.type, 5);
+      buildVolumeTrendLines(latest, similar).forEach((l) => insightLines.push(l));
+    }
+  }
+
+  const {weekStart: thisStart, weekEnd: thisEnd} = getWeekRange(now, 0);
+  const thisWeekStats = await computeSessionStats(uid, thisStart, thisEnd);
+  const planLine = await buildPlanAdherenceLine(userData, thisWeekStats.totalSessions);
+  if (planLine) insightLines.push(planLine);
+
+  const streakLine = await buildStreakLine(uid, now);
+  if (streakLine) insightLines.push(streakLine);
+
+  return {insightLines, thisWeekStats};
+}
+
 /**
  * Builds a compact, one-line-per-category personalization summary for
- * uid from their body profile, injury profile, active plan, and last 5
- * sessions — omitting any category that's empty/missing entirely rather
+ * uid from their body profile, injury profile, active plan, and the
+ * week-over-week delta + 3 shared insight lines (see buildInsights()
+ * above) — omitting any category that's empty/missing entirely rather
  * than sending a placeholder/empty value to the LLM. Mirrors the exact
  * shapes/defaults FirestoreService already uses client-side
  * (getUserInjuryData()'s injuries:[]/injuryFilteringEnabled:false
- * defaults, getSessionsPage()'s orderBy('date', desc).limit(N) shape,
- * planProgress/{planId}'s currentDayIndex/lastCompletedDate/
+ * defaults, planProgress/{planId}'s currentDayIndex/lastCompletedDate/
  * breakModeActive fields) — kept in sync by hand since this runs via
  * firebase-admin instead of the Flutter client. Only ever called when
  * aiPersonalizationConsent is already confirmed true by the caller.
+ *
+ * The flat "last 5 sessions" list this used to end with has been replaced
+ * by a pre-computed week-over-week delta line (this week vs last week,
+ * percentage already computed here rather than left for the LLM to derive)
+ * plus the same 3 insight lines post-session summary also gets — see
+ * buildInsights().
  *
  * Deliberately sends only short summarized text, never raw documents —
  * in particular, session docs' full `exercises` array and any
@@ -356,10 +762,11 @@ exports.sendAdminBroadcast = onDocumentCreated(
  *   users/{uid} doc (avoids a second read of the same doc — body-profile
  *   fields and trackedPlanId/trackedPlanName live on it alongside
  *   aiPersonalizationConsent).
+ * @param {Date} now
  * @return {Promise<string>} non-empty categories joined by newlines, or
  *   "" if nothing was available (brand-new user).
  */
-async function buildPersonalizationContext(uid, userData) {
+async function buildPersonalizationContext(uid, userData, now) {
   const lines = [];
 
   // Body profile — only fields that are actually present are included;
@@ -424,44 +831,20 @@ async function buildPersonalizationContext(uid, userData) {
     }
   }
 
-  // Recent sessions — last 5 by date, same orderBy/limit shape as
-  // getSessionsPage()'s unfiltered case (no composite index needed).
-  // Headline stat only per session — never the full exercises array or
-  // photoBase64.
+  // Recent activity — week-over-week delta line, then the 3 shared insight
+  // lines (volume/distance trend, plan adherence, streak/rest-day) — see
+  // buildInsights() above. Replaces the old flat "last 5 sessions" list.
   try {
-    const sessionsSnap = await db
-        .collection("users")
-        .doc(uid)
-        .collection("sessions")
-        .orderBy("date", "desc")
-        .limit(5)
-        .get();
-    if (!sessionsSnap.empty) {
-      const summaries = sessionsSnap.docs.map((doc) => {
-        const s = doc.data();
-        const type = s.type || "session";
-        const dateStr = s.date && typeof s.date.toDate === "function" ?
-          s.date.toDate().toISOString().substring(0, 10) :
-          "unknown date";
-        const minutes = typeof s.durationSeconds === "number" ?
-          Math.round(s.durationSeconds / 60) :
-          null;
-        let stat = null;
-        if (type === "gym" && typeof s.totalVolume === "number") {
-          stat = `${Math.round(s.totalVolume)}kg volume`;
-        } else if (type === "cardio" && typeof s.distanceMeters === "number") {
-          stat = `${(s.distanceMeters / 1000).toFixed(1)}km`;
-        }
-        const bits = [dateStr, type];
-        if (minutes !== null) bits.push(`${minutes}min`);
-        if (stat !== null) bits.push(stat);
-        return bits.join(" ");
-      });
-      lines.push(`Recent sessions: ${summaries.join("; ")}.`);
-    }
+    const {weekStart: lastStart, weekEnd: lastEnd} = getWeekRange(now, -1);
+    const [{insightLines, thisWeekStats}, lastWeekStats] = await Promise.all([
+      buildInsights(uid, userData, now),
+      computeSessionStats(uid, lastStart, lastEnd),
+    ]);
+    lines.push(formatWeekDeltaLine(thisWeekStats, lastWeekStats));
+    insightLines.forEach((l) => lines.push(l));
   } catch (err) {
     console.error(
-        `buildPersonalizationContext: sessions read failed for uid ` +
+        `buildPersonalizationContext: insight computation failed for uid ` +
         `${uid}:`, err,
     );
   }
@@ -509,6 +892,17 @@ async function buildPersonalizationContext(uid, userData) {
  * is caught and logged, never allowed to block the underlying chat reply —
  * personalization is additive and best-effort, not a hard dependency.
  *
+ * Post-session summary insights (later phase): the absence of a
+ * system-role message is what identifies a request as post-session
+ * summary rather than chat (see the two branches below) — it's the same
+ * signal the personalization comment above already relied on to know it's
+ * safe to skip system-message injection for that feature. Unlike chat,
+ * this branch is NOT gated by aiPersonalizationConsent: post-session
+ * summary is a separate feature that has never had a consent gate, and
+ * this phase doesn't add one. It always appends the 3 shared insight
+ * lines (see buildInsights()) onto the single user-role message when uid
+ * is present, best-effort/non-blocking exactly like the chat branch.
+ *
  * @param {{messages: {role: string, content: string}[], maxTokens?: number, temperature?: number}} request.data
  * @return {Promise<{content: string}>}
  */
@@ -525,45 +919,44 @@ exports.callWiseCoachOpenAI = onCall(
       }
 
       const uid = request.auth && request.auth.uid;
-      // TEMPORARY DIAGNOSTIC LOGGING — added for the "personalization not
-      // reaching the LLM" investigation. Does not change any behavior,
-      // only adds visibility into the consent/injection branch, which
-      // previously had zero logging on its success path. Remove once the
-      // root cause is confirmed via a fresh on-device test + these logs.
-      console.log(`callWiseCoachOpenAI DIAGNOSTIC: uid=${uid || "none"}`);
       if (uid) {
         try {
-          const userDoc = await db.collection("users").doc(uid).get();
-          const userData = userDoc.exists ? userDoc.data() : {};
-          console.log(
-              "callWiseCoachOpenAI DIAGNOSTIC: userDoc.exists=" +
-              `${userDoc.exists}, aiPersonalizationConsent=` +
-              `${userData.aiPersonalizationConsent}`,
-          );
-          if (userData.aiPersonalizationConsent === true) {
-            const context = await buildPersonalizationContext(uid, userData);
-            console.log(
-                "callWiseCoachOpenAI DIAGNOSTIC: context length=" +
-                `${context ? context.length : 0}` +
-                (context ? ` content=${JSON.stringify(context)}` : ""),
-            );
-            if (context) {
-              const systemMessage = messages.find((m) => m.role === "system");
-              console.log(
-                  "callWiseCoachOpenAI DIAGNOSTIC: systemMessage found=" +
-                  `${!!systemMessage}`,
-              );
-              if (systemMessage) {
+          const now = new Date();
+          const systemMessage = messages.find((m) => m.role === "system");
+          if (systemMessage) {
+            // Chat — personalization (including the 3 shared insights)
+            // only when the user has explicitly consented.
+            const userDoc = await db.collection("users").doc(uid).get();
+            const userData = userDoc.exists ? userDoc.data() : {};
+            if (userData.aiPersonalizationConsent === true) {
+              const context = await buildPersonalizationContext(uid, userData, now);
+              if (context) {
                 systemMessage.content =
                     `${systemMessage.content}\n\nWhat you know about this ` +
                     "user (reference this naturally where relevant, don't " +
                     `recite it verbatim):\n${context}`;
               }
             }
+          } else {
+            // Post-session summary — no system message, no consent gate
+            // (never had one, see doc comment above). The 3 shared insight
+            // lines are always appended onto the single user-role message.
+            const userMessage = messages.find((m) => m.role === "user");
+            if (userMessage) {
+              const userDoc = await db.collection("users").doc(uid).get();
+              const userData = userDoc.exists ? userDoc.data() : {};
+              const {insightLines} = await buildInsights(uid, userData, now);
+              if (insightLines.length > 0) {
+                userMessage.content =
+                    `${userMessage.content}\n\nAdditional context on this ` +
+                    "user's recent training (weave this in naturally, " +
+                    `don't just list it):\n${insightLines.join("\n")}`;
+              }
+            }
           }
         } catch (err) {
           console.error(
-              `callWiseCoachOpenAI: personalization context failed for ` +
+              `callWiseCoachOpenAI: personalization/insights failed for ` +
               `uid ${uid}:`, err,
           );
         }

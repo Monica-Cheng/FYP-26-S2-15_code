@@ -1,8 +1,10 @@
 // lib/widgets/quick_add_sheet.dart
-// A reusable bottom sheet for multi-purpose "+" buttons — shows a list of
-// tappable options (icon, title, subtitle). Used by the Home tab FAB to let
-// the user choose between scanning food, describing a meal, or logging an
-// activity, without needing three separate buttons cluttering the screen.
+// A reusable bottom sheet for multi-purpose "+"/picker buttons — shows a
+// list of tappable options (icon, title, subtitle) under a heading/subheading
+// that's also caller-supplied (defaults to "Quick Add" / "What would you
+// like to log?", the Home tab FAB's original use case). Also reused by
+// profile_screen.dart's photo picker and post_session_summary_screen.dart's
+// share-card photo picker, each passing their own copy.
 
 import 'package:flutter/material.dart';
 
@@ -32,19 +34,23 @@ class QuickAddOption {
 // ---------------------------------------------------------------------------
 Future<void> showQuickAddSheet(
   BuildContext context,
-  List<QuickAddOption> options,
-) {
+  List<QuickAddOption> options, {
+  String title = 'Quick Add',
+  String subtitle = 'What would you like to log?',
+}) {
   return showModalBottomSheet(
     context: context,
     backgroundColor: Colors.transparent,
     isScrollControlled: true,
-    builder: (_) => _QuickAddSheet(options: options),
+    builder: (_) => _QuickAddSheet(options: options, title: title, subtitle: subtitle),
   );
 }
 
 class _QuickAddSheet extends StatelessWidget {
   final List<QuickAddOption> options;
-  const _QuickAddSheet({required this.options});
+  final String title;
+  final String subtitle;
+  const _QuickAddSheet({required this.options, required this.title, required this.subtitle});
 
   @override
   Widget build(BuildContext context) {
@@ -74,9 +80,9 @@ class _QuickAddSheet extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 18),
-              const Text('Quick Add', style: WW.titleLarge),
+              Text(title, style: WW.titleLarge),
               const SizedBox(height: 3),
-              const Text('What would you like to log?', style: WW.labelMed),
+              Text(subtitle, style: WW.labelMed),
               const SizedBox(height: 16),
               for (final option in options) _QuickAddTile(option: option),
               const SizedBox(height: 4),
