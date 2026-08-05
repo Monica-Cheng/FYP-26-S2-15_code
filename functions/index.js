@@ -3996,6 +3996,225 @@ exports.adminGetAnalyticsDashboard = onCall(async (request) => {
   };
 });
 
+function normalizeBusinessPartnerAdminStatus(partner) {
+  if (partner?.isApproved === true) {
+    return "approved";
+  }
+
+  return "pending";
+}
+
+/**
+ * Returns all coach applications for the React admin dashboard.
+ */
+exports.adminListBusinessPartners = onCall(async (request) => {
+  await requireAdmin(request);
+
+  const partnersSnapshot =
+    await db.collection("businessPartners").get();
+
+  const partners = partnersSnapshot.docs.map((partnerDocument) => {
+    const data = partnerDocument.data() || {};
+
+    return {
+      id: partnerDocument.id,
+      ...serializeAdminFirestoreValue(data),
+      status: normalizeBusinessPartnerAdminStatus(data),
+    };
+  });
+
+  partners.sort((first, second) => {
+    const firstDate = new Date(first.createdAt || 0);
+    const secondDate = new Date(second.createdAt || 0);
+
+    return secondDate.getTime() - firstDate.getTime();
+  });
+
+  return {
+    partners,
+  };
+});
+
+/**
+ * Approves one coach application and makes it visible in the Flutter
+ * professional directory.
+ */
+exports.adminApproveBusinessPartner = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const partnerUid =
+    typeof request.data?.partnerUid === "string" ?
+      request.data.partnerUid.trim() :
+      "";
+
+  const confirmation = request.data?.confirmation;
+
+  if (!partnerUid) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Business partner UID is required.",
+    );
+  }
+
+  if (confirmation !== "APPROVE PARTNER") {
+    throw new HttpsError(
+        "failed-precondition",
+        "Approval confirmation is incorrect.",
+    );
+  }
+
+  const partnerRef =
+    db.collection("businessPartners").doc(partnerUid);
+
+  const partnerSnapshot = await partnerRef.get();
+
+  if (!partnerSnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Business partner application not found.",
+    );
+  }
+
+  const partner = partnerSnapshot.data() || {};
+
+  if (partner.isApproved === true && partner.isVisible === true) {
+    return {
+      success: true,
+      partnerUid,
+      alreadyApproved: true,
+    };
+  }
+
+  await partnerRef.update({
+    isApproved: true,
+    isVisible: true,
+    approvedAt: FieldValue.serverTimestamp(),
+    approvedByAdminUid: adminUid,
+    revocationReason: FieldValue.delete(),
+    revokedAt: FieldValue.delete(),
+    revokedByAdminUid: FieldValue.delete(),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  console.log(
+      `adminApproveBusinessPartner: ${adminUid} approved ${partnerUid}`,
+  );
+
+  return {
+    success: true,
+    partnerUid,
+    isApproved: true,
+    isVisible: true,
+  };
+});
+
+/**
+ * Revokes an approved coach and returns the application to the existing
+ * pending state. Revocation is blocked while client relationships or
+ * unresolved coach requests still exist.
+ */
+exports.adminRevokeBusinessPartner = onCall(async (request) => {
+  const adminUid = await requireAdmin(request);
+
+  const partnerUid =
+    typeof request.data?.partnerUid === "string" ?
+      request.data.partnerUid.trim() :
+      "";
+
+  const confirmation = request.data?.confirmation;
+  const reason =
+  typeof request.data?.reason === "string"
+    ? request.data.reason.trim()
+    : "";
+
+if (!reason) {
+  throw new HttpsError(
+      "invalid-argument",
+      "A revocation reason is required.",
+  );
+}
+
+if (reason.length > 500) {
+  throw new HttpsError(
+      "invalid-argument",
+      "Revocation reason cannot exceed 500 characters.",
+  );
+}
+
+  if (!partnerUid) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Business partner UID is required.",
+    );
+  }
+
+  if (confirmation !== "REVOKE PARTNER") {
+    throw new HttpsError(
+        "failed-precondition",
+        "Revocation confirmation is incorrect.",
+    );
+  }
+
+  const partnerRef =
+    db.collection("businessPartners").doc(partnerUid);
+
+  const partnerSnapshot = await partnerRef.get();
+
+  if (!partnerSnapshot.exists) {
+    throw new HttpsError(
+        "not-found",
+        "Business partner application not found.",
+    );
+  }
+
+  const [clientsSnapshot, requestsSnapshot] = await Promise.all([
+    db.collection("coachClients")
+        .where("coachUid", "==", partnerUid)
+        .limit(1)
+        .get(),
+
+    db.collection("coachRequests")
+        .where("coachUid", "==", partnerUid)
+        .limit(1)
+        .get(),
+  ]);
+
+  if (!clientsSnapshot.empty) {
+    throw new HttpsError(
+        "failed-precondition",
+        "This coach still has active clients and cannot be revoked.",
+    );
+  }
+
+  if (!requestsSnapshot.empty) {
+    throw new HttpsError(
+        "failed-precondition",
+        "This coach still has pending client requests and cannot be revoked.",
+    );
+  }
+
+    await partnerRef.update({
+    isApproved: false,
+    isVisible: false,
+    revocationReason: reason,
+    revokedAt: FieldValue.serverTimestamp(),
+    revokedByAdminUid: adminUid,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  console.log(
+      `adminRevokeBusinessPartner: ${adminUid} revoked ${partnerUid}`,
+  );
+
+  return {
+    success: true,
+    partnerUid,
+    isApproved: false,
+    isVisible: false,
+    revocationReason: reason,
+  };
+});
+
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
 // plaintext .env value — the previous approach in the Flutter app bundled
 // .env as a Flutter asset (pubspec.yaml's flutter:assets:), which ships it

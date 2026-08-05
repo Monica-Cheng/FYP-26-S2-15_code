@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { collection, getDocs } from 'firebase/firestore';
+import React, { useState, useEffect, useCallback } from 'react';
+import { functions } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import Badge from '../components/ui/Badge';
@@ -12,58 +12,170 @@ function BusinessPartners() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
   const [error, setError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
+  const [processingUid, setProcessingUid] = useState(null);
+
+  const fetchPartners = useCallback(async () => {
+    setLoading(true);
+    setError('');
+
+    try {
+      const adminListBusinessPartners = httpsCallable(
+        functions,
+        'adminListBusinessPartners'
+      );
+
+      const result = await adminListBusinessPartners();
+      const data = result.data?.partners;
+
+      setPartners(
+        Array.isArray(data) ? data : []
+      );
+    } catch (err) {
+      console.error('Failed to load business partners:', err);
+
+      const detail = err?.code ? ` (${err.code})` : '';
+
+      setError(
+        `Failed to load business partners.${detail}`
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchPartners = async () => {
-      setLoading(true);
-      setError('');
-
-      try {
-        const snap = await getDocs(collection(db, 'businessPartners'));
-
-        const data = snap.docs.map((document) => {
-          const raw = document.data();
-
-          let status = 'pending';
-
-          if (raw.isApproved === true) {
-            status = 'approved';
-          } else if (raw.rejectionReason) {
-            status = 'rejected';
-          }
-
-          return {
-            id: document.id,
-            ...raw,
-            status,
-          };
-        });
-
-        setPartners(data);
-      } catch (err) {
-        console.error(err);
-        setError(
-          err.code === 'permission-denied'
-            ? 'Failed to load business partners. (permission-denied)'
-            : 'Failed to load business partners.'
-        );
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchPartners();
-  }, []);
+  }, [fetchPartners]);
 
   const filtered =
     filter === 'all'
       ? partners
-      : partners.filter((partner) => partner.status === filter);
+      : partners.filter(
+          partner => partner.status === filter
+        );
 
-  const statusTone = (status) => {
-    if (status === 'approved') return 'success';
-    if (status === 'rejected') return 'danger';
-    return 'warning';
+  const statusTone = status =>
+    status === 'approved' ? 'success' : 'warning';
+
+  const handleApprove = async partner => {
+    const confirmation = window.prompt(
+      `Approve "${partner.name || partner.id}" as a coach?\n\n` +
+      'This will make the coach visible in the Flutter professional directory.\n\n' +
+      'Type APPROVE PARTNER exactly to continue:'
+    );
+
+    if (confirmation !== 'APPROVE PARTNER') return;
+
+    setProcessingUid(partner.id);
+    setError('');
+    setSuccessMsg('');
+
+    try {
+      const adminApproveBusinessPartner = httpsCallable(
+        functions,
+        'adminApproveBusinessPartner'
+      );
+
+      await adminApproveBusinessPartner({
+        partnerUid: partner.id,
+        confirmation,
+      });
+
+      setPartners(prev =>
+        prev.map(item =>
+          item.id === partner.id
+            ? {
+                ...item,
+                isApproved: true,
+                isVisible: true,
+                status: 'approved',
+                revocationReason: undefined,
+              }
+            : item
+        )
+      );
+
+      setSuccessMsg(
+        `${partner.name || 'Business partner'} approved successfully.`
+      );
+
+      setTimeout(() => setSuccessMsg(''), 3000);
+    } catch (err) {
+      console.error('Failed to approve business partner:', err);
+
+      const detail = err?.code ? ` (${err.code})` : '';
+
+      setError(
+        `Failed to approve business partner.${detail}`
+      );
+    } finally {
+      setProcessingUid(null);
+    }
+  };
+
+  const handleRevoke = async partner => {
+    const reason = window.prompt(
+      `Enter the reason for revoking "${partner.name || partner.id}":`
+    );
+  
+    if (!reason || !reason.trim()) return;
+  
+    const confirmation = window.prompt(
+      `Revoke coach approval for "${partner.name || partner.id}"?\n\n` +
+      `Reason: ${reason.trim()}\n\n` +
+      'Type REVOKE PARTNER exactly to continue:'
+    );
+  
+    if (confirmation !== 'REVOKE PARTNER') return;
+  
+    setProcessingUid(partner.id);
+    setError('');
+    setSuccessMsg('');
+  
+    try {
+      const adminRevokeBusinessPartner = httpsCallable(
+        functions,
+        'adminRevokeBusinessPartner'
+      );
+  
+      await adminRevokeBusinessPartner({
+        partnerUid: partner.id,
+        confirmation,
+        reason: reason.trim(),
+      });
+  
+      setPartners(prev =>
+        prev.map(item =>
+          item.id === partner.id
+            ? {
+                ...item,
+                isApproved: false,
+                isVisible: false,
+                status: 'pending',
+                revocationReason: reason.trim(),
+              }
+            : item
+        )
+      );
+  
+      setSuccessMsg(
+        `${partner.name || 'Business partner'} approval revoked successfully.`
+      );
+  
+      setTimeout(() => setSuccessMsg(''), 3000);
+    } catch (err) {
+      console.error('Failed to revoke business partner:', err);
+  
+      const detail = err?.code ? ` (${err.code})` : '';
+  
+      setError(
+        `Failed to revoke business partner.${detail} ` +
+        'The coach may still have active clients or pending requests.'
+      );
+    } finally {
+      setProcessingUid(null);
+    }
   };
 
   return (
@@ -81,15 +193,19 @@ function BusinessPartners() {
 
       {error && (
         <div
-          style={{
-            backgroundColor: '#fff0f0',
-            color: '#cc0000',
-            padding: '12px 16px',
-            borderRadius: '10px',
-            marginBottom: '18px',
-          }}
+          className="wwa-alert-error"
+          style={{ marginBottom: 16 }}
         >
           {error}
+        </div>
+      )}
+
+      {successMsg && (
+        <div style={{ marginBottom: 16 }}>
+          <span className="wwa-status-pill">
+            <span className="wwa-status-dot" />
+            {successMsg}
+          </span>
         </div>
       )}
 
@@ -98,9 +214,10 @@ function BusinessPartners() {
       ) : (
         <>
           <div className="wwa-pill-group">
-            {['all', 'pending', 'approved', 'rejected'].map((item) => (
+            {['all', 'pending', 'approved'].map(item => (
               <button
                 key={item}
+                type="button"
                 onClick={() => setFilter(item)}
                 className={`wwa-pill ${
                   filter === item ? 'wwa-pill-active' : ''
@@ -112,77 +229,78 @@ function BusinessPartners() {
           </div>
 
           <div className="wwa-row-list">
-            {filtered.map((partner) => (
-              <div key={partner.id} className="wwa-row-card">
-                <div>
-                  <div className="wwa-row-title">
-                    {partner.name || 'Unnamed applicant'}
-                  </div>
+            {filtered.map(partner => {
+              const processing =
+                processingUid === partner.id;
 
-                  <div className="wwa-row-sub">
-                    {partner.email || 'No email provided'}
-                  </div>
-
-                  <div className="wwa-row-meta">
-                    {partner.type || 'No partner type provided'}
-                  </div>
-
-                  {partner.experience && (
-                    <div className="wwa-row-meta">
-                      Experience: {partner.experience}
+              return (
+                <div
+                  key={partner.id}
+                  className="wwa-row-card"
+                >
+                  <div>
+                    <div className="wwa-row-title">
+                      {partner.name || 'Unnamed applicant'}
                     </div>
-                  )}
-                </div>
 
-                <div className="wwa-row-actions">
-                  <Badge tone={statusTone(partner.status)}>
-                    {partner.status}
-                  </Badge>
+                    <div className="wwa-row-sub">
+                      {partner.email || 'No email provided'}
+                    </div>
 
-                  {partner.status === 'pending' && (
-                    <>
+                    <div className="wwa-row-meta">
+                      {partner.type || 'No partner type provided'}
+                    </div>
+
+                    {partner.experience && (
+                      <div className="wwa-row-meta">
+                        Experience: {partner.experience}
+                      </div>
+                    )}
+
+                    {partner.bio && (
+                      <div className="wwa-row-meta">
+                        Bio: {partner.bio}
+                      </div>
+                    )}
+
+                    {partner.revocationReason && (
+                      <div className="wwa-row-meta">
+                        Last revocation reason: {partner.revocationReason}
+                      </div>
+                    )}
+                  </div>
+                  
+
+                  <div className="wwa-row-actions">
+                    <Badge tone={statusTone(partner.status)}>
+                      {partner.status}
+                    </Badge>
+
+                    {partner.status === 'pending' && (
                       <button
                         type="button"
                         className="wwa-btn wwa-btn-success"
-                        onClick={() =>
-                          window.alert(
-                            'Approve will be connected after the secure Cloud Function is added.'
-                          )
-                        }
+                        onClick={() => handleApprove(partner)}
+                        disabled={processing}
                       >
-                        Approve
+                        {processing ? 'Approving...' : 'Approve'}
                       </button>
+                    )}
 
+                    {partner.status === 'approved' && (
                       <button
                         type="button"
-                        className="wwa-btn wwa-btn-danger-solid"
-                        onClick={() =>
-                          window.alert(
-                            'Reject will be connected after the secure Cloud Function is added.'
-                          )
-                        }
+                        className="wwa-btn wwa-btn-danger"
+                        onClick={() => handleRevoke(partner)}
+                        disabled={processing}
                       >
-                        Reject
+                        {processing ? 'Revoking...' : 'Revoke'}
                       </button>
-                    </>
-                  )}
-
-                  {partner.status === 'approved' && (
-                    <button
-                      type="button"
-                      className="wwa-btn wwa-btn-danger"
-                      onClick={() =>
-                        window.alert(
-                          'Revoke will be connected after the secure Cloud Function is added.'
-                        )
-                      }
-                    >
-                      Revoke
-                    </button>
-                  )}
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
 
             {filtered.length === 0 && (
               <EmptyState
