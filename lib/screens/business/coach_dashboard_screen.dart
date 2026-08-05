@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
@@ -268,6 +269,48 @@ class _CoachManagementBodyState extends State<CoachManagementBody> {
     final coachUid = _authService.getCurrentUser()?.uid;
     if (coachUid == null) return _buildNoApplicationState();
 
+    // Persistent regardless of the request/client list state below —
+    // this is about the coach's plan library in general now (any client
+    // with an accepted relationship can see it), not tied to a specific
+    // client row, so it isn't nested under either section.
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+          child: _buildCreatePlanButton(),
+        ),
+        Expanded(child: _buildRequestsAndClients(coachUid)),
+      ],
+    );
+  }
+
+  Widget _buildCreatePlanButton() {
+    return GestureDetector(
+      onTap: () => context.push(Routes.buildRoutine, extra: {'isCoachPlan': true}),
+      child: Container(
+        height: 48,
+        decoration: BoxDecoration(
+          color: WW.primary,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Center(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.add_rounded, color: Colors.white, size: 20),
+              SizedBox(width: 6),
+              Text(
+                'Create a Plan',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRequestsAndClients(String coachUid) {
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: _firestoreService.getCoachRequestsStream(coachUid),
       builder: (context, snapshot) {

@@ -4,6 +4,7 @@
 // FAB shown only on Home tab; tapping shows SnackBar.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -127,38 +128,43 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _onFabTap() {
-    showQuickAddSheet(context, [
-      QuickAddOption(
-        icon: Icons.camera_alt_rounded,
-        iconColor: WW.lavender,
-        iconBg: WW.lavenderBg,
-        title: 'Scan Food',
-        subtitle: 'Snap a photo for instant calories',
-        onTap: () => context
-            .push(Routes.nutritionScan)
-            .then((_) => _homeTabKey.currentState?._loadUserData()),
-      ),
-      QuickAddOption(
-        icon: Icons.edit_note_rounded,
-        iconColor: WW.teal,
-        iconBg: WW.tealBg,
-        title: 'Describe a Meal',
-        subtitle: 'Type what you ate instead',
-        onTap: () => context
-            .push(Routes.nutritionScan, extra: 'describe')
-            .then((_) => _homeTabKey.currentState?._loadUserData()),
-      ),
-      QuickAddOption(
-        icon: Icons.fitness_center_rounded,
-        iconColor: WW.gold,
-        iconBg: WW.gold.withValues(alpha: 0.14),
-        title: 'Log Activity',
-        subtitle: 'Manually add a workout or exercise',
-        onTap: () => context
-            .push(Routes.manualActivityLog)
-            .then((_) => _homeTabKey.currentState?._loadUserData()),
-      ),
-    ]);
+    showQuickAddSheet(
+      context,
+      [
+        QuickAddOption(
+          icon: Icons.camera_alt_rounded,
+          iconColor: WW.lavender,
+          iconBg: WW.lavenderBg,
+          title: 'Scan Food',
+          subtitle: 'Snap a photo for instant calories',
+          onTap: () => context
+              .push(Routes.nutritionScan)
+              .then((_) => _homeTabKey.currentState?._loadUserData()),
+        ),
+        QuickAddOption(
+          icon: Icons.edit_note_rounded,
+          iconColor: WW.teal,
+          iconBg: WW.tealBg,
+          title: 'Describe a Meal',
+          subtitle: 'Type what you ate instead',
+          onTap: () => context
+              .push(Routes.nutritionScan, extra: 'describe')
+              .then((_) => _homeTabKey.currentState?._loadUserData()),
+        ),
+        QuickAddOption(
+          icon: Icons.fitness_center_rounded,
+          iconColor: WW.gold,
+          iconBg: WW.gold.withValues(alpha: 0.14),
+          title: 'Log Activity',
+          subtitle: 'Manually add a workout or exercise',
+          onTap: () => context
+              .push(Routes.manualActivityLog)
+              .then((_) => _homeTabKey.currentState?._loadUserData()),
+        ),
+      ],
+      title: 'Quick Add',
+      subtitle: 'What would you like to log?',
+    );
   }
 
   @override
@@ -266,6 +272,7 @@ class _HomeTabState extends State<_HomeTab> {
   final _firestoreService = FirestoreService();
 
   String? _displayName;
+  String? _photoBase64;
   bool _isLoadingName = true;
   // Covers the whole "profile group" (display name, calorie goal settings,
   // tracked plan id/name) — see _loadProfileGroup(). One flag for the
@@ -340,6 +347,7 @@ class _HomeTabState extends State<_HomeTab> {
           _trackedPlanId = newPlanId;
           _displayName =
               doc.data()?['displayName'] as String? ?? _displayName;
+          _photoBase64 = doc.data()?['photoBase64'] as String?;
         });
         if (planChanged && newPlanId.isNotEmpty) {
           _startProgressStream(uid, newPlanId);
@@ -707,6 +715,7 @@ class _HomeTabState extends State<_HomeTab> {
 
       setState(() {
         _displayName = profile?['displayName'] as String?;
+        _photoBase64 = profile?['photoBase64'] as String?;
         _isLoadingName = false;
         _profileError = false;
         _calorieGoalActive = profile?['calorieGoalActive'] as bool? ?? false;
@@ -964,19 +973,21 @@ class _HomeTabState extends State<_HomeTab> {
                             padding: const EdgeInsets.fromLTRB(18, 0, 18, 24),
                             itemCount: notifications.length,
                             separatorBuilder: (_, __) =>
-                                const Divider(height: 1, color: WW.elevated),
+                                const SizedBox(height: 10),
                             itemBuilder: (_, i) {
                               final n = notifications[i];
                               final read = n['read'] == true;
                               final notificationId =
                                   n['notificationId'] as String?;
+                              final type = n['type'] as String? ?? '';
                               final isChallengeInvite =
-                                  n['type'] == 'challenge_invite';
+                                  type == 'challenge_invite';
                               final inviteStatus =
                                   n['status'] as String? ?? 'pending';
                               final isProcessing = notificationId != null &&
                                   processingIds.contains(notificationId);
                               return InkWell(
+                                borderRadius: BorderRadius.circular(16),
                                 onTap: notificationId == null
                                     ? null
                                     : () {
@@ -987,37 +998,49 @@ class _HomeTabState extends State<_HomeTab> {
                                           widget.onGoToClubFriends?.call();
                                         }
                                       },
-                                child: Padding(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 12),
+                                child: Container(
+                                  padding: const EdgeInsets.all(14),
+                                  decoration: BoxDecoration(
+                                    color: read ? WW.card : WW.elevated,
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(color: WW.border, width: 0.5),
+                                    boxShadow: WW.shadow,
+                                  ),
                                   child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      Container(
-                                        width: 8,
-                                        height: 8,
-                                        margin: const EdgeInsets.only(right: 10),
-                                        decoration: BoxDecoration(
-                                          color: read
-                                              ? Colors.transparent
-                                              : WW.primary,
-                                          shape: BoxShape.circle,
-                                        ),
+                                      _NotificationIcon(
+                                        icon: _notificationIcon(type),
+                                        showUnreadDot: !read,
                                       ),
+                                      const SizedBox(width: 12),
                                       Expanded(
-                                        child: Text(
-                                          _notificationText(n),
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: read
-                                                ? FontWeight.w500
-                                                : FontWeight.w700,
-                                            color: WW.text,
-                                          ),
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              _notificationText(n),
+                                              style: TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: read
+                                                    ? FontWeight.w500
+                                                    : FontWeight.w700,
+                                                color: WW.text,
+                                                height: 1.3,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              _relativeTime(n['createdAt']),
+                                              style: WW.caption,
+                                            ),
+                                          ],
                                         ),
                                       ),
                                       // Only challenge_invite gets extra
                                       // trailing content — every other type
-                                      // keeps the plain dot+text row above.
+                                      // keeps the plain icon+text+time card
+                                      // above.
                                       if (isChallengeInvite &&
                                           notificationId != null) ...[
                                         const SizedBox(width: 10),
@@ -1177,6 +1200,49 @@ class _HomeTabState extends State<_HomeTab> {
     );
   }
 
+  // One glyph per notification type actually produced anywhere in this
+  // app (kept in sync with _notificationText()'s own switch below — same
+  // types, same order) so a card never falls back to a generic/missing
+  // icon. Deliberately all WW.primary (see _NotificationIcon), matching
+  // this app's 2-color-minimalist system from the Feed redesign — the
+  // glyph itself is what distinguishes types, not a rainbow of accent
+  // colors per type.
+  IconData _notificationIcon(String type) {
+    switch (type) {
+      case 'friend_request':
+        return Icons.person_add_rounded;
+      case 'friend_accepted':
+        return Icons.how_to_reg_rounded;
+      case 'coach_request_accepted':
+        // Same badge glyph used for the coach system elsewhere
+        // (coach_register_screen.dart, profile_screen.dart's Coach
+        // Dashboard link) rather than inventing a new one for this.
+        return Icons.badge_rounded;
+      case 'challenge_invite':
+        return Icons.emoji_events_rounded;
+      case 'challenge_friend_progress':
+        return Icons.trending_up_rounded;
+      case 'admin_broadcast':
+        return Icons.campaign_rounded;
+      default:
+        return Icons.notifications_rounded;
+    }
+  }
+
+  // Same Today/Yesterday/"X days ago" shape as progress_screen.dart's own
+  // _formatTs() (its _XpRow widget) — ported rather than imported, since
+  // that one is a private method on a different file's class, but the
+  // exact same pattern so relative timestamps read consistently
+  // app-wide instead of introducing a second, differently-worded style.
+  String _relativeTime(dynamic ts) {
+    if (ts is! Timestamp) return 'Recently';
+    final date = ts.toDate();
+    final diff = DateTime.now().difference(date);
+    if (diff.inDays == 0) return 'Today';
+    if (diff.inDays == 1) return 'Yesterday';
+    return '${diff.inDays} days ago';
+  }
+
   String _notificationText(Map<String, dynamic> n) {
     final type = n['type'] as String? ?? '';
     final fromName = n['fromDisplayName'] as String? ?? 'Someone';
@@ -1186,6 +1252,12 @@ class _HomeTabState extends State<_HomeTab> {
         return '$fromName sent you a friend request';
       case 'friend_accepted':
         return '$fromName accepted your friend request';
+      case 'coach_request_accepted':
+        // fromName here is coachDisplayName, written by
+        // acceptCoachRequest() in firestore_service.dart — same
+        // fromDisplayName field every other case already reads, just
+        // populated with the coach's own name for this type.
+        return 'Coach $fromName accepted your request';
       case 'challenge_invite':
         return '$fromName invited you to challenge $challengeName';
       case 'challenge_friend_progress':
@@ -1359,19 +1431,44 @@ class _HomeTabState extends State<_HomeTab> {
                 shape: BoxShape.circle,
                 border: Border.all(color: WW.primary, width: 1.5),
               ),
-              child: Center(
-                child: Text(
-                  initials,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w800,
-                    color: WW.primary,
-                  ),
-                ),
-              ),
+              child: ClipOval(child: _buildTopBarAvatarContent(initials)),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  // Shows the real uploaded photo when present (same field/decode pattern
+  // as profile_screen.dart's _buildAvatarContent()), falling back to the
+  // initials circle otherwise.
+  Widget _buildTopBarAvatarContent(String initials) {
+    final photo = _photoBase64;
+    if (photo != null && photo.isNotEmpty) {
+      try {
+        return Image.memory(
+          base64Decode(photo),
+          width: 38,
+          height: 38,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _buildTopBarInitialAvatar(initials),
+        );
+      } catch (_) {
+        return _buildTopBarInitialAvatar(initials);
+      }
+    }
+    return _buildTopBarInitialAvatar(initials);
+  }
+
+  Widget _buildTopBarInitialAvatar(String initials) {
+    return Center(
+      child: Text(
+        initials,
+        style: const TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w800,
+          color: WW.primary,
+        ),
       ),
     );
   }
@@ -1466,8 +1563,12 @@ class _ChallengeInviteStatusPill extends StatelessWidget {
     final label = status == 'accepted' ? 'Accepted' : 'Declined';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      // WW.chipBg instead of the old WW.elevated — the notification
+      // card itself now uses WW.card/WW.elevated as its own background
+      // (see _showNotificationsSheet's itemBuilder), so this pill needs
+      // a background that still reads as a distinct pill against either.
       decoration: BoxDecoration(
-        color: WW.elevated,
+        color: WW.chipBg,
         borderRadius: BorderRadius.circular(20),
       ),
       child: Text(
@@ -1477,6 +1578,56 @@ class _ChallengeInviteStatusPill extends StatelessWidget {
           fontWeight: FontWeight.w700,
           color: WW.textSec,
         ),
+      ),
+    );
+  }
+}
+
+// Circular icon badge for the leading element of each notification card
+// — same visual weight/size as FeedPostCard's own initials-circle avatar
+// (radius 18), but a type-specific icon glyph instead of initials, since
+// not every notification type has a meaningful single "sender" to show
+// initials for (admin_broadcast has none at all). Single WW.primary
+// treatment for every type, matching this app's 2-color-minimalist
+// system — the glyph is what differs per type, not the color.
+class _NotificationIcon extends StatelessWidget {
+  final IconData icon;
+  final bool showUnreadDot;
+
+  const _NotificationIcon({required this.icon, required this.showUnreadDot});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 36,
+      height: 36,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: const BoxDecoration(
+              color: WW.primary,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, size: 18, color: Colors.white),
+          ),
+          if (showUnreadDot)
+            Positioned(
+              top: -1,
+              right: -1,
+              child: Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  color: WW.gold,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: WW.card, width: 1.5),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

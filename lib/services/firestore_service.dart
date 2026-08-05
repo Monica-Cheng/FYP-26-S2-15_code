@@ -59,6 +59,21 @@ class FirestoreService {
     'level',
     'leaderboardVisible',
     'lastWeeklyXpUpdate',
+    // Mirrored so a user's photo can eventually be read cross-user (e.g.
+    // viewing someone else's profile) without opening up users/{uid}'s
+    // owner-only read rule — see user_profile_screen.dart / firestore.rules
+    // investigation notes. Not yet consumed cross-user by any call site;
+    // this only makes the data available on the next photo write.
+    'photoBase64',
+    // Mirrored so user_profile_screen.dart can show another user's real
+    // Level + XP progress bar (via getPublicProfile()) instead of a fake
+    // Lv.1/0 XP default — see that screen's _loadProfile(). NOTE: the
+    // actual XP-earning path is addXpToUser(), which writes its own
+    // explicit publicProfiles batch rather than going through
+    // updateUserProfile() below — that write was updated in the same
+    // change to also include totalXp, so this entry alone is not
+    // sufficient on its own; see addXpToUser()'s doc comment.
+    'totalXp',
   };
 
   // ---------------------------------------------------------------------------
@@ -967,6 +982,55 @@ class FirestoreService {
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // Returns this-calendar-month-scoped session count + total duration for
+  // users/{uid} — same explicit start/end Timestamp range-query shape as
+  // getMonthActivity()/computeChallengeProgress(), but returning aggregate
+  // sums instead of per-date sets. Added for profile_screen.dart's
+  // Sessions/Workout Time stat cards, which used to read getLifetimeStats()
+  // (unscoped, lifetime) and produced meaninglessly huge numbers on a
+  // long-lived account (e.g. "5,222,977 kg Lifted").
+  //
+  // sessionCount mirrors getLifetimeStats()'s own definition exactly (every
+  // doc in range counts, manually-logged included) — a count of activity,
+  // not a validated-only anti-cheat metric.
+  //
+  // durationSeconds sums every doc's durationSeconds field unfiltered
+  // (manually-logged sessions included too, unlike
+  // computeChallengeProgress()'s duration metric, which deliberately
+  // excludes them for anti-cheat reasons — that exclusion doesn't apply
+  // here, this is just "how much time did you spend" across every activity
+  // type). gym/cardio/manual/combined sessions all write durationSeconds
+  // the same way (see saveGymSession()/finalizeInProgressSession()/the
+  // cardio session save paths), so no per-type branching is needed.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, int>> getMonthlyStats(
+    String uid,
+    int year,
+    int month,
+  ) async {
+    final startDate = DateTime(year, month, 1);
+    final endDate = DateTime(year, month + 1, 1);
+
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(startDate))
+        .where('date', isLessThan: Timestamp.fromDate(endDate))
+        .get();
+
+    int durationSeconds = 0;
+    for (final doc in snapshot.docs) {
+      durationSeconds += (doc.data()['durationSeconds'] as num?)?.toInt() ?? 0;
+    }
+
+    return {
+      'sessionCount': snapshot.docs.length,
+      'durationSeconds': durationSeconds,
+    };
+  }
+
   // ═══════════════════════════════════════════════════════════════════════
   // BADGES
   // badges/{badgeId} is admin-managed reference data (name, description,
@@ -1461,12 +1525,17 @@ class FirestoreService {
   // Adds xpEarned to the user's totalXp and weeklyXp, then recalculates and
   // updates their level. Uses merge:true so unrelated fields are untouched.
   //
-  // weeklyXp/level/lastWeeklyXpUpdate are also mirrored into
+  // weeklyXp/level/lastWeeklyXpUpdate/totalXp are also mirrored into
   // publicProfiles/{uid} in the same batch (weekStartDate is not — it's
   // purely an internal anchor for this method's own lazy-reset math below,
   // never read by getFriendsLeaderboardStream(), so it has no reason to
-  // exist on the public doc). totalXp is deliberately not mirrored either —
-  // it isn't one of the 6 fields the leaderboard stream reads.
+  // exist on the public doc). totalXp used to be excluded here too (it
+  // isn't one of the fields the leaderboard stream reads), but
+  // user_profile_screen.dart now needs it to show another user's real XP
+  // progress bar via getPublicProfile() — this method writes its own
+  // explicit batch rather than going through updateUserProfile(), so
+  // adding 'totalXp' to _publicProfileFields alone wouldn't have covered
+  // this, the actual XP-earning path.
   // ---------------------------------------------------------------------------
   Future<void> addXpToUser(String uid, int xpEarned) async {
     final config = await getGamificationConfig();
@@ -1501,6 +1570,7 @@ class FirestoreService {
       'weeklyXp': newWeekly,
       'level': newLevel,
       'lastWeeklyXpUpdate': now,
+      'totalXp': newTotal,
     }, SetOptions(merge: true));
     await batch.commit();
   }
@@ -2252,11 +2322,22 @@ class FirestoreService {
   //   1. users/{uid}/customRoutines/{auto-id}  — private copy
   //   2. plans/{auto-id}                       — discoverable plan entry
   // ---------------------------------------------------------------------------
+  // isCoachPlan defaults to false so every existing call site (a normal
+  // user, or a coach saving an ordinary PERSONAL plan for themselves via
+  // the same screen everyone uses) is completely unaffected — it's only
+  // ever true when build_routine_screen.dart was opened from
+  // coach_dashboard_screen.dart's "Create a Plan" entry point (see that
+  // screen's own extra: {'isCoachPlan': true}). Doesn't change the
+  // existing plans-collection create rule at all (isCustom==true &&
+  // createdBy==caller already covers this write; isCoachPlan is just an
+  // extra field the rule never inspects), so no rules deploy needed for
+  // this.
   Future<void> saveCustomRoutine({
     required String uid,
     required String routineName,
     required List<Map<String, dynamic>> sessions,
     required int daysPerWeek,
+    bool isCoachPlan = false,
   }) async {
     await _db
         .collection(Collections.users)
@@ -2267,6 +2348,7 @@ class FirestoreService {
       'createdAt': FieldValue.serverTimestamp(),
       'sessions': sessions,
       'isCustom': true,
+      if (isCoachPlan) 'isCoachPlan': true,
     });
 
     await _db.collection(Collections.plans).add({
@@ -2279,6 +2361,7 @@ class FirestoreService {
       'createdBy': uid,
       'sessions': sessions,
       'createdAt': FieldValue.serverTimestamp(),
+      if (isCoachPlan) 'isCoachPlan': true,
     });
   }
 
@@ -3393,6 +3476,11 @@ class FirestoreService {
       'clientUid': clientUid,
       if (clientDisplayName != null && clientDisplayName.isNotEmpty)
         'clientDisplayName': clientDisplayName,
+      // Denormalized here (not just clientDisplayName) so
+      // getCoachPlansForClient() can label a coach's plans with their
+      // name from this one doc, without a separate per-coach profile
+      // read from the client's session.
+      'coachDisplayName': coachDisplayName,
       'addedAt': FieldValue.serverTimestamp(),
     });
 
@@ -3432,6 +3520,57 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
   Future<void> declineCoachRequest(String requestId) async {
     await _db.collection(Collections.coachRequests).doc(requestId).delete();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Plans created by any coach this client has an ACCEPTED relationship
+  // with (a coachClients doc exists for them), for explore_screen.dart's
+  // "Coach [Name]'s Plans" section — separate from a coach's own
+  // ordinary personal plans, which never carry isCoachPlan at all.
+  //
+  // Filters isCoachPlan==true plans down to this client's own coach(es)
+  // CLIENT-SIDE rather than adding a second `where('createdBy', whereIn:
+  // ...)` clause — combining whereIn with another equality filter would
+  // need a composite index deployed alongside this change; the coach-
+  // plan corpus is small enough (this is a small in-app coaching
+  // feature, not a public marketplace) that fetching all of them and
+  // filtering in Dart is simpler and avoids that extra deploy step.
+  //
+  // Each returned plan is denormalized with 'coachDisplayName' (sourced
+  // from the matching coachClients doc, not a second profile read) so
+  // the UI can group/label by coach without an extra round-trip.
+  // ---------------------------------------------------------------------------
+  Future<List<Map<String, dynamic>>> getCoachPlansForClient(
+      String clientUid) async {
+    final relationSnap = await _db
+        .collection(Collections.coachClients)
+        .where('clientUid', isEqualTo: clientUid)
+        .get();
+    if (relationSnap.docs.isEmpty) return [];
+
+    final coachNamesByUid = <String, String>{};
+    for (final doc in relationSnap.docs) {
+      final data = doc.data();
+      final coachUid = data['coachUid'] as String?;
+      if (coachUid == null) continue;
+      coachNamesByUid[coachUid] =
+          (data['coachDisplayName'] as String?) ?? 'Your Coach';
+    }
+    if (coachNamesByUid.isEmpty) return [];
+
+    final plansSnap = await _db
+        .collection(Collections.plans)
+        .where('isCoachPlan', isEqualTo: true)
+        .get();
+
+    return plansSnap.docs
+        .map((d) => {'id': d.id, ...d.data()})
+        .where((p) => coachNamesByUid.containsKey(p['createdBy']))
+        .map((p) => {
+              ...p,
+              'coachDisplayName': coachNamesByUid[p['createdBy']],
+            })
+        .toList();
   }
 
   // ---------------------------------------------------------------------------

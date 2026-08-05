@@ -2,6 +2,8 @@
 // Read-only profile view for a user OTHER than the current one — tapped
 // into from a feed post's avatar/name (see feed_post_card.dart). Shows
 // their name/avatar, a Follow/Unfollow button, and their recent feed posts.
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -30,6 +32,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   final _firestoreService = FirestoreService();
 
   String? _displayName;
+  String? _photoBase64;
   bool _isLoading = true;
   String _myName = 'You';
 
@@ -44,6 +47,15 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   double _lifetimeVolume = 0;
   bool _gameStatsLoading = true;
 
+  // users/{uid} (sessions/dailyActivityLog especially) is owner-only per
+  // firestore.rules — streak/session-count/volume have no cross-user-
+  // readable mirror, so those reads are only ever attempted for your own
+  // profile. See _loadGameStats()/_buildGameProfileSection() below.
+  bool get _isOwnProfile {
+    final currentUid = _authService.getCurrentUser()?.uid;
+    return currentUid != null && currentUid == widget.uid;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -51,7 +63,11 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     _loadProfile();
     _loadMyName();
     _loadCounts();
-    _loadGameStats();
+    if (_isOwnProfile) {
+      _loadGameStats();
+    } else {
+      _gameStatsLoading = false;
+    }
   }
 
   Future<void> _loadGameStats() async {
@@ -91,13 +107,22 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     }
   }
 
+  // Own profile: full/real users/{uid} read (unchanged). Someone else's
+  // profile: users/{uid} is owner-only per firestore.rules, so
+  // getUserProfile(otherUid) would permission-deny — read the
+  // cross-user-readable publicProfiles/{uid} mirror instead, which now
+  // includes photoBase64/level/totalXp (see _publicProfileFields /
+  // addXpToUser() in firestore_service.dart).
   Future<void> _loadProfile() async {
     try {
-      final profile = await _firestoreService.getUserProfile(widget.uid);
+      final profile = _isOwnProfile
+          ? await _firestoreService.getUserProfile(widget.uid)
+          : await _firestoreService.getPublicProfile(widget.uid);
       final name = profile?['displayName'] as String?;
       if (mounted) {
         setState(() {
           if (name != null && name.isNotEmpty) _displayName = name;
+          _photoBase64 = profile?['photoBase64'] as String?;
           _totalXp = (profile?['totalXp'] as num?)?.toInt() ?? 0;
           _level = (profile?['level'] as num?)?.toInt() ?? 1;
           _isLoading = false;
@@ -143,7 +168,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                   children: [
                     _buildProfileHeader(isOwnProfile, currentUid),
                     const SizedBox(height: 12),
-                    _buildGameProfileSection(),
+                    _buildGameProfileSection(isOwnProfile),
                     const SizedBox(height: 8),
                     _buildPostsSection(currentUid),
                   ],
@@ -232,25 +257,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               color: WW.primary,
               shape: BoxShape.circle,
             ),
-            child: Center(
-              child: _isLoading
-                  ? const SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 2.5,
-                      ),
-                    )
-                  : Text(
-                      _initial,
-                      style: const TextStyle(
-                        fontSize: 26,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white,
-                      ),
-                    ),
-            ),
+            child: ClipOval(child: _buildAvatarContent()),
           ),
           const SizedBox(height: 10),
           Text(
@@ -268,6 +275,52 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
             _buildFollowButton(currentUid),
           ],
         ],
+      ),
+    );
+  }
+
+  // Real photo when present (same field/decode pattern as
+  // profile_screen.dart's _buildAvatarContent()), falling back to the
+  // initials circle otherwise. Populated for both own and other users'
+  // profiles — _loadProfile() reads getUserProfile() for your own uid and
+  // getPublicProfile() (the publicProfiles/{uid} mirror) for anyone else's,
+  // since users/{uid} itself is owner-only per firestore.rules.
+  Widget _buildAvatarContent() {
+    if (_isLoading) {
+      return const Center(
+        child: SizedBox(
+          width: 24,
+          height: 24,
+          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+        ),
+      );
+    }
+    final photo = _photoBase64;
+    if (photo != null && photo.isNotEmpty) {
+      try {
+        return Image.memory(
+          base64Decode(photo),
+          width: 72,
+          height: 72,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _buildInitialAvatar(),
+        );
+      } catch (_) {
+        return _buildInitialAvatar();
+      }
+    }
+    return _buildInitialAvatar();
+  }
+
+  Widget _buildInitialAvatar() {
+    return Center(
+      child: Text(
+        _initial,
+        style: const TextStyle(
+          fontSize: 26,
+          fontWeight: FontWeight.w800,
+          color: Colors.white,
+        ),
       ),
     );
   }
@@ -374,7 +427,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   // .primary icon + WW.text value, no colored boxes) established in the
   // Feed redesign, not the old 4-color pill style.
 
-  Widget _buildGameProfileSection() {
+  // Streak/Sessions/kg Lifted (_buildGameStatsRow()) are only ever real for
+  // your own profile — they come from scanning users/{uid}/sessions +
+  // dailyActivityLog, both owner-only per firestore.rules with no public
+  // mirror. Rendered only when isOwnProfile; not shown as 0/placeholder for
+  // someone else's profile, just omitted (see _loadGameStats() call in
+  // initState(), which is likewise skipped entirely for non-owner so it
+  // never fires a pointless permission-denied read).
+  Widget _buildGameProfileSection(bool isOwnProfile) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
       child: Column(
@@ -384,19 +444,20 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
             _buildLevelCard(),
             const SizedBox(height: 12),
           ],
-          _gameStatsLoading
-              ? const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 16),
-                  child: Center(
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: WW.primary),
+          if (isOwnProfile)
+            _gameStatsLoading
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16),
+                    child: Center(
+                      child: SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: WW.primary),
+                      ),
                     ),
-                  ),
-                )
-              : _buildGameStatsRow(),
+                  )
+                : _buildGameStatsRow(),
         ],
       ),
     );
