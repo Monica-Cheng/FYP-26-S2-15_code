@@ -1,6 +1,6 @@
 // lib/screens/onboarding/onboarding_step1_screen.dart
 // Onboarding Step 1 — two sub-sections:
-//   Sub-step 0: Health & wearable connection
+//   Sub-step 0: Health connection
 //   Sub-step 1: Body profile form
 // Saves via FirestoreService.saveOnboardingStep1() then navigates to Routes.onboardingStep2.
 
@@ -48,9 +48,7 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
   Map<String, bool> _connected = {
     'apple': false,
     'google': false,
-    'wearable': false,
   };
-  String? _selectedWearable;
   bool _healthGranted = false;
 
   @override
@@ -207,30 +205,6 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
     }
   }
 
-  Future<void> _handleWearable() async {
-    await showModalBottomSheet(
-      context: context,
-      backgroundColor: WW.card,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (ctx) => _WearablePickerSheet(
-        onSelected: (deviceName) {
-          Navigator.pop(ctx);
-          setState(() => _connected['wearable'] = true);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('$deviceName connected via Apple Health.'),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-          _checkAllConnected();
-        },
-        onSkip: () => Navigator.pop(ctx),
-      ),
-    );
-  }
-
   // ---------------------------------------------------------------------------
   // Validates, converts units, saves to Firestore, and navigates forward.
   // ---------------------------------------------------------------------------
@@ -312,7 +286,6 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
         'preferredUnits': _heightUnit == 'cm' ? 'metric' : 'imperial',
         'healthConnected':
             _connected['apple'] == true || _connected['google'] == true,
-        'wearableConnected': _connected['wearable'] == true,
       };
 
       await _firestoreService.saveOnboardingStep1(uid, data);
@@ -350,12 +323,8 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
   @override
   Widget build(BuildContext context) {
     VoidCallback? onBack;
-    if (_subStep > 0 && _subStep < 4) {
-      onBack = () => setState(() => _subStep = _subStep - 1);
-    } else if (_subStep == 4) {
-      onBack = _selectedWearable != null
-          ? () => setState(() => _subStep = 3)
-          : () => setState(() => _subStep = 0);
+    if (_subStep == 1) {
+      onBack = () => setState(() => _subStep = 0);
     }
     return Scaffold(
       backgroundColor: WW.bg,
@@ -381,25 +350,10 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
                         key: const ValueKey('health'),
                         child: _buildHealthSection(),
                       )
-                    : _subStep == 1
-                        ? KeyedSubtree(
-                            key: const ValueKey('wearables'),
-                            child: _buildWearablesSection(),
-                          )
-                        : _subStep == 2
-                            ? KeyedSubtree(
-                                key: const ValueKey('checklist'),
-                                child: _buildChecklistSection(),
-                              )
-                            : _subStep == 3
-                                ? KeyedSubtree(
-                                    key: const ValueKey('complete'),
-                                    child: _buildCompleteSection(),
-                                  )
-                                : KeyedSubtree(
-                                    key: const ValueKey('body'),
-                                    child: _buildBodySection(),
-                                  ),
+                    : KeyedSubtree(
+                        key: const ValueKey('body'),
+                        child: _buildBodySection(),
+                      ),
               ),
             ),
           ],
@@ -464,7 +418,7 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
           const SizedBox(height: 16),
           Center(
             child: GestureDetector(
-              onTap: () => setState(() => _subStep = 4),
+              onTap: () => setState(() => _subStep = 1),
               child: const Text('Skip for now',
                 style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: WW.textSec)),
             ),
@@ -474,7 +428,7 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
     );
   }
 
-  // ── Sub-step 4: Body profile form ────────────────────────────────────────
+  // ── Sub-step 1: Body profile form ────────────────────────────────────────
 
   Widget _buildBodySection() {
     return Column(
@@ -674,202 +628,6 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
     );
   }
 
-  // ── Sub-step 1: Wearable picker ──────────────────────────────────────────
-
-  Widget _buildWearablesSection() {
-    final devices = [
-      {'id': 'apple', 'name': 'Apple Watch', 'desc': 'Connect via Apple Health'},
-      {'id': 'samsung', 'name': 'Samsung Galaxy Watch', 'desc': 'Connect via Samsung Health'},
-      {'id': 'garmin', 'name': 'Garmin', 'desc': 'Connect via Garmin Connect'},
-    ];
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 4, 24, 40),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('Connect a\nWearable',
-            style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800,
-              color: WW.primaryDark, letterSpacing: -0.5, height: 1.2)),
-          const SizedBox(height: 8),
-          const Text('Choose your device to sync workout and health data automatically.',
-            style: TextStyle(fontSize: 14, color: WW.textSec, height: 1.6)),
-          const SizedBox(height: 28),
-          ...devices.map((d) => Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: GestureDetector(
-              onTap: () {
-                setState(() {
-                  _selectedWearable = d['id'];
-                  _connected['wearable'] = true;
-                  _subStep = 2;
-                });
-              },
-              child: Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: WW.card,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: WW.border, width: 0.5),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 44, height: 44,
-                      decoration: BoxDecoration(
-                        color: WW.primary.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Icon(Icons.watch_rounded, color: WW.primary, size: 22),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(d['name']!, style: const TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w700, color: WW.text)),
-                          const SizedBox(height: 2),
-                          Text(d['desc']!, style: const TextStyle(
-                            fontSize: 12, color: WW.textSec)),
-                        ],
-                      ),
-                    ),
-                    const Icon(Icons.chevron_right_rounded, color: WW.textSec, size: 20),
-                  ],
-                ),
-              ),
-            ),
-          )),
-          const SizedBox(height: 24),
-          Center(
-            child: GestureDetector(
-              onTap: () => setState(() => _subStep = 4),
-              child: const Text('Skip for now',
-                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: WW.textSec)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ── Sub-step 2: Wearable setup checklist ─────────────────────────────────
-
-  Widget _buildChecklistSection() {
-    final deviceName = _selectedWearable == 'apple' ? 'Apple Watch'
-        : _selectedWearable == 'samsung' ? 'Samsung Galaxy Watch' : 'Garmin';
-    final steps = [
-      'Open the companion app on your phone',
-      'Grant WiseWorkout health & fitness permissions',
-      'Enable workout and activity data sync',
-      'You\'re all set — start your first tracked workout',
-    ];
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 4, 24, 40),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Set up\n$deviceName',
-            style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800,
-              color: WW.primaryDark, letterSpacing: -0.5, height: 1.2)),
-          const SizedBox(height: 8),
-          const Text('Follow these steps to complete your wearable setup.',
-            style: TextStyle(fontSize: 14, color: WW.textSec, height: 1.6)),
-          const SizedBox(height: 28),
-          ...steps.asMap().entries.map((e) => Padding(
-            padding: const EdgeInsets.only(bottom: 14),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 28, height: 28,
-                  decoration: BoxDecoration(
-                    color: WW.primary.withValues(alpha: 0.1),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Center(
-                    child: Text('${e.key + 1}',
-                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: WW.primary)),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(e.value,
-                      style: const TextStyle(fontSize: 14, color: WW.text, height: 1.5)),
-                  ),
-                ),
-              ],
-            ),
-          )),
-          const SizedBox(height: 32),
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: ElevatedButton(
-              onPressed: () => setState(() => _subStep = 3),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: WW.primary,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                elevation: 0,
-              ),
-              child: const Text("I've done this", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ── Sub-step 3: Wearable connected confirmation ───────────────────────────
-
-  Widget _buildCompleteSection() {
-    final deviceName = _selectedWearable == 'apple' ? 'Apple Watch'
-        : _selectedWearable == 'samsung' ? 'Samsung Galaxy Watch' : 'Garmin';
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 4, 24, 40),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          const SizedBox(height: 32),
-          Container(
-            width: 100, height: 100,
-            decoration: BoxDecoration(
-              color: WW.primary.withValues(alpha: 0.1),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(Icons.watch_rounded, color: WW.primary, size: 52),
-          ),
-          const SizedBox(height: 24),
-          Text("$deviceName\nConnected!",
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800,
-              color: WW.primaryDark, letterSpacing: -0.5, height: 1.2)),
-          const SizedBox(height: 12),
-          const Text('Your wearable is set up. WiseWorkout will now sync your workout and health data automatically.',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 14, color: WW.textSec, height: 1.6)),
-          const SizedBox(height: 40),
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: ElevatedButton(
-              onPressed: () => setState(() => _subStep = 4),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: WW.primary,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                elevation: 0,
-              ),
-              child: const Text('Continue', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 // ── Progress header ────────────────────────────────────────────────────────────
@@ -1297,119 +1055,3 @@ class _GoogleHealthIcon extends StatelessWidget {
   }
 }
 
-class _WearableIcon extends StatelessWidget {
-  const _WearableIcon();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 48,
-      height: 48,
-      decoration: BoxDecoration(
-        color: WW.chipBg,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: const Icon(Icons.watch_rounded, color: WW.primary, size: 26),
-    );
-  }
-}
-
-// ── Wearable picker bottom sheet ──────────────────────────────────────────────
-
-class _WearablePickerSheet extends StatelessWidget {
-  final void Function(String deviceName) onSelected;
-  final VoidCallback onSkip;
-
-  const _WearablePickerSheet({
-    required this.onSelected,
-    required this.onSkip,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final devices = [
-      {'id': 'apple', 'name': 'Apple Watch', 'desc': 'Connect via Apple Health', 'icon': Icons.watch_rounded, 'color': const Color(0xFF6C7EE8)},
-      {'id': 'samsung', 'name': 'Samsung Galaxy Watch', 'desc': 'Connect via Samsung Health', 'icon': Icons.watch_rounded, 'color': const Color(0xFF1A6FD4)},
-      {'id': 'garmin', 'name': 'Garmin', 'desc': 'Connect via Garmin Connect', 'icon': Icons.watch_rounded, 'color': const Color(0xFF007CC0)},
-    ];
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 20, 24, 40),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Center(
-            child: Container(
-              width: 36, height: 4,
-              decoration: BoxDecoration(
-                color: WW.border,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: 20),
-          const Text(
-            'Connect a Wearable',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: WW.primaryDark),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'Choose your device to sync workout and health data.',
-            style: TextStyle(fontSize: 13, color: WW.textSec, height: 1.5),
-          ),
-          const SizedBox(height: 20),
-          ...devices.map((d) => Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: GestureDetector(
-              onTap: () => onSelected(d['name'] as String),
-              child: Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: WW.bg,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: WW.border, width: 0.5),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 44, height: 44,
-                      decoration: BoxDecoration(
-                        color: (d['color'] as Color).withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(d['icon'] as IconData, color: d['color'] as Color, size: 22),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(d['name'] as String,
-                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: WW.text)),
-                          const SizedBox(height: 2),
-                          Text(d['desc'] as String,
-                            style: const TextStyle(fontSize: 12, color: WW.textSec)),
-                        ],
-                      ),
-                    ),
-                    const Icon(Icons.chevron_right_rounded, color: WW.textSec, size: 20),
-                  ],
-                ),
-              ),
-            ),
-          )),
-          Center(
-            child: GestureDetector(
-              onTap: onSkip,
-              child: const Text(
-                'Skip for now',
-                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: WW.textSec),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}

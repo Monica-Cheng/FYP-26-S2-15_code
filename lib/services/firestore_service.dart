@@ -306,6 +306,23 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Whether [uid] wants [category] (one of 'heartRate'/'steps'/
+  // 'activeCalories' — see manage_app_screen.dart) used elsewhere in the app.
+  // Reads users/{uid}.healthCategoriesEnabled, defaulting to true whenever
+  // the map itself or the specific key is missing — matches HealthKit's own
+  // existing behavior (all 3 categories requested together, see
+  // HealthService._readTypes) so existing users see no change until they
+  // actively toggle something off on the new Manage App screen.
+  // ---------------------------------------------------------------------------
+  Future<bool> isHealthCategoryEnabled(String uid, String category) async {
+    final profile = await getUserProfile(uid);
+    final categories =
+        profile?['healthCategoriesEnabled'] as Map<String, dynamic>?;
+    if (categories == null) return true;
+    return categories[category] as bool? ?? true;
+  }
+
+  // ---------------------------------------------------------------------------
   // Reads publicProfiles/{uid} — the cross-user-readable mirror of
   // _publicProfileFields (displayName/username/weeklyXp/level/
   // leaderboardVisible/lastWeeklyXpUpdate). Use this instead of
@@ -343,7 +360,7 @@ class FirestoreService {
   // Persists onboarding step 1 — body profile fields — into users/{uid}.
   // Expected keys in bodyProfile:
   //   displayName, dob, biologicalSex, heightCm, weightKg,
-  //   preferredUnits, healthConnected, wearableConnected
+  //   preferredUnits, healthConnected
   //
   // This is the very first write for a brand-new user — the users/{uid}
   // doc doesn't exist before this (see createUserProfile()'s own doc

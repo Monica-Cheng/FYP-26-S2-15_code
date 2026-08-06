@@ -9,6 +9,16 @@ import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/user_avatar.dart';
 
+// Same comma-grouped XP formatting as club_screen.dart's private _fmtXp() —
+// not importable across files (leading underscore), so mirrored here rather
+// than reimplemented differently.
+String _fmtXp(int xp) {
+  if (xp >= 1000) {
+    return '${xp ~/ 1000},${(xp % 1000).toString().padLeft(3, '0')}';
+  }
+  return '$xp';
+}
+
 // Full-page Friends screen — search, pending requests, and the friends
 // list. Reached via context.push(Routes.friends) from club_screen.dart's
 // top-bar icon, and from the friend-request notification deep-link (see
@@ -96,17 +106,25 @@ class _FriendsScreenState extends State<FriendsScreen> {
     if (uid == null) return;
     _friendsSub = _firestoreService.getFriendsStream(uid).listen((friends) {
       if (mounted) setState(() => _friends = friends);
-      _enrichWithPhotos(friends, key: 'uid', onDone: (enriched) {
-        if (mounted) setState(() => _friends = enriched);
-      });
+      _enrichWithPhotos(
+        friends,
+        key: 'uid',
+        onDone: (enriched) {
+          if (mounted) setState(() => _friends = enriched);
+        },
+      );
     });
     _friendRequestsSub = _firestoreService.getFriendRequestsStream(uid).listen((
       requests,
     ) {
       if (mounted) setState(() => _friendRequests = requests);
-      _enrichWithPhotos(requests, key: 'requesterUid', onDone: (enriched) {
-        if (mounted) setState(() => _friendRequests = enriched);
-      });
+      _enrichWithPhotos(
+        requests,
+        key: 'requesterUid',
+        onDone: (enriched) {
+          if (mounted) setState(() => _friendRequests = enriched);
+        },
+      );
     });
   }
 
@@ -128,11 +146,13 @@ class _FriendsScreenState extends State<FriendsScreen> {
     if (uids.isEmpty) return;
     final photos = await _firestoreService.getPublicPhotosByUids(uids);
     if (photos.isEmpty) return;
-    onDone(rows.map((r) {
-      final uid = r[key] as String?;
-      final photo = uid != null ? photos[uid] : null;
-      return photo != null ? {...r, 'photoBase64': photo} : r;
-    }).toList());
+    onDone(
+      rows.map((r) {
+        final uid = r[key] as String?;
+        final photo = uid != null ? photos[uid] : null;
+        return photo != null ? {...r, 'photoBase64': photo} : r;
+      }).toList(),
+    );
   }
 
   void _onSearchChanged(String value) {
@@ -263,9 +283,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
         content: Text(msg),
         backgroundColor: WW.primaryDark,
         behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         duration: const Duration(seconds: 2),
       ),
     );
@@ -293,7 +311,10 @@ class _FriendsScreenState extends State<FriendsScreen> {
       backgroundColor: WW.bg,
       body: SafeArea(
         child: Column(
-          children: [_buildHeader(), Expanded(child: _buildContent())],
+          children: [
+            _buildHeader(),
+            Expanded(child: _buildContent()),
+          ],
         ),
       ),
     );
@@ -327,11 +348,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: const Center(
-                  child: Icon(
-                    Icons.close_rounded,
-                    size: 20,
-                    color: WW.textSec,
-                  ),
+                  child: Icon(Icons.close_rounded, size: 20, color: WW.textSec),
                 ),
               ),
             ),
@@ -390,9 +407,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
   Widget _buildSearchResultsList() {
     if (_isSearching) {
-      return const Center(
-        child: CircularProgressIndicator(color: WW.primary),
-      );
+      return const Center(child: CircularProgressIndicator(color: WW.primary));
     }
     if (_searchResults.isEmpty) {
       return const Center(
@@ -408,10 +423,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
       children: [
-        Text(
-          'RESULTS (${_searchResults.length})',
-          style: _kSectionHeaderStyle,
-        ),
+        Text('RESULTS (${_searchResults.length})', style: _kSectionHeaderStyle),
         const SizedBox(height: 10),
         Container(
           decoration: _kFlatListDecoration,
@@ -553,18 +565,47 @@ class _FriendsScreenState extends State<FriendsScreen> {
             ),
           )
         else
-          Container(
-            decoration: _kFlatListDecoration,
-            child: Column(
-              children: List.generate(_friends.length, (i) {
-                return _buildFriendRow(
-                  _friends[i],
-                  isLast: i == _friends.length - 1,
-                );
-              }),
-            ),
-          ),
+          _buildFriendsList(),
       ],
+    );
+  }
+
+  // Real level + weekly XP per friend — same getFriendsLeaderboardStream()
+  // call already used by club_screen.dart's Leaderboard tab and
+  // profile_screen.dart's Friends section, keyed here into a uid lookup map
+  // since this list just needs it merged onto the existing friend rows
+  // (from getFriendsStream(), which only carries uid/displayName/username),
+  // not ranked/sorted like the full leaderboard.
+  Widget _buildFriendsList() {
+    final myUid = _authService.getCurrentUser()?.uid ?? '';
+    final friendUids = _friends.map((f) => f['uid'] as String).toList();
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: _firestoreService.getFriendsLeaderboardStream(myUid, friendUids),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(child: CircularProgressIndicator(color: WW.primary)),
+          );
+        }
+        final xpByUid = {
+          for (final e in snapshot.data ?? const <Map<String, dynamic>>[])
+            e['uid'] as String: e,
+        };
+        return Container(
+          decoration: _kFlatListDecoration,
+          child: Column(
+            children: List.generate(_friends.length, (i) {
+              final f = _friends[i];
+              return _buildFriendRow(
+                f,
+                xpByUid[f['uid'] as String?],
+                isLast: i == _friends.length - 1,
+              );
+            }),
+          ),
+        );
+      },
     );
   }
 
@@ -591,7 +632,10 @@ class _FriendsScreenState extends State<FriendsScreen> {
     );
   }
 
-  Widget _buildRequestRow(Map<String, dynamic> request, {required bool isLast}) {
+  Widget _buildRequestRow(
+    Map<String, dynamic> request, {
+    required bool isLast,
+  }) {
     final name = request['fromDisplayName'] as String? ?? 'User';
     final username = request['fromUsername'] as String? ?? '';
     final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
@@ -658,11 +702,23 @@ class _FriendsScreenState extends State<FriendsScreen> {
     );
   }
 
-  Widget _buildFriendRow(Map<String, dynamic> f, {required bool isLast}) {
+  // [xp] is this friend's entry from getFriendsLeaderboardStream() (see
+  // _buildFriendsList()) — null while that stream is still loading or if the
+  // friend has no publicProfiles doc at all; level/weeklyXp field extraction
+  // and fallbacks mirror club_screen.dart's _buildLeaderRow() exactly
+  // (level missing -> '—', weeklyXp missing/absent -> 0, never a dash).
+  Widget _buildFriendRow(
+    Map<String, dynamic> f,
+    Map<String, dynamic>? xp, {
+    required bool isLast,
+  }) {
     final name = f['displayName'] as String? ?? 'Friend';
     final username = f['username'] as String? ?? '';
     final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
     final photoBase64 = f['photoBase64'] as String?;
+    final level = (xp?['level'] as num?)?.toInt();
+    final levelLabel = level != null ? 'Level $level' : '—';
+    final weeklyXp = (xp?['weeklyXp'] as int?) ?? 0;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
@@ -674,7 +730,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
         children: [
           _avatar(initial, photoBase64: photoBase64),
           const SizedBox(width: 12),
-          // Name, username
+          // Name, username · level
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -682,18 +738,16 @@ class _FriendsScreenState extends State<FriendsScreen> {
                 Text(name, style: WW.rowName),
                 const SizedBox(height: 2),
                 Text(
-                  username.isNotEmpty ? '@$username' : '—',
+                  username.isNotEmpty ? '@$username · $levelLabel' : levelLabel,
                   style: WW.rowSecondary,
                 ),
               ],
             ),
           ),
-          // Level/weekly XP are not part of the friends doc yet —
-          // placeholder until per-friend XP lookup is addressed.
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              Text('—', style: WW.rowStat),
+              Text('${_fmtXp(weeklyXp)} XP', style: WW.rowStat),
               const SizedBox(height: 2),
               const Text('Weekly XP', style: WW.rowSecondary),
             ],

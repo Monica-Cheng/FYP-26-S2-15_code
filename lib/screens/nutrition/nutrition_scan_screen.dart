@@ -11,6 +11,7 @@ import 'dart:ui' as ui;
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:share_plus/share_plus.dart';
@@ -799,7 +800,8 @@ class _CameraCaptureViewState extends State<_CameraCaptureView>
     setState(() => _capturing = true);
     try {
       final file = await controller.takePicture();
-      widget.onImageReady(File(file.path));
+      final resized = await _resizeCapturedPhoto(File(file.path));
+      widget.onImageReady(resized);
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -808,6 +810,35 @@ class _CameraCaptureViewState extends State<_CameraCaptureView>
       }
     } finally {
       if (mounted) setState(() => _capturing = false);
+    }
+  }
+
+  // CameraController.takePicture() has no size/quality parameters of its
+  // own (unlike ImagePicker.pickImage() below), so a live camera capture
+  // previously went out unresized/uncompressed — inconsistent with
+  // _pickFromGallery()'s already-capped output, and a real payload-size
+  // risk once analyzeFoodImage() relays through a Cloud Function instead
+  // of calling OpenAI directly. Downscales after the fact to roughly match
+  // ImagePicker(maxWidth: 1024, imageQuality: 80)'s output, using the
+  // `image` package — already a pubspec dependency, same decode/
+  // copyResize/encodeJpg pattern outdoor_cardio_screen.dart's
+  // _encodeImageForSession() already uses. Only downsizes (never upscales
+  // a smaller capture), matching ImagePicker's own maxWidth semantics.
+  // Falls back to the original unresized file if decoding fails for any
+  // reason, rather than blocking the capture entirely over a resize
+  // failure.
+  Future<File> _resizeCapturedPhoto(File original) async {
+    try {
+      final bytes = await original.readAsBytes();
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) return original;
+      final resized =
+          decoded.width > 1024 ? img.copyResize(decoded, width: 1024) : decoded;
+      final jpegBytes = img.encodeJpg(resized, quality: 80);
+      await original.writeAsBytes(jpegBytes);
+      return original;
+    } catch (_) {
+      return original;
     }
   }
 

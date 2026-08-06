@@ -852,6 +852,50 @@ async function buildPersonalizationContext(uid, userData, now) {
   return lines.join("\n");
 }
 
+// Free-tier WiseCoach chat message limit. Mirrors
+// AppConstants.freeMessageLimit in lib/core/constants.dart — kept in sync
+// by hand across the Dart/JS boundary, same convention already used for
+// every other Dart-mirroring helper in this file (buildPersonalizationContext,
+// computeSessionStats, etc.). If that constant ever changes, update this too.
+const FREE_MESSAGE_LIMIT = 25;
+
+/**
+ * Counts uid's real (non-quick-reply) user-typed WiseCoach chat messages
+ * so far this calendar month, for the free-tier message limit gate below.
+ * No stored counter field — this is a pure [monthStart, monthEnd) range
+ * query on `timestamp` only (no equality filter alongside it, so no
+ * composite index is needed, unlike getSessionsPage()'s type+date shape),
+ * same query shape as computeSessionStats()/getMonthlyStats() in
+ * firestore_service.dart. The role=='user' && isQuickReply!=true filtering
+ * happens in-memory over the fetched page — same "filter the already-
+ * fetched set" convention findSimilarSessions() and computeAndNotify()
+ * already use elsewhere in this file. Resets naturally every month purely
+ * because the range being queried moves forward; no explicit reset logic
+ * exists or is needed.
+ *
+ * @param {string} uid
+ * @param {Date} now
+ * @return {Promise<number>}
+ */
+async function countFreeWiseCoachMessagesThisMonth(uid, now) {
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const snapshot = await db
+      .collection("users")
+      .doc(uid)
+      .collection("wiseCoachMessages")
+      .where("timestamp", ">=", monthStart)
+      .where("timestamp", "<", monthEnd)
+      .get();
+
+  let count = 0;
+  snapshot.forEach((doc) => {
+    const data = doc.data();
+    if (data.role === "user" && data.isQuickReply !== true) count++;
+  });
+  return count;
+}
+
 /**
  * callWiseCoachOpenAI — server-side relay to OpenAI's chat completions
  * endpoint, shared by both WiseCoach features that currently call OpenAI:
@@ -903,6 +947,23 @@ async function buildPersonalizationContext(uid, userData, now) {
  * lines (see buildInsights()) onto the single user-role message when uid
  * is present, best-effort/non-blocking exactly like the chat branch.
  *
+ * Free-tier message limit (later phase): same server-side-only reasoning
+ * as the consent gate above — a client-side-only check could be bypassed
+ * by calling this function directly, so the real gate lives here, using
+ * the verified request.auth.uid, never a client-supplied flag. Applies
+ * ONLY to the chat path (systemMessage present) — post-session summary has
+ * no limit requirement and is intentionally untouched. Premium users
+ * (users/{uid}.isPremium == true) are exempt entirely — no count query is
+ * even run for them. For everyone else, countFreeWiseCoachMessagesThisMonth()
+ * (see above) counts this calendar month's real (non-quick-reply) typed
+ * messages already persisted to wiseCoachMessages by the client, and this
+ * function rejects with 'resource-exhausted' at >= FREE_MESSAGE_LIMIT,
+ * before ever calling OpenAI. Unlike the personalization/insights work
+ * above (best-effort, swallowed on failure), this rejection is a real
+ * HttpsError that must reach the client — the outer catch below re-throws
+ * HttpsErrors instead of swallowing them, so this limit can't accidentally
+ * be bypassed by wrapping it in the same best-effort try/catch.
+ *
  * @param {{messages: {role: string, content: string}[], maxTokens?: number, temperature?: number}} request.data
  * @return {Promise<{content: string}>}
  */
@@ -924,10 +985,26 @@ exports.callWiseCoachOpenAI = onCall(
           const now = new Date();
           const systemMessage = messages.find((m) => m.role === "system");
           if (systemMessage) {
-            // Chat — personalization (including the 3 shared insights)
-            // only when the user has explicitly consented.
+            // Chat — the free-tier message limit gate, then
+            // personalization (including the 3 shared insights) only
+            // when the user has explicitly consented. Both read the same
+            // userDoc, fetched once.
             const userDoc = await db.collection("users").doc(uid).get();
             const userData = userDoc.exists ? userDoc.data() : {};
+
+            if (userData.isPremium !== true) {
+              const usedCount =
+                  await countFreeWiseCoachMessagesThisMonth(uid, now);
+              if (usedCount >= FREE_MESSAGE_LIMIT) {
+                throw new HttpsError(
+                    "resource-exhausted",
+                    `You've used all ${FREE_MESSAGE_LIMIT} free messages ` +
+                    "this month. Upgrade to WiseCoach Premium for " +
+                    "unlimited access.",
+                );
+              }
+            }
+
             if (userData.aiPersonalizationConsent === true) {
               const context = await buildPersonalizationContext(uid, userData, now);
               if (context) {
@@ -955,6 +1032,15 @@ exports.callWiseCoachOpenAI = onCall(
             }
           }
         } catch (err) {
+          // Intentional rejections (the message-limit gate above) must
+          // reach the client as a real error — only genuinely unexpected
+          // failures (a Firestore read error, etc.) are swallowed here,
+          // matching the "personalization is best-effort, never blocks
+          // the reply" behavior this catch already had before the limit
+          // gate was added.
+          if (err instanceof HttpsError) {
+            throw err;
+          }
           console.error(
               `callWiseCoachOpenAI: personalization/insights failed for ` +
               `uid ${uid}:`, err,
@@ -1008,6 +1094,112 @@ exports.callWiseCoachOpenAI = onCall(
       if (typeof content !== "string") {
         console.error(
             "callWiseCoachOpenAI: unexpected OpenAI response shape:",
+            JSON.stringify(json),
+        );
+        throw new HttpsError("internal", "Unexpected OpenAI response shape.");
+      }
+
+      return {content};
+    },
+);
+
+/**
+ * analyzeNutrition — server-side relay to OpenAI's chat completions
+ * endpoint for AI food recognition (lib/services/nutrition_service.dart's
+ * analyzeFoodImage()/analyzeFoodDescription()), migrating this off the
+ * client-bundled OPENAI_API_KEY the same way callWiseCoachOpenAI already
+ * did for chat/post-session summary — this was the last remaining
+ * consumer of that client-side key.
+ *
+ * A genuinely separate function rather than a variant of
+ * callWiseCoachOpenAI: that function's dispatcher classifies every
+ * request purely by system-message presence (chat vs post-session
+ * summary — see its own doc comment), and nutrition's payload also
+ * carries a system-role message (the nutrition-scanner persona/JSON-
+ * schema-instructions prompt nutrition_service.dart already builds
+ * client-side, unchanged by this migration). Reusing that dispatcher
+ * would misclassify every nutrition call as chat, incorrectly subjecting
+ * food scans to the WiseCoach free-tier message quota and attempting
+ * (meaningless) personalization-context injection — neither applies to
+ * this feature. So: no consent gate, no message-limit gate, no
+ * personalization here at all — this is a pure, unconditional relay.
+ *
+ * Shares the same OPENAI_API_KEY secret as callWiseCoachOpenAI (defined
+ * once, above) — no new secret to create or grant. Same model/params
+ * nutrition_service.dart already hardcoded client-side before this
+ * migration (gpt-4o-mini, max_tokens: 300, temperature: 0.3) — kept
+ * fixed server-side rather than accepted from the client, since they
+ * never varied per-call in the client code this replaces and there's no
+ * reason to trust a client-supplied override for them.
+ *
+ * The client's messages array carries a system-role message (plain
+ * string persona/schema prompt) and a user-role message whose content is
+ * an array of {type: 'text'|'image_url', ...} blocks — OpenAI's
+ * multimodal content-block shape, used for both food-photo scans
+ * (text + image_url blocks) and text-only descriptions (text block
+ * only). This function does no validation of that internal shape beyond
+ * confirming messages is a non-empty array (same minimal validation
+ * callWiseCoachOpenAI does) and forwards it to OpenAI unchanged — JSON-
+ * schema parsing of the food/calorie/macro response stays entirely
+ * client-side in nutrition_service.dart's _parse(), exactly as before
+ * this migration; this function only relays the raw {content} string
+ * back, same shape callWiseCoachOpenAI already returns.
+ *
+ * @param {{messages: {role: string, content: string|object[]}[]}} request.data
+ * @return {Promise<{content: string}>}
+ */
+exports.analyzeNutrition = onCall(
+    {secrets: [OPENAI_API_KEY]},
+    async (request) => {
+      const data = request.data || {};
+      const messages = data.messages;
+      if (!Array.isArray(messages) || messages.length === 0) {
+        throw new HttpsError(
+            "invalid-argument",
+            "messages must be a non-empty array of {role, content}.",
+        );
+      }
+
+      let response;
+      try {
+        response = await fetch(
+            "https://api.openai.com/v1/chat/completions",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${OPENAI_API_KEY.value()}`,
+              },
+              body: JSON.stringify({
+                model: "gpt-4o-mini",
+                messages,
+                max_tokens: 300,
+                temperature: 0.3,
+              }),
+            },
+        );
+      } catch (err) {
+        console.error("analyzeNutrition: fetch to OpenAI failed:", err);
+        throw new HttpsError("unavailable", "Could not reach OpenAI.");
+      }
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(
+            `analyzeNutrition: OpenAI error ${response.status}: ${errText}`,
+        );
+        throw new HttpsError("internal", "OpenAI request failed.");
+      }
+
+      const json = await response.json();
+      const content = json.choices &&
+          json.choices[0] &&
+          json.choices[0].message &&
+          json.choices[0].message.content;
+
+      if (typeof content !== "string") {
+        console.error(
+            "analyzeNutrition: unexpected OpenAI response shape:",
             JSON.stringify(json),
         );
         throw new HttpsError("internal", "Unexpected OpenAI response shape.");

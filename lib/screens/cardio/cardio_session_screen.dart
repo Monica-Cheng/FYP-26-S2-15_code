@@ -265,7 +265,11 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
     if (_uid == null) return;
     final profile = await FirestoreService().getUserProfile(_uid!);
     if (!mounted) return;
-    final raw = profile?['weight'];
+    // Field name fixed to match what onboarding/Health Profile actually
+    // write (weightKg, already in kg — no unit conversion needed here).
+    // The previous 'weight' key was never written anywhere, so this always
+    // silently fell back to the 70.0 default below.
+    final raw = profile?['weightKg'];
     if (raw is num) {
       setState(() => _weightKg = raw.toDouble());
     } else if (raw is String) {
@@ -313,6 +317,13 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
     if (!mounted) return;
     setState(() => _healthPermissionGranted = granted);
     if (granted) {
+      // Manage App screen's Heart Rate toggle (default true) — see
+      // FirestoreService.isHealthCategoryEnabled()'s own doc comment.
+      final uid = _uid;
+      final heartRateEnabled = uid == null
+          ? true
+          : await FirestoreService().isHealthCategoryEnabled(uid, 'heartRate');
+      if (!mounted || !heartRateEnabled) return;
       _heartRateTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
         final hr = await HealthService().getLatestHeartRate();
         if (!mounted) return;
@@ -853,7 +864,11 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
       double? avgHR;
       double? maxHR;
       try {
-        if (_sessionStartTime != null) {
+        // Manage App screen's Heart Rate toggle (default true) — see
+        // FirestoreService.isHealthCategoryEnabled()'s own doc comment.
+        final heartRateEnabled =
+            await FirestoreService().isHealthCategoryEnabled(uid, 'heartRate');
+        if (_sessionStartTime != null && heartRateEnabled) {
           final hrData = await HealthService()
               .getHeartRateInRange(_sessionStartTime!, DateTime.now());
           if (hrData.isNotEmpty) {
@@ -947,7 +962,11 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
       try {
         double? avgHR;
         double? maxHR;
-        if (_sessionStartTime != null) {
+        // Manage App screen's Heart Rate toggle (default true) — see
+        // FirestoreService.isHealthCategoryEnabled()'s own doc comment.
+        final heartRateEnabled =
+            await FirestoreService().isHealthCategoryEnabled(uid, 'heartRate');
+        if (_sessionStartTime != null && heartRateEnabled) {
           final hrData = await HealthService()
               .getHeartRateInRange(_sessionStartTime!, DateTime.now());
           if (hrData.isNotEmpty) {

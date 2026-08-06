@@ -20,12 +20,17 @@ class Collections {
   static const String businessPartners = 'businessPartners';
   static const String coachRequests = 'coachRequests';
   static const String coachClients = 'coachClients';
+  static const String wiseCoachMessages = 'wiseCoachMessages';
 }
 
 class AppConstants {
   AppConstants._();
   static const String appName = 'WiseWorkout';
-  static const int freeMessageLimit = 10;
+  // Single source of truth for the WiseCoach free-tier chat message limit
+  // — functions/index.js's FREE_MESSAGE_LIMIT mirrors this value by hand
+  // (the Cloud Function runs in a separate JS runtime and can't import
+  // this file directly); keep both in sync if this ever changes.
+  static const int freeMessageLimit = 25;
   static const int freeRoutineLimit = 3;
   static const int freeChallengeLimit = 1;
 }
