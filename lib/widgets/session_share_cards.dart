@@ -69,6 +69,15 @@ List<ShareCardOption> buildSessionShareCardOptions({
   final activityLabel = cardioActivity.isNotEmpty ? cardioActivity : 'Cardio';
   final distanceMeters = (session['distanceMeters'] as num?)?.toDouble() ?? 0;
   final mapSnapshotBase64 = session['mapSnapshotBase64'] as String?;
+  // Traces whether the SESSION DOC itself carries a real
+  // mapSnapshotBase64 before any card widget gets built from it — pairs
+  // with the debugPrint in RouteMapShareCard.build() to tell an upstream
+  // capture/save gap (empty here already) apart from a rendering-only
+  // problem (non-empty here, but the card still shows a blank/grey
+  // background).
+  debugPrint('[buildSessionShareCardOptions] isCardio=$isCardio '
+      'mapSnapshotBase64.length=${mapSnapshotBase64?.length ?? 0} '
+      'routePoints.length=${routePoints.length}');
 
   final cards = <ShareCardOption>[];
 
@@ -120,7 +129,12 @@ List<ShareCardOption> buildSessionShareCardOptions({
               date: date,
             ),
             if (hasRoute)
-              Positioned.fill(child: RouteOverlay(routePoints: routePoints)),
+              Positioned.fill(
+                child: RouteOverlay(
+                  routePoints: routePoints,
+                  bounds: RouteOverlay.kSafeZone,
+                ),
+              ),
           ],
         ),
       ),
@@ -152,7 +166,12 @@ List<ShareCardOption> buildSessionShareCardOptions({
             gradientColors: selectedGradientColors,
           ),
           if (hasRoute)
-            Positioned.fill(child: RouteOverlay(routePoints: routePoints)),
+            Positioned.fill(
+              child: RouteOverlay(
+                routePoints: routePoints,
+                bounds: RouteOverlay.kSafeZone,
+              ),
+            ),
         ],
       ),
     ),

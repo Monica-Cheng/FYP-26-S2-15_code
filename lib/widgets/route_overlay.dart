@@ -18,14 +18,29 @@ import '../core/app_theme.dart';
 
 class RouteOverlay extends StatelessWidget {
   final List<LatLng> routePoints;
+  // Region (in the same logical coordinate space as the card, e.g.
+  // 360x640) the route should be drawn/centered within — lets each card
+  // type carve out a safe zone that doesn't collide with its own text
+  // (see RouteMapShareCard/PhotoBackgroundShareCard/ShareCardWidget, all
+  // of which now pass the same shared zone for visual consistency).
+  // Falls back to the original upper-card zone if omitted.
+  final Rect? bounds;
 
-  const RouteOverlay({super.key, required this.routePoints});
+  // Shared safe zone all 3 card types pass — sits below every card's
+  // brand-row header (which ends around y=84) and well above where the
+  // Map/Photo cards' bottom-anchored text blocks start (y~430-490) and
+  // where ShareCardWidget's title now starts after its own reserved
+  // spacer (see that widget) — one rect reused everywhere so the route
+  // renders in the same place/size on all 3 designs.
+  static const Rect kSafeZone = Rect.fromLTWH(36, 96, 288, 204);
+
+  const RouteOverlay({super.key, required this.routePoints, this.bounds});
 
   @override
   Widget build(BuildContext context) {
     if (routePoints.length < 2) return const SizedBox.shrink();
     return IgnorePointer(
-      child: CustomPaint(painter: RoutePainter(points: routePoints)),
+      child: CustomPaint(painter: RoutePainter(points: routePoints, bounds: bounds)),
     );
   }
 }
@@ -37,8 +52,9 @@ class RouteOverlay extends StatelessWidget {
 // independently, which would visibly distort its real shape.
 class RoutePainter extends CustomPainter {
   final List<LatLng> points;
+  final Rect? bounds;
 
-  RoutePainter({required this.points});
+  RoutePainter({required this.points, this.bounds});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -57,17 +73,19 @@ class RoutePainter extends CustomPainter {
     final latSpan = maxLat - minLat;
     final lngSpan = maxLng - minLng;
 
-    const padding = 56.0;
-    // Route confined to roughly the upper two-thirds of the card so it
-    // doesn't collide with the stat block's dark scrim at the bottom, on
-    // any of the 3 card backgrounds this can be overlaid on.
-    final drawWidth = size.width - padding * 2;
-    final drawHeight = size.height * 0.62 - padding;
+    // Falls back to the original upper-card zone (roughly the top 62%,
+    // minus padding) for any caller that doesn't pass an explicit bounds
+    // rect.
+    final drawRect = bounds ??
+        Rect.fromLTWH(56, 56, size.width - 112, size.height * 0.62 - 56);
+    final drawWidth = drawRect.width;
+    final drawHeight = drawRect.height;
 
     if (latSpan < 1e-9 && lngSpan < 1e-9) {
       // Route with essentially no movement (e.g. a near-stationary test
-      // session) — draw a single dot rather than dividing by zero below.
-      final dot = Offset(size.width / 2, drawHeight / 2 + padding);
+      // session) — draw a single dot, centered in the bounds rect,
+      // rather than dividing by zero below.
+      final dot = drawRect.center;
       canvas.drawCircle(dot, 8.5, Paint()..color = Colors.black.withValues(alpha: 0.45));
       canvas.drawCircle(dot, 7, Paint()..color = Colors.white);
       return;
@@ -80,8 +98,8 @@ class RoutePainter extends CustomPainter {
             : math.min(drawWidth / lngSpan, drawHeight / latSpan);
     final scaledWidth = lngSpan * scale;
     final scaledHeight = latSpan * scale;
-    final offsetX = padding + (drawWidth - scaledWidth) / 2;
-    final offsetY = padding + (drawHeight - scaledHeight) / 2;
+    final offsetX = drawRect.left + (drawWidth - scaledWidth) / 2;
+    final offsetY = drawRect.top + (drawHeight - scaledHeight) / 2;
 
     Offset project(LatLng p) {
       final x = offsetX + (p.longitude - minLng) * scale;
@@ -95,13 +113,10 @@ class RoutePainter extends CustomPainter {
       path.lineTo(o.dx, o.dy);
     }
 
-    // A dark outline stroke drawn first, slightly wider than the white
+    // A dark outline stroke drawn first, slightly wider than the colored
     // line on top of it, so the route stays visible regardless of what's
     // underneath — this overlay gets stacked on 3 genuinely different
-    // background types (map snapshot, user photo, color gradient), and a
-    // plain white line has poor contrast against any light/bright region
-    // in a photo or map tile (the card's own dark scrim only covers the
-    // bottom third — see route_overlay.dart's own doc comment above).
+    // background types (map snapshot, user photo, color gradient).
     // Classic "sticker" outline technique, not just a guess — same idea
     // as the start/end markers already having a white ring for contrast.
     canvas.drawPath(
@@ -109,16 +124,22 @@ class RoutePainter extends CustomPainter {
       Paint()
         ..color = Colors.black.withValues(alpha: 0.45)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 9
+        ..strokeWidth = 6
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round,
     );
+    // WW.primary — the exact color activity_detail_screen.dart's own live
+    // route line uses (see its _drawRouteLine()'s
+    // lineColor: WW.primary.toHexStringRGB()) — reused verbatim rather
+    // than a new purple, for visual consistency between the live map and
+    // these share cards. Was plain white, too thick (strokeWidth 6, with
+    // a 9-wide outline).
     canvas.drawPath(
       path,
       Paint()
-        ..color = Colors.white
+        ..color = WW.primary
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 6
+        ..strokeWidth = 4
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round,
     );
@@ -137,5 +158,5 @@ class RoutePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant RoutePainter oldDelegate) =>
-      oldDelegate.points != points;
+      oldDelegate.points != points || oldDelegate.bounds != bounds;
 }

@@ -127,43 +127,58 @@ class ShareCardWidget extends StatelessWidget {
             ),
           ),
 
-          // Session name / date / stats — centered in the space between
-          // the header and the footer strip, so it doesn't just hug the
-          // top the way it would inside a shrink-wrapped card.
+          // Session name / date / stats — anchored toward the bottom of
+          // the space between the header and the footer strip, rather
+          // than dead-centered across the whole area. When a route
+          // overlay is stacked on top of this card (see
+          // session_share_cards.dart), it draws into RouteOverlay
+          // .kSafeZone, which sits right below the header — reserving
+          // that same height here as a fixed spacer keeps this text out
+          // of the route's zone by construction, instead of the two
+          // overlapping whenever the centered block happened to land in
+          // the same area (see this widget's own bug history: the route
+          // used to render directly across the title).
           Expanded(
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      sessionName,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 26,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white,
-                        letterSpacing: -0.5,
-                        height: 1.2,
+            child: Column(
+              children: [
+                const SizedBox(height: 220),
+                Expanded(
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            sessionName,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 26,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white,
+                              letterSpacing: -0.5,
+                              height: 1.2,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            dateStr,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: Colors.white.withValues(alpha: 0.6),
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          const SizedBox(height: 28),
+                          isCardio
+                              ? _buildCardioStats(durationStr)
+                              : _buildGymStats(durationStr),
+                        ],
                       ),
                     ),
-                    const SizedBox(height: 6),
-                    Text(
-                      dateStr,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Colors.white.withValues(alpha: 0.6),
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 28),
-                    isCardio
-                        ? _buildCardioStats(durationStr)
-                        : _buildGymStats(durationStr),
-                  ],
+                  ),
                 ),
-              ),
+              ],
             ),
           ),
 
