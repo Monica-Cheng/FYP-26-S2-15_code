@@ -21,6 +21,7 @@ import '../../services/notification_service.dart';
 import '../../widgets/common/month_calendar.dart';
 import '../../widgets/quick_add_sheet.dart';
 import '../../widgets/session_resume_prompt.dart';
+import '../../widgets/user_avatar.dart';
 import '../business/coach_dashboard_screen.dart';
 import '../plans/plans_screen.dart';
 import '../coach/coach_screen.dart';
@@ -1423,15 +1424,14 @@ class _HomeTabState extends State<_HomeTab> {
           // Avatar → Profile screen
           GestureDetector(
             onTap: () => context.push(Routes.profile).then((_) => _loadUserData()),
-            child: Container(
-              width: 38,
-              height: 38,
-              decoration: BoxDecoration(
-                color: WW.chipBg,
-                shape: BoxShape.circle,
-                border: Border.all(color: WW.primary, width: 1.5),
-              ),
-              child: ClipOval(child: _buildTopBarAvatarContent(initials)),
+child: UserAvatar(
+              photoBase64: _photoBase64,
+              initial: initials,
+              size: 38,
+              backgroundColor: WW.chipBg,
+              initialColor: WW.primary,
+              initialFontSize: 15,
+              border: Border.all(color: WW.primary, width: 1.5),
             ),
           ),
         ],

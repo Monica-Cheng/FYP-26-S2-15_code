@@ -9,6 +9,7 @@ import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/feed_post_card.dart';
+import '../../widgets/user_avatar.dart';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,7 @@ class _ClubScreenState extends State<ClubScreen> {
   final _firestoreService = FirestoreService();
   final _authService = AuthService();
   String _myName = 'You';
+  String? _myPhotoBase64;
 
   // Needed here (not just by FriendsScreen) because the Leaderboard tab
   // scopes its query to friend uids — see _buildLeaderboardTab().
@@ -154,6 +156,7 @@ class _ClubScreenState extends State<ClubScreen> {
     if (mounted) {
       setState(() {
         if (name != null && name.isNotEmpty) _myName = name;
+        _myPhotoBase64 = profile?['photoBase64'] as String?;
       });
     }
   }
@@ -208,24 +211,14 @@ class _ClubScreenState extends State<ClubScreen> {
   // Neutral avatar treatment shared by every Leaderboard/Friends row —
   // WW.elevated + WW.text initial for everyone, WW.primary + white for
   // the current signed-in user's own row only.
-  Widget _avatar(String initial, {bool isMe = false}) {
-    return Container(
-      width: 40,
-      height: 40,
-      decoration: BoxDecoration(
-        color: isMe ? WW.primary : WW.elevated,
-        shape: BoxShape.circle,
-      ),
-      child: Center(
-        child: Text(
-          initial,
-          style: TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w700,
-            color: isMe ? Colors.white : WW.text,
-          ),
-        ),
-      ),
+  Widget _avatar(String initial, {String? photoBase64, bool isMe = false}) {
+    return UserAvatar(
+      photoBase64: photoBase64,
+      initial: initial,
+      size: 40,
+      backgroundColor: isMe ? WW.primary : WW.elevated,
+      initialColor: isMe ? Colors.white : WW.text,
+      initialFontSize: 15,
     );
   }
 
@@ -374,6 +367,7 @@ class _ClubScreenState extends State<ClubScreen> {
     final levelLabel = level != null ? 'Level $level' : '—';
     final weeklyXp = (entry['weeklyXp'] as int?) ?? 0;
     final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
+    final photoBase64 = entry['photoBase64'] as String?;
     return Container(
       decoration: BoxDecoration(
         color: WW.card,
@@ -404,7 +398,7 @@ class _ClubScreenState extends State<ClubScreen> {
             ),
           ),
           const SizedBox(width: 10),
-          _avatar(initial, isMe: isMe),
+          _avatar(initial, photoBase64: photoBase64, isMe: isMe),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -865,6 +859,7 @@ class _ClubScreenState extends State<ClubScreen> {
             post: posts[i],
             currentUid: uid,
             currentUserName: _myName,
+            currentUserPhotoBase64: _myPhotoBase64,
             firestoreService: _firestoreService,
           ),
         );

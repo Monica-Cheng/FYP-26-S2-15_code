@@ -59,7 +59,7 @@ class FirestoreService {
     'level',
     'leaderboardVisible',
     'lastWeeklyXpUpdate',
-    // Mirrored so a user's photo can eventually be read cross-user (e.g.
+// Mirrored so a user's photo can eventually be read cross-user (e.g.
     // viewing someone else's profile) without opening up users/{uid}'s
     // owner-only read rule — see user_profile_screen.dart / firestore.rules
     // investigation notes. Not yet consumed cross-user by any call site;
@@ -3900,18 +3900,25 @@ class FirestoreService {
 
   // ---------------------------------------------------------------------------
   // Adds a comment to a post and increments its denormalized commentCount.
+  // authorPhotoBase64 is denormalized onto the comment doc the same way
+  // authorPhotoBase64 already is on posts themselves (see createFeedPost) —
+  // sourced from the commenter's own users/{uid}.photoBase64 by the caller
+  // at comment-creation time, not looked up here.
   // ---------------------------------------------------------------------------
   Future<void> addComment(
     String postId, {
     required String uid,
     required String authorName,
     required String text,
+    String? authorPhotoBase64,
   }) async {
     final postRef = _db.collection(Collections.posts).doc(postId);
     await postRef.collection('comments').add({
       'uid': uid,
       'authorName': authorName,
       'text': text,
+      if (authorPhotoBase64 != null && authorPhotoBase64.isNotEmpty)
+        'authorPhotoBase64': authorPhotoBase64,
       'createdAt': FieldValue.serverTimestamp(),
     });
     await postRef.update({'commentCount': FieldValue.increment(1)});
@@ -4046,8 +4053,38 @@ class FirestoreService {
         'uid': doc.id,
         'displayName': data['displayName'],
         'username': data['username'],
+        'photoBase64': data['photoBase64'],
       };
     }).toList();
+  }
+
+  /// Batched lookup of publicProfiles/{uid}.photoBase64 for a list of uids —
+  /// used to enrich rows whose own doc (friends/friendRequests
+  /// subcollections) is denormalized once at request/accept time and never
+  /// refreshed, so a photo uploaded after that point still shows up without
+  /// needing to re-friend. Same 30-value whereIn chunking as
+  /// getFriendsLeaderboardStream(). Returns only uids that have a photo set.
+  Future<Map<String, String>> getPublicPhotosByUids(List<String> uids) async {
+    if (uids.isEmpty) return {};
+    final distinctUids = uids.toSet().toList();
+    final chunks = <List<String>>[];
+    for (var i = 0; i < distinctUids.length; i += 30) {
+      final end =
+          i + 30 > distinctUids.length ? distinctUids.length : i + 30;
+      chunks.add(distinctUids.sublist(i, end));
+    }
+    final photos = <String, String>{};
+    for (final chunk in chunks) {
+      final snapshot = await _db
+          .collection(_publicProfiles)
+          .where(FieldPath.documentId, whereIn: chunk)
+          .get();
+      for (final doc in snapshot.docs) {
+        final photo = doc.data()['photoBase64'] as String?;
+        if (photo != null && photo.isNotEmpty) photos[doc.id] = photo;
+      }
+    }
+    return photos;
   }
 
   /// Sends a friend request from [fromUid] to [toUid]. Writes the
@@ -4323,6 +4360,7 @@ class FirestoreService {
           'level': data['level'],
           'leaderboardVisible': data['leaderboardVisible'] as bool? ?? true,
           'lastWeeklyXpUpdate': data['lastWeeklyXpUpdate'],
+          'photoBase64': data['photoBase64'],
         };
       }).where((e) {
         final visible = e['leaderboardVisible'] as bool;
