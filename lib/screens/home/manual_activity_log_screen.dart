@@ -178,7 +178,7 @@ class _ManualActivityLogScreenState extends State<ManualActivityLogScreen> {
     try {
       final profile = await _firestore.getUserProfile(uid);
       if (!mounted) return;
-      final w = double.tryParse(profile?['weight']?.toString() ?? '') ?? 70.0;
+      final w = double.tryParse(profile?['weightKg']?.toString() ?? '') ?? 70.0;
       setState(() => _userWeightKg = w);
     } catch (_) {}
   }

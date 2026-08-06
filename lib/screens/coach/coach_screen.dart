@@ -159,13 +159,24 @@ class _CoachScreenState extends State<CoachScreen> {
   // only ever controls whether _send() appends a fixed local string,
   // never anything included in the messages array relayed to
   // callWiseCoachOpenAI.
+  //
+  // Condition (a) reads the plaintext injuryCount field (an integer,
+  // maintained by the updateHealthData Cloud Function alongside the
+  // encrypted health-data blob — see that function's doc comment in
+  // functions/index.js) via the ordinary getUserProfile() read, rather
+  // than injuries.length via getUserInjuryData(). This session's health-
+  // data-encryption migration moved the injuries array itself into
+  // users/{uid}.encryptedHealthData, decryptable only server-side —
+  // injuryCount exists specifically so this check can stay a cheap local
+  // read with no Cloud Function round-trip and without ever exposing any
+  // injury detail in plaintext, exactly as before this migration.
   Future<void> _checkReferralTriggers() async {
     final uid = _auth.getCurrentUser()?.uid;
     if (uid == null) return;
     try {
-      final injuryData = await _firestore.getUserInjuryData(uid);
-      final injuries = injuryData['injuries'] as List<dynamic>? ?? [];
-      if (injuries.length >= 3) {
+      final profile = await _firestore.getUserProfile(uid);
+      final injuryCount = profile?['injuryCount'] as int? ?? 0;
+      if (injuryCount >= 3) {
         if (mounted) {
           setState(() => _referralTrigger = _ReferralTrigger.injury);
         }

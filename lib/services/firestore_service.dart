@@ -5,6 +5,7 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 
 import '../core/constants.dart';
 
@@ -737,7 +738,7 @@ class FirestoreService {
 
     final profile = await getUserProfile(uid);
     final weightKg =
-        double.tryParse(profile?['weight']?.toString() ?? '70') ?? 70.0;
+        double.tryParse(profile?['weightKg']?.toString() ?? '70') ?? 70.0;
     final caloriesBurned = await _estimateGymCalories(
       weightKg: weightKg,
       totalSets: totalSets,
@@ -1436,17 +1437,47 @@ class FirestoreService {
     }
   }
 
-  /// Saves the user's current injuries and filtering
-  /// preference to their user document.
+  // ---------------------------------------------------------------------------
+  // getHealthData/updateHealthData relay through the getHealthData/
+  // updateHealthData Cloud Functions (functions/index.js) instead of
+  // reading/writing users/{uid} directly — this session's health-data-
+  // encryption migration moved injuries/dob/biologicalSex/heightCm/
+  // weightKg/goalWeight/weightGoalActive/dailyCalorieGoal/
+  // weeklyCalorieGoal/monthlyCalorieGoal/calorieGoalActive off the
+  // plaintext user document into users/{uid}.encryptedHealthData,
+  // decryptable only server-side (the key lives only in Secret Manager,
+  // mirrors the OPENAI_API_KEY pattern already used for
+  // callWiseCoachOpenAI/analyzeNutrition).
+  //
+  // Neither method catches its own errors — callers that need fail-soft
+  // behavior (e.g. getUserInjuryData() below) wrap their own try/catch,
+  // exactly as before this migration; callers that need a real error to
+  // propagate (e.g. saveUserInjuries() below, so its own callers can show
+  // a "Failed to save" message) get exactly that, also unchanged.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>> getHealthData(String uid) async {
+    final callable = FirebaseFunctions.instance.httpsCallable('getHealthData');
+    final result = await callable.call<Map<String, dynamic>>({'uid': uid});
+    return Map<String, dynamic>.from(result.data);
+  }
+
+  Future<void> updateHealthData(Map<String, dynamic> updates) async {
+    final callable =
+        FirebaseFunctions.instance.httpsCallable('updateHealthData');
+    await callable.call<Map<String, dynamic>>({'updates': updates});
+  }
+
+  /// Saves the user's current injuries and filtering preference. [uid] is
+  /// kept for call-site compatibility, but no longer used to target the
+  /// write directly — updateHealthData()'s Cloud Function always writes
+  /// under the authenticated caller's own uid (request.auth.uid), never a
+  /// client-supplied one.
   Future<void> saveUserInjuries(
     String uid, {
     required List<Map<String, dynamic>> injuries,
     required bool filteringEnabled,
   }) async {
-    await _db
-        .collection(Collections.users)
-        .doc(uid)
-        .update({
+    await updateHealthData({
       'injuries': injuries,
       'injuryFilteringEnabled': filteringEnabled,
     });
@@ -1458,15 +1489,10 @@ class FirestoreService {
     String uid,
   ) async {
     try {
-      final doc = await _db
-          .collection(Collections.users)
-          .doc(uid)
-          .get();
-      final data = doc.data();
+      final data = await getHealthData(uid);
       return {
-        'injuries': data?['injuries'] ?? [],
-        'injuryFilteringEnabled':
-            data?['injuryFilteringEnabled'] ?? false,
+        'injuries': data['injuries'] ?? [],
+        'injuryFilteringEnabled': data['injuryFilteringEnabled'] ?? false,
       };
     } catch (_) {
       return {
@@ -3084,7 +3110,7 @@ class FirestoreService {
     // here) — summed as before, unchanged.
     final profile = await getUserProfile(uid);
     final weightKg =
-        double.tryParse(profile?['weight']?.toString() ?? '70') ?? 70.0;
+        double.tryParse(profile?['weightKg']?.toString() ?? '70') ?? 70.0;
     final gymCaloriesBurned = hasGym
         ? await _estimateGymCalories(
             weightKg: weightKg,

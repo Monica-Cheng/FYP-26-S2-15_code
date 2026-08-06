@@ -38,6 +38,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _wiseCoachMessages = true;
   bool _aiPersonalizationConsent = false;
   bool _leaderboardVisible = true;
+  bool _calorieGoalActive = false;
   bool _prefsLoading = true;
 
   String? _userEmail;
@@ -67,6 +68,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _aiPersonalizationConsent =
             profile?['aiPersonalizationConsent'] as bool? ?? false;
         _leaderboardVisible = profile?['leaderboardVisible'] as bool? ?? true;
+        _calorieGoalActive = profile?['calorieGoalActive'] as bool? ?? false;
         final savedHour = profile?['reminderHour'] as int?;
         final savedMinute = profile?['reminderMinute'] as int?;
         if (savedHour != null && savedMinute != null) {
@@ -358,17 +360,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     _sectionHeader('Preferences'),
                     _sectionCard([
                       _row(
-                        icon: Icons.straighten_rounded,
-                        iconBg: WW.primary,
-                        title: 'Units',
-                        first: true,
-                        right: _valueText('Metric'),
-                        onTap: () => _snack('Units coming soon'),
-                      ),
-                      _row(
                         icon: Icons.access_time_rounded,
                         iconBg: WW.teal,
                         title: 'Preferred Workout Time',
+                        first: true,
                         right: _valueText(
                           '${_reminderTime.hour.toString().padLeft(2, '0')}:${_reminderTime.minute.toString().padLeft(2, '0')}',
                         ),
@@ -378,8 +373,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         icon: Icons.local_fire_department_rounded,
                         iconBg: WW.gold,
                         title: 'Calorie Goals',
-                        right: _valueText('Active'),
-                        onTap: () => _snack('Calorie goals coming soon'),
+                        right: _valueText(
+                            _calorieGoalActive ? 'Active' : 'Off'),
                       ),
                     ]),
                     _sectionHeader('Notifications'),

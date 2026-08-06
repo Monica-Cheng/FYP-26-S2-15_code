@@ -11,6 +11,7 @@
 // session write instead of waiting for the client to next open a
 // Challenges screen and call computeChallengeProgress() itself.
 
+const crypto = require("crypto");
 const {onDocumentCreated} = require("firebase-functions/v2/firestore");
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const {defineSecret} = require("firebase-functions/params");
@@ -26,6 +27,123 @@ const db = getFirestore();
 // inside every compiled APK/IPA. Set via `firebase functions:secrets:set
 // OPENAI_API_KEY` (see deployment notes); never committed to source.
 const OPENAI_API_KEY = defineSecret("OPENAI_API_KEY");
+
+// Same secret-management pattern as OPENAI_API_KEY above, applied to the
+// health-data encryption key used by getHealthData()/updateHealthData()
+// below (and buildPersonalizationContext()'s decrypt of the same blob).
+// A 32-byte key, hex-encoded (64 hex characters — see
+// encryptHealthData()'s own length check), set via
+// `firebase functions:secrets:set HEALTH_DATA_ENCRYPTION_KEY`. Never
+// committed to source, never available to the Flutter client — only
+// Cloud Functions holding this secret can decrypt users/{uid}
+// .encryptedHealthData; the client can read/write that field's raw
+// ciphertext directly via Firestore (harmless, see firestore.rules'
+// unchanged users/{uid} rule) but can never make sense of it.
+const HEALTH_DATA_ENCRYPTION_KEY = defineSecret("HEALTH_DATA_ENCRYPTION_KEY");
+
+// The exact 11 fields bundled into users/{uid}.encryptedHealthData by
+// this session's health-data-encryption migration (formerly plaintext
+// fields directly on the user doc) — single source of truth for
+// updateHealthData()'s field-name validation and the standalone
+// migration script (functions/scripts/migrateHealthData.js), which keeps
+// its own copy of this exact list in sync by hand since it runs outside
+// this file's module (see that script's own header comment for why).
+const HEALTH_DATA_FIELDS = [
+  "injuries",
+  "injuryFilteringEnabled",
+  "dob",
+  "biologicalSex",
+  "heightCm",
+  "weightKg",
+  "goalWeight",
+  "weightGoalActive",
+  "dailyCalorieGoal",
+  "weeklyCalorieGoal",
+  "monthlyCalorieGoal",
+  "calorieGoalActive",
+];
+
+/**
+ * Encrypts `data` (any JSON-serializable object) into the
+ * `iv.authTag.ciphertext` string format (all 3 parts base64, joined by
+ * '.' — base64's alphabet never contains '.', so it's a safe, unambiguous
+ * delimiter) stored verbatim in users/{uid}.encryptedHealthData.
+ * AES-256-GCM via Node's built-in `crypto` module (no new dependency) —
+ * an authenticated cipher, so decryptHealthData() below detects any
+ * tampering with the stored ciphertext (GCM's auth-tag check throws
+ * rather than silently returning garbage), not just keeping it unreadable.
+ *
+ * A fresh random 12-byte IV is generated per call — GCM requires a
+ * never-reused nonce per (key, plaintext) encryption; reusing an IV with
+ * the same key is a real cryptographic weakness, so this never accepts
+ * or reuses a caller-supplied IV.
+ *
+ * @param {object} data
+ * @return {string}
+ */
+function encryptHealthData(data) {
+  const key = Buffer.from(HEALTH_DATA_ENCRYPTION_KEY.value(), "hex");
+  if (key.length !== 32) {
+    throw new HttpsError(
+        "internal",
+        "HEALTH_DATA_ENCRYPTION_KEY is misconfigured (expected a 32-byte " +
+        "hex-encoded key — 64 hex characters).",
+    );
+  }
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(JSON.stringify(data), "utf8"),
+    cipher.final(),
+  ]);
+  const authTag = cipher.getAuthTag();
+  return [iv, authTag, ciphertext]
+      .map((buf) => buf.toString("base64"))
+      .join(".");
+}
+
+/**
+ * Reverses encryptHealthData(). Throws (HttpsError, "internal") if the
+ * ciphertext is missing/malformed/tampered-with, rather than returning a
+ * partial or garbage object — callers (getHealthData(),
+ * updateHealthData(), buildPersonalizationContext()) each decide for
+ * themselves whether that should propagate as a real error or be treated
+ * as best-effort-empty, matching how every other best-effort category in
+ * buildPersonalizationContext() already handles its own failures.
+ *
+ * @param {string} encrypted
+ * @return {object}
+ */
+function decryptHealthData(encrypted) {
+  const key = Buffer.from(HEALTH_DATA_ENCRYPTION_KEY.value(), "hex");
+  if (key.length !== 32) {
+    throw new HttpsError(
+        "internal",
+        "HEALTH_DATA_ENCRYPTION_KEY is misconfigured (expected a 32-byte " +
+        "hex-encoded key — 64 hex characters).",
+    );
+  }
+  const parts = (encrypted || "").split(".");
+  if (parts.length !== 3) {
+    throw new HttpsError("internal", "encryptedHealthData is malformed.");
+  }
+  const [ivB64, authTagB64, ciphertextB64] = parts;
+  try {
+    const iv = Buffer.from(ivB64, "base64");
+    const authTag = Buffer.from(authTagB64, "base64");
+    const ciphertext = Buffer.from(ciphertextB64, "base64");
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAuthTag(authTag);
+    const plaintext = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final(),
+    ]).toString("utf8");
+    return JSON.parse(plaintext);
+  } catch (err) {
+    console.error("decryptHealthData: decrypt/parse failed:", err);
+    throw new HttpsError("internal", "Could not decrypt health data.");
+  }
+}
 
 /**
  * Sums this user's progress toward `challenge` over its date range, using
@@ -769,16 +887,40 @@ async function buildInsights(uid, userData, now) {
 async function buildPersonalizationContext(uid, userData, now) {
   const lines = [];
 
+  // Body profile + injuries — both now come from the decrypted
+  // encryptedHealthData blob (see decryptHealthData() above) rather than
+  // plaintext fields directly on userData: this session's health-data-
+  // encryption migration moved dob/biologicalSex/heightCm/weightKg/
+  // injuries (and other HEALTH_DATA_FIELDS not used in this particular
+  // context) off users/{uid} itself. Best-effort, matching every other
+  // category in this function: a missing/malformed blob (brand-new user,
+  // or one not yet run through the migration script) just means these
+  // two categories are omitted, not a hard failure.
+  let healthData = {};
+  if (typeof userData.encryptedHealthData === "string" &&
+      userData.encryptedHealthData !== "") {
+    try {
+      healthData = decryptHealthData(userData.encryptedHealthData);
+    } catch (err) {
+      console.error(
+          `buildPersonalizationContext: health-data decrypt failed for ` +
+          `uid ${uid}:`, err,
+      );
+    }
+  }
+
   // Body profile — only fields that are actually present are included;
   // a missing/undefined field is omitted, never sent as a blank value.
+  // experienceLevel/primaryGoal are NOT part of the encrypted blob (not
+  // in HEALTH_DATA_FIELDS) — still read directly off userData, unchanged.
   const bodyParts = [];
-  if (userData.dob) bodyParts.push(`DOB ${userData.dob}`);
-  if (userData.biologicalSex) bodyParts.push(userData.biologicalSex);
-  if (typeof userData.heightCm === "number") {
-    bodyParts.push(`${userData.heightCm}cm`);
+  if (healthData.dob) bodyParts.push(`DOB ${healthData.dob}`);
+  if (healthData.biologicalSex) bodyParts.push(healthData.biologicalSex);
+  if (typeof healthData.heightCm === "number") {
+    bodyParts.push(`${healthData.heightCm}cm`);
   }
-  if (typeof userData.weightKg === "number") {
-    bodyParts.push(`${userData.weightKg}kg`);
+  if (typeof healthData.weightKg === "number") {
+    bodyParts.push(`${healthData.weightKg}kg`);
   }
   if (userData.experienceLevel) bodyParts.push(userData.experienceLevel);
   if (userData.primaryGoal) bodyParts.push(`goal: ${userData.primaryGoal}`);
@@ -788,7 +930,7 @@ async function buildPersonalizationContext(uid, userData, now) {
 
   // Injury profile — same shape/defaults as getUserInjuryData(): an
   // empty/missing injuries array means "omit this category" entirely.
-  const injuries = Array.isArray(userData.injuries) ? userData.injuries : [];
+  const injuries = Array.isArray(healthData.injuries) ? healthData.injuries : [];
   if (injuries.length > 0) {
     const injuryList = injuries
         .map((i) => `${i.name || i.bodyPart || "unspecified"}` +
@@ -964,11 +1106,18 @@ async function countFreeWiseCoachMessagesThisMonth(uid, now) {
  * HttpsErrors instead of swallowing them, so this limit can't accidentally
  * be bypassed by wrapping it in the same best-effort try/catch.
  *
+ * Also now declares HEALTH_DATA_ENCRYPTION_KEY alongside OPENAI_API_KEY:
+ * required by Cloud Functions v2 whenever a function transitively uses a
+ * secret via a helper it calls (here, buildPersonalizationContext() ->
+ * decryptHealthData(), for the consent-gated chat path only) — the
+ * secret must be declared on every onCall() that can reach it, not just
+ * the module where the secret is defined.
+ *
  * @param {{messages: {role: string, content: string}[], maxTokens?: number, temperature?: number}} request.data
  * @return {Promise<{content: string}>}
  */
 exports.callWiseCoachOpenAI = onCall(
-    {secrets: [OPENAI_API_KEY]},
+    {secrets: [OPENAI_API_KEY, HEALTH_DATA_ENCRYPTION_KEY]},
     async (request) => {
       const data = request.data || {};
       const messages = data.messages;
@@ -1206,5 +1355,127 @@ exports.analyzeNutrition = onCall(
       }
 
       return {content};
+    },
+);
+
+/**
+ * getHealthData — decrypts and returns the authenticated caller's own
+ * bundled health-data blob (users/{uid}.encryptedHealthData — see
+ * HEALTH_DATA_FIELDS above for the exact 11 fields: injuries, dob,
+ * biologicalSex, heightCm, weightKg, goalWeight, weightGoalActive,
+ * dailyCalorieGoal, weeklyCalorieGoal, monthlyCalorieGoal,
+ * calorieGoalActive). Mirrors the OPENAI_API_KEY secret pattern already
+ * established for callWiseCoachOpenAI/analyzeNutrition: the encryption
+ * key lives only in Secret Manager, only Cloud Functions can decrypt, the
+ * client never holds it.
+ *
+ * Strictly self-scoped: request.auth.uid must equal the requested uid —
+ * a client can never read another user's health data through this
+ * function, even though the encrypted blob field itself is readable by
+ * anyone with Firestore access to that document (harmless — it's
+ * ciphertext without this function's key; see firestore.rules' unchanged
+ * users/{uid} rule and this migration's own investigation notes on why
+ * no rules change was needed).
+ *
+ * Returns {} (not an error) when no encryptedHealthData field exists yet
+ * — a brand-new user, or one not yet run through the one-time migration
+ * script — same "omit rather than guess" convention
+ * getUserInjuryData()'s empty defaults already used client-side before
+ * this migration.
+ *
+ * @param {{uid: string}} request.data
+ * @return {Promise<object>}
+ */
+exports.getHealthData = onCall(
+    {secrets: [HEALTH_DATA_ENCRYPTION_KEY]},
+    async (request) => {
+      const requestedUid = request.data && request.data.uid;
+      if (typeof requestedUid !== "string" || requestedUid === "") {
+        throw new HttpsError("invalid-argument", "uid is required.");
+      }
+      if (!request.auth || request.auth.uid !== requestedUid) {
+        throw new HttpsError(
+            "permission-denied",
+            "You can only read your own health data.",
+        );
+      }
+
+      const userDoc = await db.collection("users").doc(requestedUid).get();
+      const encrypted = userDoc.exists ?
+        userDoc.data().encryptedHealthData :
+        null;
+      if (typeof encrypted !== "string" || encrypted === "") {
+        return {};
+      }
+      return decryptHealthData(encrypted);
+    },
+);
+
+/**
+ * updateHealthData — merges `data.updates` (a partial or full subset of
+ * HEALTH_DATA_FIELDS) into the caller's existing decrypted health-data
+ * object, re-encrypts, and writes users/{uid}.encryptedHealthData in one
+ * update. Always self-scoped to request.auth.uid — unlike getHealthData,
+ * this doesn't even accept a uid parameter from the client, since there's
+ * no legitimate reason for a client to ever write another user's data.
+ *
+ * Any key in `data.updates` not in HEALTH_DATA_FIELDS is rejected outright
+ * (invalid-argument) rather than silently accepted into the blob — keeps
+ * its shape exactly the 11 confirmed fields, not a dumping ground for
+ * whatever a client happens to send.
+ *
+ * injuryCount (plaintext, non-sensitive — just an integer, never the
+ * injury details themselves) is maintained here as a side effect
+ * whenever `injuries` is part of this update, written in the SAME
+ * Firestore write as the encrypted blob so the two can never be observed
+ * out of sync. Exists purely so coach_screen.dart's Phase 4 referral
+ * trigger can keep doing a cheap local injuryCount>=3 check via the
+ * ordinary getUserProfile() read, with no Cloud Function round-trip and
+ * without exposing any injury detail in plaintext.
+ *
+ * @param {{updates: object}} request.data
+ * @return {Promise<{success: boolean}>}
+ */
+exports.updateHealthData = onCall(
+    {secrets: [HEALTH_DATA_ENCRYPTION_KEY]},
+    async (request) => {
+      if (!request.auth) {
+        throw new HttpsError("unauthenticated", "Sign-in required.");
+      }
+      const uid = request.auth.uid;
+      const updates = request.data && request.data.updates;
+      if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
+        throw new HttpsError("invalid-argument", "updates must be an object.");
+      }
+      const invalidKeys = Object.keys(updates)
+          .filter((k) => !HEALTH_DATA_FIELDS.includes(k));
+      if (invalidKeys.length > 0) {
+        throw new HttpsError(
+            "invalid-argument",
+            `Unknown health-data field(s): ${invalidKeys.join(", ")}.`,
+        );
+      }
+
+      const userRef = db.collection("users").doc(uid);
+      const userDoc = await userRef.get();
+      const existingEncrypted = userDoc.exists ?
+        userDoc.data().encryptedHealthData :
+        null;
+      const existing = (typeof existingEncrypted === "string" &&
+          existingEncrypted !== "") ?
+        decryptHealthData(existingEncrypted) :
+        {};
+
+      const merged = {...existing, ...updates};
+      const firestoreUpdate = {
+        encryptedHealthData: encryptHealthData(merged),
+      };
+      if (Object.prototype.hasOwnProperty.call(updates, "injuries")) {
+        const injuries = Array.isArray(merged.injuries) ? merged.injuries : [];
+        firestoreUpdate.injuryCount = injuries.length;
+      }
+
+      await userRef.set(firestoreUpdate, {merge: true});
+      return {success: true};
     },
 );

@@ -263,13 +263,16 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
 
   Future<void> _loadUserWeight() async {
     if (_uid == null) return;
-    final profile = await FirestoreService().getUserProfile(_uid!);
+    // weightKg now lives in the encrypted health-data blob (this
+    // session's encryption migration) — getUserProfile() no longer has
+    // it, so this reads getHealthData() instead. Field name fixed to
+    // match what onboarding/Health Profile actually write (weightKg,
+    // already in kg — no unit conversion needed here). The previous
+    // 'weight' key was never written anywhere, so this always silently
+    // fell back to the 70.0 default below.
+    final healthData = await FirestoreService().getHealthData(_uid!);
     if (!mounted) return;
-    // Field name fixed to match what onboarding/Health Profile actually
-    // write (weightKg, already in kg — no unit conversion needed here).
-    // The previous 'weight' key was never written anywhere, so this always
-    // silently fell back to the 70.0 default below.
-    final raw = profile?['weightKg'];
+    final raw = healthData['weightKg'];
     if (raw is num) {
       setState(() => _weightKg = raw.toDouble());
     } else if (raw is String) {
