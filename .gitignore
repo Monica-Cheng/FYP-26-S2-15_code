@@ -68,3 +68,4 @@ firebase-debug.*.log
 # macOS
 .DS_Store
 .env
+functions/scripts/*firebase-adminsdk*.json
