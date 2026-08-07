@@ -176,7 +176,8 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
       } else {
         setState(() => _isLoading = false);
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('HealthProfileScreen: profile/health data load failed — $e');
       if (mounted) setState(() => _isLoading = false);
     }
   }

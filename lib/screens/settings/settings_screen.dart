@@ -59,6 +59,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     try {
       final profile = await _firestore.getUserProfile(uid);
+      // calorieGoalActive lives in the encrypted health-data blob (this
+      // session's encryption migration) — getUserProfile() no longer has
+      // it, so this reads getHealthData() instead, matching the pattern
+      // health_profile_screen.dart already uses.
+      final healthData = await _firestore.getHealthData(uid);
       if (!mounted) return;
       setState(() {
         _pushNotif = profile?['notificationsEnabled'] as bool? ?? true;
@@ -68,7 +73,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _aiPersonalizationConsent =
             profile?['aiPersonalizationConsent'] as bool? ?? false;
         _leaderboardVisible = profile?['leaderboardVisible'] as bool? ?? true;
-        _calorieGoalActive = profile?['calorieGoalActive'] as bool? ?? false;
+        _calorieGoalActive = healthData['calorieGoalActive'] as bool? ?? false;
         final savedHour = profile?['reminderHour'] as int?;
         final savedMinute = profile?['reminderMinute'] as int?;
         if (savedHour != null && savedMinute != null) {

@@ -1438,6 +1438,30 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // HttpsCallableResult.data decodes nested JSON objects as
+  // Map<Object?, Object?> on native platforms (not Map<String, dynamic>) —
+  // a platform-channel codec quirk, not specific to this app. A shallow
+  // Map<String, dynamic>.from(result.data) fixes the top level only;
+  // anything nested (e.g. getHealthData()'s injuries list) stays
+  // Map<Object?, Object?> and throws the moment a caller force-casts it,
+  // e.g. List<Map<String, dynamic>>.from(...). This walks the whole
+  // structure at any depth so every caller gets plain
+  // Map<String, dynamic>/List<dynamic> the same way a fresh JSON decode
+  // would produce.
+  // ---------------------------------------------------------------------------
+  static dynamic _deepConvertCallableResult(dynamic value) {
+    if (value is Map) {
+      return value.map(
+        (k, v) => MapEntry(k.toString(), _deepConvertCallableResult(v)),
+      );
+    }
+    if (value is List) {
+      return value.map(_deepConvertCallableResult).toList();
+    }
+    return value;
+  }
+
+  // ---------------------------------------------------------------------------
   // getHealthData/updateHealthData relay through the getHealthData/
   // updateHealthData Cloud Functions (functions/index.js) instead of
   // reading/writing users/{uid} directly — this session's health-data-
@@ -1458,7 +1482,7 @@ class FirestoreService {
   Future<Map<String, dynamic>> getHealthData(String uid) async {
     final callable = FirebaseFunctions.instance.httpsCallable('getHealthData');
     final result = await callable.call<Map<String, dynamic>>({'uid': uid});
-    return Map<String, dynamic>.from(result.data);
+    return _deepConvertCallableResult(result.data) as Map<String, dynamic>;
   }
 
   Future<void> updateHealthData(Map<String, dynamic> updates) async {
@@ -1547,21 +1571,6 @@ class FirestoreService {
       total += (doc.data()['caloriesBurned'] as num?)?.toInt() ?? 0;
     }
     return total;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Returns the calorie goal settings from users/{uid}:
-  //   'calorieGoalActive': bool  (default false)
-  //   'dailyCalorieGoal':  int   (default 500)
-  // ---------------------------------------------------------------------------
-  Future<Map<String, dynamic>> getUserCalorieGoal(String uid) async {
-    final doc = await _db.collection(Collections.users).doc(uid).get();
-    final data = doc.data();
-    return {
-      'calorieGoalActive': data?['calorieGoalActive'] as bool? ?? false,
-      'dailyCalorieGoal':
-          (data?['dailyCalorieGoal'] as num?)?.toInt() ?? 500,
-    };
   }
 
   // ---------------------------------------------------------------------------
