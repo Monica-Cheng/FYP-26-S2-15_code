@@ -1,14 +1,16 @@
 // lib/services/nutrition_service.dart
 // Handles AI food recognition — both photo scan and manual text description.
-// Uses the same OpenAI account/key already configured for WiseCoach
-// (see lib/screens/coach/coach_screen.dart and .env: OPENAI_API_KEY).
+// Relays through the analyzeNutrition Cloud Function (functions/index.js)
+// instead of calling OpenAI directly — the API key now lives server-side as
+// a Cloud Functions secret (shared with callWiseCoachOpenAI), never in the
+// app bundle. Same model/params/system-prompt/content-array shape as
+// before; only WHERE the OpenAI call happens has changed.
 // NEVER call the OpenAI API directly from a screen — always go through here.
 
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:http/http.dart' as http;
+import 'package:cloud_functions/cloud_functions.dart';
 
 // ── Result model ─────────────────────────────────────────────────────────────
 
@@ -59,9 +61,6 @@ class NutritionServiceException implements Exception {
 // ── Service ──────────────────────────────────────────────────────────────────
 
 class NutritionService {
-  static const String _endpoint =
-      'https://api.openai.com/v1/chat/completions';
-
   static const String _jsonSchemaInstructions = '''
 Respond with ONLY a single JSON object — no markdown, no code fences, no extra text.
 Schema:
@@ -77,22 +76,16 @@ Schema:
 }
 All numeric fields must still be present (use 0) even when recognized is false.''';
 
-  String get _apiKey => dotenv.env['OPENAI_API_KEY'] ?? '';
-
+  // Relays through the analyzeNutrition Cloud Function instead of calling
+  // OpenAI directly — same system prompt/content-array shape as before;
+  // only WHERE the call happens has changed. The function itself hardcodes
+  // model/max_tokens/temperature server-side (they never varied per-call
+  // here), so the client only ever sends `messages`.
   Future<Map<String, dynamic>> _post(List<Map<String, dynamic>> content) async {
-    if (_apiKey.isEmpty) {
-      throw NutritionServiceException(
-          'AI nutrition scanning is not configured (missing OPENAI_API_KEY).');
-    }
-
-    final response = await http.post(
-      Uri.parse(_endpoint),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $_apiKey',
-      },
-      body: jsonEncode({
-        'model': 'gpt-4o-mini',
+    final callable =
+        FirebaseFunctions.instance.httpsCallable('analyzeNutrition');
+    try {
+      final result = await callable.call<Map<String, dynamic>>({
         'messages': [
           {
             'role': 'system',
@@ -101,20 +94,22 @@ All numeric fields must still be present (use 0) even when recognized is false.'
           },
           {'role': 'user', 'content': content},
         ],
-        'max_tokens': 300,
-        'temperature': 0.3,
-      }),
-    );
-
-    if (response.statusCode != 200) {
+      });
+      return result.data;
+    } catch (_) {
+      // Was previously two distinct client-detectable cases (missing key /
+      // non-200 OpenAI response) — now a single Cloud-Function-call
+      // failure, since the client can no longer distinguish "key missing"
+      // from "OpenAI errored" from "network error" once the call moves
+      // server-side. Matches coach_screen.dart's own generic fallback
+      // wording style from its equivalent migration.
       throw NutritionServiceException(
-          'AI request failed (${response.statusCode}). Please try again.');
+          'AI nutrition scanning is unavailable right now. Please try again.');
     }
-    return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   NutritionResult _parse(Map<String, dynamic> data) {
-    final raw = data['choices'][0]['message']['content'] as String;
+    final raw = data['content'] as String;
     // Defensive: strip accidental code fences if the model adds them anyway.
     final cleaned = raw.trim().replaceAll(RegExp(r'^```json|^```|```$'), '').trim();
     try {

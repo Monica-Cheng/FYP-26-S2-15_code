@@ -852,7 +852,9 @@ class _GymSessionState extends State<GymSessionScreen> {
         });
       }
       _checkExercisesForInjuries();
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('GymSessionScreen: injury data load failed — $e');
+    }
   }
 
   void _checkExercisesForInjuries() {

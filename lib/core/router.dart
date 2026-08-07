@@ -26,6 +26,7 @@ import '../screens/profile/edit_profile_screen.dart';
 import '../screens/profile/profile_screen.dart';
 import '../screens/profile/user_profile_screen.dart';
 import '../screens/settings/health_profile_screen.dart';
+import '../screens/settings/manage_app_screen.dart';
 import '../screens/settings/settings_screen.dart';
 import '../screens/club/friends_screen.dart';
 import '../screens/club/create_challenge_screen.dart';
@@ -75,6 +76,7 @@ class Routes {
   static const String userProfile = '/user-profile';
   static const String settings = '/settings';
   static const String healthProfile = '/health-profile';
+  static const String manageApp = '/manage-app';
   static const String editProfile = '/edit-profile';
   static const String manualActivityLog = '/manual-activity-log';
   static const String missedCheckin = '/missed-checkin';
@@ -356,6 +358,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.healthProfile,
         builder: (context, state) => const HealthProfileScreen(),
+      ),
+      GoRoute(
+        path: Routes.manageApp,
+        builder: (context, state) => const ManageAppScreen(),
       ),
       GoRoute(
         path: Routes.editProfile,

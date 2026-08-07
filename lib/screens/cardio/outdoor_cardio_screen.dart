@@ -552,7 +552,11 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     if (_uid == null) return;
     final profile = await FirestoreService().getUserProfile(_uid!);
     if (!mounted) return;
-    final raw = profile?['weight'];
+    // Field name fixed to match what onboarding/Health Profile actually
+    // write (weightKg, already in kg — no unit conversion needed here).
+    // The previous 'weight' key was never written anywhere, so this always
+    // silently fell back to the 70.0 default below.
+    final raw = profile?['weightKg'];
     if (raw is num) {
       setState(() => _weightKg = raw.toDouble());
     } else if (raw is String) {
@@ -564,6 +568,13 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   Future<void> _initHealthKit() async {
     final granted = await HealthService().requestPermissions();
     if (!mounted || !granted) return;
+    // Manage App screen's Heart Rate toggle (default true) — see
+    // FirestoreService.isHealthCategoryEnabled()'s own doc comment.
+    final uid = _uid;
+    final heartRateEnabled = uid == null
+        ? true
+        : await FirestoreService().isHealthCategoryEnabled(uid, 'heartRate');
+    if (!mounted || !heartRateEnabled) return;
     _heartRateTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
       final hr = await HealthService().getLatestHeartRate();
       if (!mounted) return;

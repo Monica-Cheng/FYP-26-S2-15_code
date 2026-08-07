@@ -1,4 +1,9 @@
 // lib/screens/settings/settings_screen.dart
+// firebase_auth is imported here solely to catch FirebaseAuthException by
+// type for UI error-message mapping (see _ChangeEmailSheetState's own
+// _friendlyAuthError()) — same precedent as login_screen.dart. Every actual
+// Auth call still goes through AuthService, never FirebaseAuth directly.
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -33,6 +38,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _wiseCoachMessages = true;
   bool _aiPersonalizationConsent = false;
   bool _leaderboardVisible = true;
+  bool _calorieGoalActive = false;
   bool _prefsLoading = true;
 
   String? _userEmail;
@@ -53,6 +59,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     try {
       final profile = await _firestore.getUserProfile(uid);
+      // calorieGoalActive lives in the encrypted health-data blob (this
+      // session's encryption migration) — getUserProfile() no longer has
+      // it, so this reads getHealthData() instead, matching the pattern
+      // health_profile_screen.dart already uses.
+      final healthData = await _firestore.getHealthData(uid);
       if (!mounted) return;
       setState(() {
         _pushNotif = profile?['notificationsEnabled'] as bool? ?? true;
@@ -62,6 +73,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _aiPersonalizationConsent =
             profile?['aiPersonalizationConsent'] as bool? ?? false;
         _leaderboardVisible = profile?['leaderboardVisible'] as bool? ?? true;
+        _calorieGoalActive = healthData['calorieGoalActive'] as bool? ?? false;
         final savedHour = profile?['reminderHour'] as int?;
         final savedMinute = profile?['reminderMinute'] as int?;
         if (savedHour != null && savedMinute != null) {
@@ -224,16 +236,59 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  void _snack(String msg) {
+  void _snack(String msg, {Duration duration = const Duration(seconds: 2)}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(msg),
         backgroundColor: WW.primaryDark,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        duration: const Duration(seconds: 2),
+        duration: duration,
       ),
     );
+  }
+
+  // ── Change Email flow ────────────────────────────────────────────────────
+  // A SINGLE showModalBottomSheet call for the entire flow — re-auth (Step 0)
+  // -> new email entry (Step 1) -> submit, all handled inside
+  // _ChangeEmailSheet's own State via plain setState. Exactly one route is
+  // ever pushed. This replaces an earlier version that chained two separate
+  // Navigator-pushed modals (pop the re-auth sheet, then push a new-email
+  // sheet) — that pop-then-push was inherently racy against the popped
+  // route's own still-in-progress teardown, and forcing a frame via
+  // WidgetsBinding.scheduleFrame() to paper over the timing made it worse
+  // (it forced an out-of-band frame that touched an already-disposed
+  // TextEditingController mid-transition and rippled into other screens
+  // still mounted lower in the Navigator stack). Folding every step into one
+  // sheet removes the race at its source instead of timing around it.
+  //
+  // The sheet pops itself with the new email string once
+  // AuthService.changeEmail() (-> verifyBeforeUpdateEmail()) has actually
+  // succeeded, or null on cancel/dismiss. verifyBeforeUpdateEmail() is NOT
+  // immediate — it only completes once the user clicks the link Firebase
+  // sends to the NEW address — so the confirmation snack below (shown on
+  // THIS screen, after the sheet is gone) must not claim the email already
+  // changed.
+  Future<void> _startChangeEmailFlow() async {
+    if (_auth.getCurrentUser() == null) return;
+
+    final newEmail = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => _ChangeEmailSheet(authService: _auth),
+    );
+
+    if (newEmail != null && mounted) {
+      _snack(
+        'Verification email sent to $newEmail. Your email will update '
+        'once you confirm the link.',
+        duration: const Duration(seconds: 5),
+      );
+    }
   }
 
   Future<void> _handleLogOut() async {
@@ -290,7 +345,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         iconBg: WW.teal,
                         title: 'Change Email',
                         sub: _userEmail,
-                        onTap: () => _snack('Change email coming soon'),
+                        onTap: _startChangeEmailFlow,
                       ),
                       _row(
                         icon: Icons.favorite_rounded,
@@ -300,34 +355,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         onTap: () => context.push(Routes.healthProfile),
                       ),
                       _row(
-                        icon: Icons.account_circle_rounded,
-                        iconBg: WW.primary,
-                        title: 'About You',
-                        sub: 'Age, height, weight, sex',
-                        onTap: () => _snack('About you coming soon'),
-                      ),
-                      _row(
                         icon: Icons.devices_rounded,
                         iconBg: WW.lavender,
-                        title: 'Manage Apps & Devices',
-                        sub: 'Apple Watch · Apple Health',
-                        onTap: () => _snack('Manage devices coming soon'),
+                        title: 'Manage App',
+                        sub: 'Apple Health data categories',
+                        onTap: () => context.push(Routes.manageApp),
                       ),
                     ]),
                     _sectionHeader('Preferences'),
                     _sectionCard([
                       _row(
-                        icon: Icons.straighten_rounded,
-                        iconBg: WW.primary,
-                        title: 'Units',
-                        first: true,
-                        right: _valueText('Metric'),
-                        onTap: () => _snack('Units coming soon'),
-                      ),
-                      _row(
                         icon: Icons.access_time_rounded,
                         iconBg: WW.teal,
                         title: 'Preferred Workout Time',
+                        first: true,
                         right: _valueText(
                           '${_reminderTime.hour.toString().padLeft(2, '0')}:${_reminderTime.minute.toString().padLeft(2, '0')}',
                         ),
@@ -337,8 +378,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         icon: Icons.local_fire_department_rounded,
                         iconBg: WW.gold,
                         title: 'Calorie Goals',
-                        right: _valueText('Active'),
-                        onTap: () => _snack('Calorie goals coming soon'),
+                        right: _valueText(
+                            _calorieGoalActive ? 'Active' : 'Off'),
                       ),
                     ]),
                     _sectionHeader('Notifications'),
@@ -731,6 +772,340 @@ class _SettingsScreenState extends State<SettingsScreen> {
       onChanged: onChanged,
       activeTrackColor: WW.primary,
       inactiveTrackColor: WW.border,
+    );
+  }
+}
+
+// ── Change Email sheet ───────────────────────────────────────────────────
+// Single-route, 2-step content for _startChangeEmailFlow() above.
+//   Step 0 — re-authenticate: a password field for email/password users, or
+//   a "Continue with Google" confirm for Google users (branches once on
+//   authService.isGoogleSignInUser()).
+//   Step 1 — enter + submit the new email (format-validated, then
+//   AuthService.changeEmail()).
+// Moving between steps is a plain setState — no nested Navigator push/pop —
+// so exactly one route exists for this entire flow, start to finish. Pops
+// itself (Navigator.pop(context, newEmail)) only once changeEmail() has
+// actually succeeded; swipe-dismiss/tap-outside at any step just pops with
+// the default null, which _startChangeEmailFlow() treats as "cancelled."
+class _ChangeEmailSheet extends StatefulWidget {
+  final AuthService authService;
+  const _ChangeEmailSheet({required this.authService});
+
+  @override
+  State<_ChangeEmailSheet> createState() => _ChangeEmailSheetState();
+}
+
+class _ChangeEmailSheetState extends State<_ChangeEmailSheet> {
+  late final bool _isGoogleUser;
+  int _step = 0;
+  bool _isSubmitting = false;
+  String? _errorText;
+
+  // Owned entirely by this sheet's own widget lifecycle now — created once
+  // here, disposed exactly once in this State's own dispose() below. No
+  // outer screen method disposes these mid-flow anymore.
+  final _passwordController = TextEditingController();
+  final _emailController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _isGoogleUser = widget.authService.isGoogleSignInUser();
+  }
+
+  @override
+  void dispose() {
+    _passwordController.dispose();
+    _emailController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submitPassword() async {
+    final password = _passwordController.text;
+    if (password.isEmpty) {
+      setState(() => _errorText = 'Please enter your password.');
+      return;
+    }
+    setState(() {
+      _isSubmitting = true;
+      _errorText = null;
+    });
+    try {
+      await widget.authService.reauthenticateWithPassword(password);
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _step = 1;
+      });
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorText = _friendlyAuthError(e.code);
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorText = 'Something went wrong. Please try again.';
+      });
+    }
+  }
+
+  Future<void> _submitGoogle() async {
+    setState(() {
+      _isSubmitting = true;
+      _errorText = null;
+    });
+    try {
+      final credential = await widget.authService.reauthenticateWithGoogle();
+      if (!mounted) return;
+      if (credential == null) {
+        // User cancelled the Google picker — same silent-cancel convention
+        // as login_screen.dart's _handleGoogleLogin(); stay on this step so
+        // they can tap Continue again rather than closing the whole sheet.
+        setState(() => _isSubmitting = false);
+        return;
+      }
+      setState(() {
+        _isSubmitting = false;
+        _step = 1;
+      });
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorText = _friendlyAuthError(e.code);
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorText = 'Google re-authentication failed. Please try again.';
+      });
+    }
+  }
+
+  Future<void> _submitNewEmail() async {
+    final email = _emailController.text.trim();
+    if (!_isValidEmailFormat(email)) {
+      setState(() => _errorText = 'Please enter a valid email address.');
+      return;
+    }
+    setState(() {
+      _isSubmitting = true;
+      _errorText = null;
+    });
+    try {
+      await widget.authService.changeEmail(email);
+      if (!mounted) return;
+      Navigator.pop(context, email);
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorText = _friendlyAuthError(e.code);
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorText = 'Something went wrong. Please try again.';
+      });
+    }
+  }
+
+  // Basic format check only — Firebase itself is the source of truth
+  // (invalid-email below covers whatever this misses).
+  bool _isValidEmailFormat(String email) {
+    return RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email);
+  }
+
+  // Shared by both Step 0 (wrong-password) and Step 1
+  // (email-already-in-use/invalid-email/requires-recent-login) — same
+  // mapping style as login_screen.dart's _friendlyError().
+  String _friendlyAuthError(String code) {
+    switch (code) {
+      case 'wrong-password':
+      case 'invalid-credential':
+        return 'Incorrect password. Please try again.';
+      case 'requires-recent-login':
+        return 'This action requires you to sign in again. Please try again.';
+      case 'email-already-in-use':
+        return 'That email is already in use by another account.';
+      case 'invalid-email':
+        return 'Please enter a valid email address.';
+      case 'too-many-requests':
+        return 'Too many attempts. Please wait a moment and try again.';
+      case 'network-request-failed':
+        return 'Network error. Check your connection and try again.';
+      default:
+        return 'Something went wrong. Please try again.';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        24,
+        20,
+        24,
+        40 + MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                color: WW.border,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          ..._step == 0 ? _buildStep0() : _buildStep1(),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildStep0() {
+    if (_isGoogleUser) {
+      return [
+        const Text(
+          'Confirm Your Identity',
+          style: TextStyle(
+              fontSize: 20, fontWeight: FontWeight.w800, color: WW.primaryDark),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'For your security, please sign in with Google again to continue.',
+          style: TextStyle(fontSize: 13, color: WW.textSec, height: 1.5),
+        ),
+        if (_errorText != null) ...[
+          const SizedBox(height: 8),
+          Text(_errorText!, style: const TextStyle(fontSize: 12, color: _kRed)),
+        ],
+        const SizedBox(height: 20),
+        _primaryButton(
+          label: 'Continue with Google',
+          onPressed: _isSubmitting ? null : _submitGoogle,
+        ),
+      ];
+    }
+    return [
+      const Text(
+        'Confirm Your Password',
+        style: TextStyle(
+            fontSize: 20, fontWeight: FontWeight.w800, color: WW.primaryDark),
+      ),
+      const SizedBox(height: 6),
+      const Text(
+        'For your security, please re-enter your password to continue.',
+        style: TextStyle(fontSize: 13, color: WW.textSec, height: 1.5),
+      ),
+      const SizedBox(height: 20),
+      TextField(
+        controller: _passwordController,
+        obscureText: true,
+        autofocus: true,
+        style: const TextStyle(fontSize: 15, color: WW.text),
+        decoration: InputDecoration(
+          hintText: 'Password',
+          hintStyle: const TextStyle(fontSize: 15, color: WW.textSec),
+          filled: true,
+          fillColor: WW.elevated,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+      if (_errorText != null) ...[
+        const SizedBox(height: 8),
+        Text(_errorText!, style: const TextStyle(fontSize: 12, color: _kRed)),
+      ],
+      const SizedBox(height: 20),
+      _primaryButton(
+        label: 'Continue',
+        onPressed: _isSubmitting ? null : _submitPassword,
+      ),
+    ];
+  }
+
+  List<Widget> _buildStep1() {
+    return [
+      const Text(
+        'New Email Address',
+        style: TextStyle(
+            fontSize: 20, fontWeight: FontWeight.w800, color: WW.primaryDark),
+      ),
+      const SizedBox(height: 6),
+      const Text(
+        "We'll send a verification link to this address before it becomes "
+        'your new email.',
+        style: TextStyle(fontSize: 13, color: WW.textSec, height: 1.5),
+      ),
+      const SizedBox(height: 20),
+      TextField(
+        controller: _emailController,
+        autofocus: true,
+        keyboardType: TextInputType.emailAddress,
+        style: const TextStyle(fontSize: 15, color: WW.text),
+        decoration: InputDecoration(
+          hintText: 'New email address',
+          hintStyle: const TextStyle(fontSize: 15, color: WW.textSec),
+          filled: true,
+          fillColor: WW.elevated,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+      if (_errorText != null) ...[
+        const SizedBox(height: 8),
+        Text(_errorText!, style: const TextStyle(fontSize: 12, color: _kRed)),
+      ],
+      const SizedBox(height: 20),
+      _primaryButton(
+        label: 'Send Verification Link',
+        onPressed: _isSubmitting ? null : _submitNewEmail,
+      ),
+    ];
+  }
+
+  Widget _primaryButton({required String label, required VoidCallback? onPressed}) {
+    return SizedBox(
+      width: double.infinity,
+      height: 52,
+      child: ElevatedButton(
+        onPressed: onPressed,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: WW.primary,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: WW.primary.withValues(alpha: 0.6),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          elevation: 0,
+        ),
+        child: _isSubmitting
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2.5, color: Colors.white),
+              )
+            : Text(label,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      ),
     );
   }
 }

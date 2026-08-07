@@ -96,20 +96,12 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
       if (!mounted) return;
       if (data != null) {
         final name = data['displayName'] as String? ?? '';
-        final dobStr = data['dob'] as String? ?? '';
-        final heightCm = data['heightCm']?.toString() ?? '';
-        final weightKg = data['weightKg']?.toString() ?? '';
-        final sex = (data['biologicalSex'] as String?)?.isNotEmpty == true
-            ? data['biologicalSex'] as String
-            : 'Male';
-        final calorieActive = data['calorieGoalActive'] as bool? ?? false;
-        final dailyCal = data['dailyCalorieGoal']?.toString() ?? '';
-        final weeklyCal = data['weeklyCalorieGoal']?.toString() ?? '';
-        final monthlyCal = data['monthlyCalorieGoal']?.toString() ?? '';
-        final goalWeight = data['goalWeight']?.toString() ?? '';
 
         // goalDate may be a String (ISO) or Timestamp — handle both without
-        // importing cloud_firestore directly in this widget.
+        // importing cloud_firestore directly in this widget. Not part of
+        // the encrypted health-data blob (see below) — a target date isn't
+        // itself health-sensitive the way the goal weight/active flag are
+        // — so it stays here on the plaintext profile read.
         DateTime? goalDate;
         final goalDateRaw = data['goalDate'];
         if (goalDateRaw is String) {
@@ -119,6 +111,31 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
             goalDate = (goalDateRaw as dynamic).toDate() as DateTime;
           } catch (_) {}
         }
+
+        // dob/heightCm/weightKg/biologicalSex, the calorie-goal fields,
+        // goalWeight/weightGoalActive, and injuries all now live in the
+        // encrypted health-data blob (this session's encryption
+        // migration) — fetched in one call via getHealthData(), never
+        // plaintext on the user doc itself anymore. Both fetches now
+        // land in the same setState (previously injuries arrived via a
+        // second, later fetch/setState — no longer needed now that both
+        // sets of fields come from the same underlying call).
+        final healthData = await _firestore.getHealthData(uid);
+        if (!mounted) return;
+
+        final dobStr = healthData['dob'] as String? ?? '';
+        final heightCm = healthData['heightCm']?.toString() ?? '';
+        final weightKg = healthData['weightKg']?.toString() ?? '';
+        final sex = (healthData['biologicalSex'] as String?)?.isNotEmpty ==
+                true
+            ? healthData['biologicalSex'] as String
+            : 'Male';
+        final calorieActive =
+            healthData['calorieGoalActive'] as bool? ?? false;
+        final dailyCal = healthData['dailyCalorieGoal']?.toString() ?? '';
+        final weeklyCal = healthData['weeklyCalorieGoal']?.toString() ?? '';
+        final monthlyCal = healthData['monthlyCalorieGoal']?.toString() ?? '';
+        final goalWeight = healthData['goalWeight']?.toString() ?? '';
 
         setState(() {
           _vName = name;
@@ -138,7 +155,8 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
           _weeklyCalCtrl.text = weeklyCal;
           _monthlyCalCtrl.text = monthlyCal;
           _goalWeightCtrl.text = goalWeight;
-          _weightGoalActive = data['weightGoalActive'] as bool? ?? (_goalWeightCtrl.text.isNotEmpty);
+          _weightGoalActive = healthData['weightGoalActive'] as bool? ??
+              (_goalWeightCtrl.text.isNotEmpty);
           _goalDate = goalDate;
 
           _prefGoal = data['primaryGoal'] as String? ?? '';
@@ -146,25 +164,20 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
           _prefExperience = data['experienceLevel'] as String? ?? '';
           _prefDays = data['daysPerWeek']?.toString() ?? '';
 
+          _injuryFilteringEnabled =
+              healthData['injuryFilteringEnabled'] as bool? ?? false;
+          _userInjuries = List<Map<String, dynamic>>.from(
+              healthData['injuries'] as List? ?? []);
+          _disclaimerAccepted = _injuryFilteringEnabled;
+
           _isLoading = false;
         });
-
-        final injuryData = await FirestoreService()
-            .getUserInjuryData(uid);
-        if (mounted) {
-          setState(() {
-            _injuryFilteringEnabled =
-                injuryData['injuryFilteringEnabled'] as bool? ?? false;
-            _userInjuries = List<Map<String, dynamic>>.from(
-                injuryData['injuries'] as List? ?? []);
-            _disclaimerAccepted = _injuryFilteringEnabled;
-          });
-        }
         _loadInjuryCategories();
       } else {
         setState(() => _isLoading = false);
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('HealthProfileScreen: profile/health data load failed — $e');
       if (mounted) setState(() => _isLoading = false);
     }
   }
@@ -521,8 +534,17 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
 
     setState(() => _isSavingBody = true);
     try {
+      // displayName is not part of the encrypted health-data blob (not
+      // health-sensitive) — stays on the plaintext user doc via
+      // updateUserProfile(), written separately from the encrypted
+      // fields below via updateHealthData(). These are now two distinct
+      // writes rather than one atomic batch — a real (accepted) tradeoff
+      // of the encrypted-blob migration: a failure partway through could
+      // leave displayName saved but the health fields not, or vice versa.
       await _firestore.updateUserProfile(uid, {
         'displayName': _nameCtrl.text.trim(),
+      });
+      await _firestore.updateHealthData({
         if (_dobDate != null) 'dob': _dobDate!.toIso8601String().substring(0, 10),
         if (heightCm != null) 'heightCm': heightCm.round(),
         if (weightKg != null) 'weightKg': double.parse(weightKg.toStringAsFixed(1)),
@@ -601,7 +623,7 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
     final uid = _auth.getCurrentUser()?.uid;
     if (uid == null) return;
     try {
-      await _firestore.updateUserProfile(uid, {'calorieGoalActive': val});
+      await _firestore.updateHealthData({'calorieGoalActive': val});
     } catch (_) {}
   }
 
@@ -635,7 +657,7 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
     if (uid == null) return;
     setState(() => _isSavingCalorie = true);
     try {
-      await _firestore.updateUserProfile(uid, {
+      await _firestore.updateHealthData({
         'dailyCalorieGoal': int.tryParse(_dailyCalCtrl.text),
         'weeklyCalorieGoal': int.tryParse(_weeklyCalCtrl.text),
         'monthlyCalorieGoal': int.tryParse(_monthlyCalCtrl.text),
@@ -661,9 +683,17 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
     if (uid == null) return;
     setState(() => _isSavingWeight = true);
     try {
+      // goalDate is not part of the encrypted health-data blob (a target
+      // date isn't itself health-sensitive the way the goal weight/active
+      // flag are) — stays on the plaintext user doc via
+      // updateUserProfile(), written separately from the encrypted
+      // fields below via updateHealthData(). See _saveBodyMetrics()'s own
+      // comment for the same "no longer one atomic write" tradeoff.
       await _firestore.updateUserProfile(uid, {
-        'goalWeight': double.tryParse(_goalWeightCtrl.text),
         'goalDate': _goalDate?.toIso8601String().substring(0, 10),
+      });
+      await _firestore.updateHealthData({
+        'goalWeight': double.tryParse(_goalWeightCtrl.text),
         'weightGoalActive': _weightGoalActive,
       });
       if (!mounted) return;

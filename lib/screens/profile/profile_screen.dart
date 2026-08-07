@@ -1,4 +1,5 @@
 // lib/screens/profile/profile_screen.dart
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -13,38 +14,20 @@ import '../../services/firestore_service.dart';
 import '../../utils/image_encode.dart';
 import '../../widgets/quick_add_sheet.dart';
 
-// ── Data classes ──────────────────────────────────────────────────────────────
-
-class _Friend {
-  final String initial;
-  final Color color;
-  final String name;
-  final String username;
-  final int level;
-  final String xp;
-  const _Friend({
-    required this.initial,
-    required this.color,
-    required this.name,
-    required this.username,
-    required this.level,
-    required this.xp,
-  });
-}
-
 // ── Hardcoded data ────────────────────────────────────────────────────────────
 
-// Violet — avatar accent not present in WW palette
-const _kPurple = Color(0xFF8B5CF6);
 // Off-white — locked-badge background not present in WW palette
 const _kLockedBg = Color(0xFFF2F2F7);
 
-const _kFriends = <_Friend>[
-  _Friend(initial: 'A', color: WW.primary, name: 'Aiden Lee',  username: '@aidenlee',  level: 9,  xp: '1,840'),
-  _Friend(initial: 'S', color: WW.teal,    name: 'Sarah Lim',  username: '@sarahlim',  level: 6,  xp: '1,240'),
-  _Friend(initial: 'Z', color: WW.gold,    name: 'Zaid Malik', username: '@zaidmalik', level: 4,  xp: '860'),
-  _Friend(initial: 'A', color: _kPurple,   name: 'Audrey Ng',  username: '@audreyng',  level: 11, xp: '2,340'),
-];
+// Same comma-grouped XP formatting as club_screen.dart's private _fmtXp() —
+// not importable across files (leading underscore), so mirrored here rather
+// than reimplemented differently.
+String _fmtXp(int xp) {
+  if (xp >= 1000) {
+    return '${xp ~/ 1000},${(xp % 1000).toString().padLeft(3, '0')}';
+  }
+  return '$xp';
+}
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -79,6 +62,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Set<String> _earnedBadgeIds = {};
   bool _badgesLoading = true;
 
+  // Real friends list — same getFriendsStream() used by friends_screen.dart
+  // and club_screen.dart, subscribed for this screen's lifetime.
+  List<Map<String, dynamic>> _friends = [];
+  bool _friendsLoading = true;
+  StreamSubscription<List<Map<String, dynamic>>>? _friendsSub;
+
   static const _kXpThresholds = [0, 500, 1200, 2500, 4500, 7000, 10000, 14000, 19000, 25000, 32000];
 
   static String _levelName(int level) {
@@ -104,6 +93,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _loadProfile();
     _loadStats();
     _loadBadges();
+    _startFriendsStream();
+  }
+
+  @override
+  void dispose() {
+    _friendsSub?.cancel();
+    super.dispose();
+  }
+
+  void _startFriendsStream() {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) {
+      setState(() => _friendsLoading = false);
+      return;
+    }
+    _friendsSub = _firestore.getFriendsStream(uid).listen((friends) {
+      if (mounted) {
+        setState(() {
+          _friends = friends;
+          _friendsLoading = false;
+        });
+      }
+    });
   }
 
   Future<void> _loadProfile() async {
@@ -649,10 +661,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
       return const SizedBox.shrink();
     }
     return Padding(
-      // Bottom trimmed from 12 -> 4: the XP card right below has its own
-      // 0 top margin, so the old value read as a bigger gap here than the
-      // 12-16 used between every other section on this screen.
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      // Matches the 12px bottom gap ProfileCard's margin/CoachDashboardLink's
+      // padding already use between sections on this screen — the real fix
+      // for the oversized gap above the XP card was the grid's own
+      // mainAxisExtent below, not this value (see that comment).
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -668,11 +681,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
           GridView.builder(
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
+            // mainAxisExtent (a fixed height) instead of childAspectRatio (a
+            // width-derived ratio): childAspectRatio: 0.78 made every cell
+            // ~109px tall on a typical phone width, well beyond the ~84px a
+            // badge tile (56px icon + 4px gap + up to 2 lines of 10px text)
+            // actually needs — GridView gives each cell TIGHT constraints,
+            // so that leftover ~25px/row rendered as blank space at the
+            // bottom of every cell, most visible as a big gap right where
+            // the grid ends (e.g. a partial last row, like 1-badge-per-row-2
+            // in the screenshot) directly above the XP card. A fixed extent
+            // sized to the tile's real content height removes that
+            // regardless of row width/screen size, unlike tuning the ratio.
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 4,
               mainAxisSpacing: 14,
               crossAxisSpacing: 10,
-              childAspectRatio: 0.78,
+              mainAxisExtent: 90,
             ),
             itemCount: _allBadges.length,
             itemBuilder: (context, i) {
@@ -960,8 +984,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   // ── Friends section ───────────────────────────────────────────────────────
+  // Real data: friend list/count from getFriendsStream() (see
+  // _startFriendsStream()), per-row level + weekly XP from
+  // getFriendsLeaderboardStream() — same two calls club_screen.dart's
+  // Leaderboard subtab combines, field extraction/fallbacks mirrored from
+  // its _buildLeaderRow() below since that method is private to that file.
 
   Widget _buildFriendsSection() {
+    final myUid = _auth.getCurrentUser()?.uid ?? '';
+    final friendUids = _friends.map((f) => f['uid'] as String).toList();
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
       child: Column(
@@ -981,7 +1013,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
               ),
               GestureDetector(
-                onTap: () => _snack('Add friends coming soon'),
+                onTap: () => context.push(Routes.friends),
                 child: const Text(
                   'Add friends',
                   style: TextStyle(fontSize: 13, color: WW.primary),
@@ -992,95 +1024,59 @@ class _ProfileScreenState extends State<ProfileScreen> {
           const SizedBox(height: 6),
           // Friend count
           Row(
-            children: const [
-              Icon(Icons.people_rounded, size: 14, color: WW.textSec),
-              SizedBox(width: 6),
+            children: [
+              const Icon(Icons.people_rounded, size: 14, color: WW.textSec),
+              const SizedBox(width: 6),
               Text(
-                '8 friends',
-                style: TextStyle(fontSize: 13, color: WW.textSec),
+                _friendsLoading
+                    ? 'Loading...'
+                    : '${_friends.length} friend${_friends.length == 1 ? '' : 's'}',
+                style: const TextStyle(fontSize: 13, color: WW.textSec),
               ),
             ],
           ),
           const SizedBox(height: 10),
-          // Friend rows
-          ..._kFriends.map((f) {
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: Container(
-                height: 56,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                decoration: WW.cardDecoration,
-                child: Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: f.color,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Center(
-                        child: Text(
-                          f.initial,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            f.name,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: WW.text,
-                            ),
-                          ),
-                          Text(
-                            '${f.username} · Level ${f.level}',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: WW.textSec,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          '${f.xp} XP',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: WW.primary,
-                          ),
-                        ),
-                        const Text(
-                          'this week',
-                          style: TextStyle(fontSize: 10, color: WW.textSec),
-                        ),
-                      ],
-                    ),
-                  ],
+          if (_friendsLoading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Center(
+                child: CircularProgressIndicator(color: WW.primary),
+              ),
+            )
+          else if (_friends.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Center(
+                child: Text(
+                  'No friends yet — add some!',
+                  style: TextStyle(fontSize: 13, color: WW.textSec),
                 ),
               ),
-            );
-          }),
+            )
+          else
+            StreamBuilder<List<Map<String, dynamic>>>(
+              stream: _firestore.getFriendsLeaderboardStream(myUid, friendUids),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16),
+                    child: Center(
+                      child: CircularProgressIndicator(color: WW.primary),
+                    ),
+                  );
+                }
+                final entries = (snapshot.data ?? [])
+                    .where((e) => e['uid'] != myUid)
+                    .toList();
+                return Column(
+                  children: entries.map(_buildFriendRow).toList(),
+                );
+              },
+            ),
           // See all link
           const SizedBox(height: 8),
           GestureDetector(
-            onTap: () => _snack('Friends coming soon'),
+            onTap: () => context.push(Routes.friends),
             child: const Center(
               child: Text(
                 'See all friends →',
@@ -1090,6 +1086,90 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
           const SizedBox(height: 16),
         ],
+      ),
+    );
+  }
+
+  Widget _buildFriendRow(Map<String, dynamic> entry) {
+    final name = entry['displayName'] as String? ?? 'User';
+    final username = entry['username'] as String?;
+    final level = (entry['level'] as num?)?.toInt();
+    final levelLabel = level != null ? 'Level $level' : '—';
+    final weeklyXp = (entry['weeklyXp'] as int?) ?? 0;
+    final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Container(
+        height: 56,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: WW.cardDecoration,
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: const BoxDecoration(
+                color: WW.elevated,
+                shape: BoxShape.circle,
+              ),
+              child: Center(
+                child: Text(
+                  initial,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: WW.text,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: WW.text,
+                    ),
+                  ),
+                  Text(
+                    username != null && username.isNotEmpty
+                        ? '@$username · $levelLabel'
+                        : levelLabel,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: WW.textSec,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  '${_fmtXp(weeklyXp)} XP',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: WW.primary,
+                  ),
+                ),
+                const Text(
+                  'this week',
+                  style: TextStyle(fontSize: 10, color: WW.textSec),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

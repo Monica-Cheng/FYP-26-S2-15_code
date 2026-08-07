@@ -21,6 +21,7 @@ import '../../services/notification_service.dart';
 import '../../widgets/common/month_calendar.dart';
 import '../../widgets/quick_add_sheet.dart';
 import '../../widgets/session_resume_prompt.dart';
+import '../../widgets/user_avatar.dart';
 import '../business/coach_dashboard_screen.dart';
 import '../plans/plans_screen.dart';
 import '../coach/coach_screen.dart';
@@ -698,18 +699,20 @@ class _HomeTabState extends State<_HomeTab> {
     ]);
   }
 
-  // Profile group: one users/{uid} read feeds display name, tracked plan
-  // id/name, and the calorie goal settings — calorieGoalActive/
-  // dailyCalorieGoal used to come from a SEPARATE getUserCalorieGoal(uid)
-  // read of this exact same doc; now read once here instead (same field
-  // names/defaults getUserCalorieGoal used internally). Also owns
-  // starting the plan-progress stream/today's-session load/missed-session
-  // check, since all three are gated on trackedPlanId, which lives here —
-  // previously they only ran after the old shared 7-future bundle
-  // succeeded as a whole.
+  // Profile group: one users/{uid} read feeds display name and tracked
+  // plan id/name. calorieGoalActive/dailyCalorieGoal used to come from
+  // this same read (and, before that, a separate now-removed
+  // getUserCalorieGoal(uid) read of this same doc) but both now live in
+  // the encrypted health-data blob (this session's encryption
+  // migration) — so both are fetched via a separate getHealthData()
+  // call instead. Also owns starting the plan-progress stream/today's-
+  // session load/missed-session check, since all three are gated on
+  // trackedPlanId, which lives here — previously they only ran after
+  // the old shared 7-future bundle succeeded as a whole.
   Future<void> _loadProfileGroup(String uid) async {
     try {
       final profile = await _firestoreService.getUserProfile(uid);
+      final healthData = await _firestoreService.getHealthData(uid);
       if (!mounted) return;
       final trackedPlanId = profile?['trackedPlanId'] as String? ?? '';
 
@@ -718,9 +721,9 @@ class _HomeTabState extends State<_HomeTab> {
         _photoBase64 = profile?['photoBase64'] as String?;
         _isLoadingName = false;
         _profileError = false;
-        _calorieGoalActive = profile?['calorieGoalActive'] as bool? ?? false;
+        _calorieGoalActive = healthData['calorieGoalActive'] as bool? ?? false;
         _dailyCalorieGoal =
-            (profile?['dailyCalorieGoal'] as num?)?.toInt() ?? 500;
+            (healthData['dailyCalorieGoal'] as num?)?.toInt() ?? 500;
         _trackedPlanId = trackedPlanId;
         _trackedPlanName = profile?['trackedPlanName'] as String? ?? '';
       });
@@ -1423,15 +1426,14 @@ class _HomeTabState extends State<_HomeTab> {
           // Avatar → Profile screen
           GestureDetector(
             onTap: () => context.push(Routes.profile).then((_) => _loadUserData()),
-            child: Container(
-              width: 38,
-              height: 38,
-              decoration: BoxDecoration(
-                color: WW.chipBg,
-                shape: BoxShape.circle,
-                border: Border.all(color: WW.primary, width: 1.5),
-              ),
-              child: ClipOval(child: _buildTopBarAvatarContent(initials)),
+child: UserAvatar(
+              photoBase64: _photoBase64,
+              initial: initials,
+              size: 38,
+              backgroundColor: WW.chipBg,
+              initialColor: WW.primary,
+              initialFontSize: 15,
+              border: Border.all(color: WW.primary, width: 1.5),
             ),
           ),
         ],

@@ -5,6 +5,7 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 
 import '../core/constants.dart';
 
@@ -59,7 +60,7 @@ class FirestoreService {
     'level',
     'leaderboardVisible',
     'lastWeeklyXpUpdate',
-    // Mirrored so a user's photo can eventually be read cross-user (e.g.
+// Mirrored so a user's photo can eventually be read cross-user (e.g.
     // viewing someone else's profile) without opening up users/{uid}'s
     // owner-only read rule — see user_profile_screen.dart / firestore.rules
     // investigation notes. Not yet consumed cross-user by any call site;
@@ -306,6 +307,23 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Whether [uid] wants [category] (one of 'heartRate'/'steps'/
+  // 'activeCalories' — see manage_app_screen.dart) used elsewhere in the app.
+  // Reads users/{uid}.healthCategoriesEnabled, defaulting to true whenever
+  // the map itself or the specific key is missing — matches HealthKit's own
+  // existing behavior (all 3 categories requested together, see
+  // HealthService._readTypes) so existing users see no change until they
+  // actively toggle something off on the new Manage App screen.
+  // ---------------------------------------------------------------------------
+  Future<bool> isHealthCategoryEnabled(String uid, String category) async {
+    final profile = await getUserProfile(uid);
+    final categories =
+        profile?['healthCategoriesEnabled'] as Map<String, dynamic>?;
+    if (categories == null) return true;
+    return categories[category] as bool? ?? true;
+  }
+
+  // ---------------------------------------------------------------------------
   // Reads publicProfiles/{uid} — the cross-user-readable mirror of
   // _publicProfileFields (displayName/username/weeklyXp/level/
   // leaderboardVisible/lastWeeklyXpUpdate). Use this instead of
@@ -343,7 +361,7 @@ class FirestoreService {
   // Persists onboarding step 1 — body profile fields — into users/{uid}.
   // Expected keys in bodyProfile:
   //   displayName, dob, biologicalSex, heightCm, weightKg,
-  //   preferredUnits, healthConnected, wearableConnected
+  //   preferredUnits, healthConnected
   //
   // This is the very first write for a brand-new user — the users/{uid}
   // doc doesn't exist before this (see createUserProfile()'s own doc
@@ -720,7 +738,7 @@ class FirestoreService {
 
     final profile = await getUserProfile(uid);
     final weightKg =
-        double.tryParse(profile?['weight']?.toString() ?? '70') ?? 70.0;
+        double.tryParse(profile?['weightKg']?.toString() ?? '70') ?? 70.0;
     final caloriesBurned = await _estimateGymCalories(
       weightKg: weightKg,
       totalSets: totalSets,
@@ -1419,17 +1437,71 @@ class FirestoreService {
     }
   }
 
-  /// Saves the user's current injuries and filtering
-  /// preference to their user document.
+  // ---------------------------------------------------------------------------
+  // HttpsCallableResult.data decodes nested JSON objects as
+  // Map<Object?, Object?> on native platforms (not Map<String, dynamic>) —
+  // a platform-channel codec quirk, not specific to this app. A shallow
+  // Map<String, dynamic>.from(result.data) fixes the top level only;
+  // anything nested (e.g. getHealthData()'s injuries list) stays
+  // Map<Object?, Object?> and throws the moment a caller force-casts it,
+  // e.g. List<Map<String, dynamic>>.from(...). This walks the whole
+  // structure at any depth so every caller gets plain
+  // Map<String, dynamic>/List<dynamic> the same way a fresh JSON decode
+  // would produce.
+  // ---------------------------------------------------------------------------
+  static dynamic _deepConvertCallableResult(dynamic value) {
+    if (value is Map) {
+      return value.map(
+        (k, v) => MapEntry(k.toString(), _deepConvertCallableResult(v)),
+      );
+    }
+    if (value is List) {
+      return value.map(_deepConvertCallableResult).toList();
+    }
+    return value;
+  }
+
+  // ---------------------------------------------------------------------------
+  // getHealthData/updateHealthData relay through the getHealthData/
+  // updateHealthData Cloud Functions (functions/index.js) instead of
+  // reading/writing users/{uid} directly — this session's health-data-
+  // encryption migration moved injuries/dob/biologicalSex/heightCm/
+  // weightKg/goalWeight/weightGoalActive/dailyCalorieGoal/
+  // weeklyCalorieGoal/monthlyCalorieGoal/calorieGoalActive off the
+  // plaintext user document into users/{uid}.encryptedHealthData,
+  // decryptable only server-side (the key lives only in Secret Manager,
+  // mirrors the OPENAI_API_KEY pattern already used for
+  // callWiseCoachOpenAI/analyzeNutrition).
+  //
+  // Neither method catches its own errors — callers that need fail-soft
+  // behavior (e.g. getUserInjuryData() below) wrap their own try/catch,
+  // exactly as before this migration; callers that need a real error to
+  // propagate (e.g. saveUserInjuries() below, so its own callers can show
+  // a "Failed to save" message) get exactly that, also unchanged.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>> getHealthData(String uid) async {
+    final callable = FirebaseFunctions.instance.httpsCallable('getHealthData');
+    final result = await callable.call<Map<String, dynamic>>({'uid': uid});
+    return _deepConvertCallableResult(result.data) as Map<String, dynamic>;
+  }
+
+  Future<void> updateHealthData(Map<String, dynamic> updates) async {
+    final callable =
+        FirebaseFunctions.instance.httpsCallable('updateHealthData');
+    await callable.call<Map<String, dynamic>>({'updates': updates});
+  }
+
+  /// Saves the user's current injuries and filtering preference. [uid] is
+  /// kept for call-site compatibility, but no longer used to target the
+  /// write directly — updateHealthData()'s Cloud Function always writes
+  /// under the authenticated caller's own uid (request.auth.uid), never a
+  /// client-supplied one.
   Future<void> saveUserInjuries(
     String uid, {
     required List<Map<String, dynamic>> injuries,
     required bool filteringEnabled,
   }) async {
-    await _db
-        .collection(Collections.users)
-        .doc(uid)
-        .update({
+    await updateHealthData({
       'injuries': injuries,
       'injuryFilteringEnabled': filteringEnabled,
     });
@@ -1441,15 +1513,10 @@ class FirestoreService {
     String uid,
   ) async {
     try {
-      final doc = await _db
-          .collection(Collections.users)
-          .doc(uid)
-          .get();
-      final data = doc.data();
+      final data = await getHealthData(uid);
       return {
-        'injuries': data?['injuries'] ?? [],
-        'injuryFilteringEnabled':
-            data?['injuryFilteringEnabled'] ?? false,
+        'injuries': data['injuries'] ?? [],
+        'injuryFilteringEnabled': data['injuryFilteringEnabled'] ?? false,
       };
     } catch (_) {
       return {
@@ -1504,21 +1571,6 @@ class FirestoreService {
       total += (doc.data()['caloriesBurned'] as num?)?.toInt() ?? 0;
     }
     return total;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Returns the calorie goal settings from users/{uid}:
-  //   'calorieGoalActive': bool  (default false)
-  //   'dailyCalorieGoal':  int   (default 500)
-  // ---------------------------------------------------------------------------
-  Future<Map<String, dynamic>> getUserCalorieGoal(String uid) async {
-    final doc = await _db.collection(Collections.users).doc(uid).get();
-    final data = doc.data();
-    return {
-      'calorieGoalActive': data?['calorieGoalActive'] as bool? ?? false,
-      'dailyCalorieGoal':
-          (data?['dailyCalorieGoal'] as num?)?.toInt() ?? 500,
-    };
   }
 
   // ---------------------------------------------------------------------------
@@ -3067,7 +3119,7 @@ class FirestoreService {
     // here) — summed as before, unchanged.
     final profile = await getUserProfile(uid);
     final weightKg =
-        double.tryParse(profile?['weight']?.toString() ?? '70') ?? 70.0;
+        double.tryParse(profile?['weightKg']?.toString() ?? '70') ?? 70.0;
     final gymCaloriesBurned = hasGym
         ? await _estimateGymCalories(
             weightKg: weightKg,
@@ -3900,18 +3952,25 @@ class FirestoreService {
 
   // ---------------------------------------------------------------------------
   // Adds a comment to a post and increments its denormalized commentCount.
+  // authorPhotoBase64 is denormalized onto the comment doc the same way
+  // authorPhotoBase64 already is on posts themselves (see createFeedPost) —
+  // sourced from the commenter's own users/{uid}.photoBase64 by the caller
+  // at comment-creation time, not looked up here.
   // ---------------------------------------------------------------------------
   Future<void> addComment(
     String postId, {
     required String uid,
     required String authorName,
     required String text,
+    String? authorPhotoBase64,
   }) async {
     final postRef = _db.collection(Collections.posts).doc(postId);
     await postRef.collection('comments').add({
       'uid': uid,
       'authorName': authorName,
       'text': text,
+      if (authorPhotoBase64 != null && authorPhotoBase64.isNotEmpty)
+        'authorPhotoBase64': authorPhotoBase64,
       'createdAt': FieldValue.serverTimestamp(),
     });
     await postRef.update({'commentCount': FieldValue.increment(1)});
@@ -4046,8 +4105,38 @@ class FirestoreService {
         'uid': doc.id,
         'displayName': data['displayName'],
         'username': data['username'],
+        'photoBase64': data['photoBase64'],
       };
     }).toList();
+  }
+
+  /// Batched lookup of publicProfiles/{uid}.photoBase64 for a list of uids —
+  /// used to enrich rows whose own doc (friends/friendRequests
+  /// subcollections) is denormalized once at request/accept time and never
+  /// refreshed, so a photo uploaded after that point still shows up without
+  /// needing to re-friend. Same 30-value whereIn chunking as
+  /// getFriendsLeaderboardStream(). Returns only uids that have a photo set.
+  Future<Map<String, String>> getPublicPhotosByUids(List<String> uids) async {
+    if (uids.isEmpty) return {};
+    final distinctUids = uids.toSet().toList();
+    final chunks = <List<String>>[];
+    for (var i = 0; i < distinctUids.length; i += 30) {
+      final end =
+          i + 30 > distinctUids.length ? distinctUids.length : i + 30;
+      chunks.add(distinctUids.sublist(i, end));
+    }
+    final photos = <String, String>{};
+    for (final chunk in chunks) {
+      final snapshot = await _db
+          .collection(_publicProfiles)
+          .where(FieldPath.documentId, whereIn: chunk)
+          .get();
+      for (final doc in snapshot.docs) {
+        final photo = doc.data()['photoBase64'] as String?;
+        if (photo != null && photo.isNotEmpty) photos[doc.id] = photo;
+      }
+    }
+    return photos;
   }
 
   /// Sends a friend request from [fromUid] to [toUid]. Writes the
@@ -4323,6 +4412,7 @@ class FirestoreService {
           'level': data['level'],
           'leaderboardVisible': data['leaderboardVisible'] as bool? ?? true,
           'lastWeeklyXpUpdate': data['lastWeeklyXpUpdate'],
+          'photoBase64': data['photoBase64'],
         };
       }).where((e) {
         final visible = e['leaderboardVisible'] as bool;
