@@ -2447,6 +2447,18 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       final allPoints = _segments.expand((segment) => segment).toList();
       await _ensureFullRouteDrawnForSnapshot(controller, allPoints);
       final bounds = await _fitCameraToRoute(controller, allPoints);
+      // _fitCameraToRoute()'s waitUntilMapTilesAreLoaded() call is a
+      // documented no-op on native platforms (see that method's own doc
+      // comment) — on a real device this can mean takeSnapshot() below
+      // fires before the just-panned/zoomed viewport's tiles have
+      // actually finished rendering, capturing a blank/grey tile
+      // placeholder instead of the real map underneath. This explicit
+      // delay is a plausible mitigation based on that documented gap, NOT
+      // a confirmed fix — pairs with the debugPrint further down (and in
+      // RouteMapShareCard.build()) to check on retest whether
+      // mapSnapshotBase64 is empty (upstream capture skipped entirely) or
+      // present-but-blank (this timing gap) if the bug reproduces again.
+      await Future.delayed(const Duration(milliseconds: 500));
       final bytes = await controller.takeSnapshot(width: 480, height: 300);
 
       // takeSnapshot() only ever returns a bare base map (see

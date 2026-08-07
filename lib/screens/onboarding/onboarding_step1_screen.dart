@@ -654,7 +654,7 @@ class _ProgressHeader extends StatelessWidget {
                 )
               else
                 const Text(
-                  'Step 1 of 3',
+                  'Step 1 of 2',
                   style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
@@ -662,9 +662,9 @@ class _ProgressHeader extends StatelessWidget {
                     letterSpacing: 0.3,
                   ),
                 ),
-              // Three dot indicators — first dot is elongated to show active
+              // Two dot indicators — first dot is elongated to show active
               Row(
-                children: List.generate(3, (i) {
+                children: List.generate(2, (i) {
                   final active = i == 0;
                   return AnimatedContainer(
                     duration: const Duration(milliseconds: 250),

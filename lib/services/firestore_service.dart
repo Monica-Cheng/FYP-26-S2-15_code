@@ -419,23 +419,8 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
-  // Persists onboarding step 3 — device permission preferences — into users/{uid}.
-  // Expected keys in permissions:
-  //   notificationsEnabled, locationEnabled, motionEnabled
-  // ---------------------------------------------------------------------------
-  Future<void> saveOnboardingStep3(
-    String uid,
-    Map<String, dynamic> permissions,
-  ) async {
-    await _db
-        .collection(Collections.users)
-        .doc(uid)
-        .set(permissions, SetOptions(merge: true));
-  }
-
-  // ---------------------------------------------------------------------------
   // Marks onboarding as complete for users/{uid}.
-  // Call after saveOnboardingStep3 succeeds. The router guards check this
+  // Call after saveOnboardingStep2 succeeds. The router guards check this
   // flag to decide whether to show onboarding or the main app shell.
   // ---------------------------------------------------------------------------
   Future<void> markOnboardingComplete(String uid) async {
@@ -1489,6 +1474,23 @@ class FirestoreService {
     final callable =
         FirebaseFunctions.instance.httpsCallable('updateHealthData');
     await callable.call<Map<String, dynamic>>({'updates': updates});
+  }
+
+  // ---------------------------------------------------------------------------
+  // Relays through the deleteUserAccount Cloud Function (functions/index.js)
+  // — deletes this user's own Firestore data (self-scoped to the caller's
+  // uid server-side, never a client-supplied one). Does NOT delete the
+  // Firebase Auth account itself — see AuthService.deleteAccount(), which
+  // must only be called after this succeeds. See the Cloud Function's own
+  // doc comment for the exact deletion scope and its documented known
+  // limitations (businessPartners, pending coach/friend requests on other
+  // users' docs, reverse follow edges, notifications this user sent to
+  // others — none of those are touched by this call).
+  // ---------------------------------------------------------------------------
+  Future<void> deleteUserAccount() async {
+    final callable =
+        FirebaseFunctions.instance.httpsCallable('deleteUserAccount');
+    await callable.call<Map<String, dynamic>>();
   }
 
   /// Saves the user's current injuries and filtering preference. [uid] is

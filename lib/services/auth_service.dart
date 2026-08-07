@@ -162,6 +162,24 @@ class AuthService {
   }
 
   // ---------------------------------------------------------------------------
+  // Deletes the signed-in user's Firebase Auth account. Must only be called
+  // AFTER FirestoreService.deleteUserAccount() has already succeeded — that
+  // Cloud Function deletes this user's Firestore data while request.auth.uid
+  // still resolves to a real account; calling this first would strand that
+  // cleanup half-done with no way to re-authenticate as the now-deleted uid.
+  //
+  // Same requires-recent-login gate as changeEmail() above — caller must
+  // have re-authenticated via reauthenticateWithPassword()/
+  // reauthenticateWithGoogle() immediately before calling this, or it throws
+  // FirebaseAuthException with code 'requires-recent-login'.
+  // ---------------------------------------------------------------------------
+  Future<void> deleteAccount() async {
+    final user = _auth.currentUser;
+    if (user == null) throw StateError('No signed-in user.');
+    await user.delete();
+  }
+
+  // ---------------------------------------------------------------------------
   // Returns a stream that emits the current user whenever auth state changes
   // (sign-in, sign-out, token refresh). Use this to reactively respond to
   // login/logout events — typically consumed by a Riverpod StreamProvider.

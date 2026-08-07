@@ -5283,6 +5283,42 @@ async function countFreeWiseCoachMessagesThisMonth(uid, now) {
 }
 
 /**
+ * Drops any past assistant turn from `messages` that may have been
+ * generated with injected personalization — `wasPersonalized !== false`,
+ * so a message with the field missing entirely (either an old message
+ * saved before this field existed, or the client omitting it) is treated
+ * the same as `true`, the safer default per the "unknown means might have
+ * been personalized" decision — together with its immediately preceding
+ * user turn, since coach_screen.dart's _persistExchange() always writes
+ * user-then-assistant as an adjacent pair, so dropping only the assistant
+ * half would leave a dangling unanswered question in the replayed
+ * history. `systemMessage` is always kept regardless (matched by
+ * reference, already had any new context injection skipped by the
+ * caller in this branch). Only ever changes what THIS request forwards
+ * to OpenAI — never touches Firestore or the client's own display list.
+ * @param {Array<{role: string, content: string, wasPersonalized?: boolean}>} messages
+ * @param {object} systemMessage
+ * @return {Array<{role: string, content: string}>}
+ */
+function filterUnpersonalizedHistory(messages, systemMessage) {
+  const kept = [];
+  for (const m of messages) {
+    if (m === systemMessage) {
+      kept.push(m);
+      continue;
+    }
+    if (m.role === "assistant" && m.wasPersonalized !== false) {
+      if (kept.length > 0 && kept[kept.length - 1].role === "user") {
+        kept.pop();
+      }
+      continue;
+    }
+    kept.push(m);
+  }
+  return kept;
+}
+
+/**
  * callWiseCoachOpenAI — server-side relay to OpenAI's chat completions
  * endpoint, shared by both WiseCoach features that currently call OpenAI:
  * the Coach tab chat (coach_screen.dart's _sendToOpenAI()) and the
@@ -5357,14 +5393,17 @@ async function countFreeWiseCoachMessagesThisMonth(uid, now) {
  * secret must be declared on every onCall() that can reach it, not just
  * the module where the secret is defined.
  *
- * @param {{messages: {role: string, content: string}[], maxTokens?: number, temperature?: number}} request.data
- * @return {Promise<{content: string}>}
+ * @param {{messages: {role: string, content: string, wasPersonalized?: boolean}[], maxTokens?: number, temperature?: number}} request.data
+ * @return {Promise<{content: string, wasPersonalized: boolean}>} wasPersonalized
+ *   is true only when THIS reply had personalization context injected (see
+ *   filterUnpersonalizedHistory() above for how past personalized turns are
+ *   kept out of later requests once consent is off).
  */
 exports.callWiseCoachOpenAI = onCall(
     {secrets: [OPENAI_API_KEY, HEALTH_DATA_ENCRYPTION_KEY]},
     async (request) => {
       const data = request.data || {};
-      const messages = data.messages;
+      let messages = data.messages;
       if (!Array.isArray(messages) || messages.length === 0) {
         throw new HttpsError(
             "invalid-argument",
@@ -5373,6 +5412,7 @@ exports.callWiseCoachOpenAI = onCall(
       }
 
       const uid = request.auth && request.auth.uid;
+      let wasPersonalizedThisTurn = false;
       if (uid) {
         try {
           const now = new Date();
@@ -5406,7 +5446,20 @@ exports.callWiseCoachOpenAI = onCall(
                     `${systemMessage.content}\n\nWhat you know about this ` +
                     "user (reference this naturally where relevant, don't " +
                     `recite it verbatim):\n${context}`;
+                wasPersonalizedThisTurn = true;
               }
+            } else {
+              // Consent currently off — the gate above already stops any
+              // NEW context from being injected this turn, but earlier
+              // turns still sitting in `messages` (client-side chat
+              // history, replayed on every request) may have been
+              // generated while consent WAS on and can still contain
+              // personal data the assistant wrote into its own reply.
+              // Strip those out here rather than trusting the client to
+              // have done so, for the same reason the consent gate itself
+              // is server-side: a client-side-only filter could be
+              // bypassed by calling this function directly.
+              messages = filterUnpersonalizedHistory(messages, systemMessage);
             }
           } else {
             // Post-session summary — no system message, no consent gate
@@ -5447,6 +5500,15 @@ exports.callWiseCoachOpenAI = onCall(
       const temperature =
         typeof data.temperature === "number" ? data.temperature : 0.7;
 
+      // OpenAI only ever expects {role, content} — strips the
+      // wasPersonalized metadata (used above only to decide what to
+      // forward, never meaningful to the model itself) off every message
+      // regardless of which branch ran.
+      const outgoingMessages = messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+
       let response;
       try {
         response = await fetch(
@@ -5459,7 +5521,7 @@ exports.callWiseCoachOpenAI = onCall(
               },
               body: JSON.stringify({
                 model: "gpt-4o-mini",
-                messages,
+                messages: outgoingMessages,
                 max_tokens: maxTokens,
                 temperature,
               }),
@@ -5493,7 +5555,7 @@ exports.callWiseCoachOpenAI = onCall(
         throw new HttpsError("internal", "Unexpected OpenAI response shape.");
       }
 
-      return {content};
+      return {content, wasPersonalized: wasPersonalizedThisTurn};
     },
 );
 
@@ -5724,3 +5786,116 @@ exports.updateHealthData = onCall(
       return {success: true};
     },
 );
+
+// ---------------------------------------------------------------------------
+// Deletes every doc under a collection reference, chunked at Firestore's
+// 500-op batch-write limit — same chunking convention already used by
+// sendAdminBroadcast's fan-out writes above.
+// @param {FirebaseFirestore.DocumentReference[]} docRefs
+// @return {Promise<void>}
+// ---------------------------------------------------------------------------
+async function deleteDocsInChunks(docRefs) {
+  for (let i = 0; i < docRefs.length; i += 500) {
+    const chunk = docRefs.slice(i, i + 500);
+    const batch = db.batch();
+    for (const ref of chunk) {
+      batch.delete(ref);
+    }
+    await batch.commit();
+  }
+}
+
+// @param {FirebaseFirestore.CollectionReference} collectionRef
+// @return {Promise<void>}
+async function deleteCollectionInChunks(collectionRef) {
+  const snap = await collectionRef.get();
+  await deleteDocsInChunks(snap.docs.map((d) => d.ref));
+}
+
+/**
+ * deleteUserAccount — deletes the authenticated caller's own WiseWorkout
+ * data across Firestore. Runs under the Admin SDK (bypasses Firestore
+ * rules entirely, same as checkChallengeProgressOnSessionCreate above) —
+ * that's what lets this reach users/{uid}/notifications, which has no
+ * client-facing delete rule at all (see firestore.rules).
+ *
+ * The client calls this FIRST, then deletes the Firebase Auth account
+ * itself immediately after (see auth_service.dart's deleteAccount()) —
+ * Auth deletion is intentionally NOT done here, so it stays a client-
+ * initiated action requiring the client's own fresh re-authentication,
+ * exactly like changeEmail()'s existing requires-recent-login gate.
+ * Firestore cleanup must finish before Auth deletion, not after —
+ * otherwise request.auth.uid stops resolving to a real account mid-flow.
+ *
+ * Deletes, in order:
+ *   1. Every doc in each of this user's own users/{uid} subcollections —
+ *      sessions, planProgress, inProgressSessions, missedSessions,
+ *      xpEvents, earnedBadges, weightLogs, customRoutines, nutritionLogs,
+ *      dailyActivityLog, wiseCoachMessages, friends, friendRequests,
+ *      sentFriendRequests, notifications. All owned by this uid; no
+ *      cross-user concerns for any of these.
+ *   2. users/{uid} itself.
+ *   3. publicProfiles/{uid} — the leaderboard mirror.
+ *   4. plans/{planId} docs this user created themselves (createdBy == uid
+ *      && isCustom == true) — never touches admin-curated plans, which
+ *      have no createdBy field at all.
+ *   5. follows/{uid}_{followingUid} — this user's own follow edges, as
+ *      the follower. Reverse edges are a known limitation, see below.
+ *
+ * KNOWN LIMITATIONS — explicitly out of scope for this pass, not
+ * oversights. Each of these lives on a DIFFERENT user's own data, so
+ * cleaning them up here would mean writing into other users' documents
+ * from a deletion request they didn't initiate:
+ *   - businessPartners/{uid} is never deleted — not attempted.
+ *   - Pending coachRequests/coachClients where this user is the CLIENT
+ *     (not the coach) are left in place — only the coach side manages
+ *     those relationships today.
+ *   - friendRequests this user SENT that the recipient never
+ *     accepted/declined (living at
+ *     users/{recipientUid}/friendRequests/{uid}) are left in place,
+ *     along with their matching sentFriendRequests markers.
+ *   - notifications this user generated in OTHER users' inboxes (e.g. a
+ *     friend_request notification with fromUid == uid) are left in
+ *     place.
+ *   - Reverse follows/{otherUid}_{uid} edges (other users following this
+ *     one) are left in place.
+ * All of the above reference a uid that will no longer resolve to a real
+ * user once Auth deletion completes — cosmetic residue, not a security
+ * exposure. Revisit if it becomes a real problem.
+ *
+ * @return {Promise<{success: boolean}>}
+ */
+exports.deleteUserAccount = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "Sign-in required.");
+  }
+  const uid = request.auth.uid;
+  const userRef = db.collection("users").doc(uid);
+
+  const ownedSubcollections = [
+    "sessions", "planProgress", "inProgressSessions", "missedSessions",
+    "xpEvents", "earnedBadges", "weightLogs", "customRoutines",
+    "nutritionLogs", "dailyActivityLog", "wiseCoachMessages", "friends",
+    "friendRequests", "sentFriendRequests", "notifications",
+  ];
+  for (const sub of ownedSubcollections) {
+    await deleteCollectionInChunks(userRef.collection(sub));
+  }
+
+  await userRef.delete();
+
+  await db.collection("publicProfiles").doc(uid).delete();
+
+  const customPlansSnap = await db.collection("plans")
+      .where("createdBy", "==", uid)
+      .where("isCustom", "==", true)
+      .get();
+  await deleteDocsInChunks(customPlansSnap.docs.map((d) => d.ref));
+
+  const followsSnap = await db.collection("follows")
+      .where("followerUid", "==", uid)
+      .get();
+  await deleteDocsInChunks(followsSnap.docs.map((d) => d.ref));
+
+  return {success: true};
+});

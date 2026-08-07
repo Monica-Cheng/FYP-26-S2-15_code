@@ -67,7 +67,7 @@ class _HomeScreenState extends State<HomeScreen> {
           onGoToClubFriends: _goToClubFriends,
         ),
         const PlansScreen(),
-        const CoachScreen(),
+        CoachScreen(isVisible: _selectedIndex == 2),
         ClubScreen(initialSubtab: _clubInitialSubtab),
         const ProgressScreen(),
         const CoachDashboardScreen(embedded: true),
