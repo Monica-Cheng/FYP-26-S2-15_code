@@ -4078,15 +4078,29 @@ exports.adminApproveBusinessPartner = onCall(async (request) => {
 
   const partner = partnerSnapshot.data() || {};
 
+  const userRef =
+    db.collection("users").doc(partnerUid);
+
   if (partner.isApproved === true && partner.isVisible === true) {
+    await userRef.set(
+        {
+          isPremium: true,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        {merge: true},
+    );
+
     return {
       success: true,
       partnerUid,
       alreadyApproved: true,
+      isPremium: true,
     };
   }
 
-  await partnerRef.update({
+  const batch = db.batch();
+
+  batch.update(partnerRef, {
     isApproved: true,
     isVisible: true,
     approvedAt: FieldValue.serverTimestamp(),
@@ -4097,6 +4111,17 @@ exports.adminApproveBusinessPartner = onCall(async (request) => {
     updatedAt: FieldValue.serverTimestamp(),
   });
 
+  batch.set(
+      userRef,
+      {
+        isPremium: true,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      {merge: true},
+  );
+
+  await batch.commit();
+
   console.log(
       `adminApproveBusinessPartner: ${adminUid} approved ${partnerUid}`,
   );
@@ -4106,6 +4131,7 @@ exports.adminApproveBusinessPartner = onCall(async (request) => {
     partnerUid,
     isApproved: true,
     isVisible: true,
+    isPremium: true,
   };
 });
 
@@ -4113,6 +4139,11 @@ exports.adminApproveBusinessPartner = onCall(async (request) => {
  * Revokes an approved coach and returns the application to the existing
  * pending state. Revocation is blocked while client relationships or
  * unresolved coach requests still exist.
+ *
+ * Current prototype entitlement model uses users/{uid}.isPremium as a
+ * single boolean. Revoking BP approval therefore also removes Premium.
+ * If paid Premium subscriptions are added later, entitlement source must
+ * be tracked separately so BP revocation does not remove paid access.
  */
 exports.adminRevokeBusinessPartner = onCall(async (request) => {
   const adminUid = await requireAdmin(request);
@@ -4194,7 +4225,13 @@ if (reason.length > 500) {
     );
   }
 
-    await partnerRef.update({
+   
+  const userRef =
+    db.collection("users").doc(partnerUid);
+
+  const batch = db.batch();
+
+  batch.update(partnerRef, {
     isApproved: false,
     isVisible: false,
     revocationReason: reason,
@@ -4203,17 +4240,29 @@ if (reason.length > 500) {
     updatedAt: FieldValue.serverTimestamp(),
   });
 
-  console.log(
-      `adminRevokeBusinessPartner: ${adminUid} revoked ${partnerUid}`,
+  batch.set(
+      userRef,
+      {
+        isPremium: false,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      {merge: true},
   );
 
-  return {
-    success: true,
-    partnerUid,
-    isApproved: false,
-    isVisible: false,
-    revocationReason: reason,
-  };
+  await batch.commit();
+
+  console.log(
+    `adminRevokeBusinessPartner: ${adminUid} revoked ${partnerUid}`,
+);
+
+return {
+  success: true,
+  partnerUid,
+  isApproved: false,
+  isVisible: false,
+  isPremium: false,
+  revocationReason: reason,
+};
 });
 
 // Holds the OpenAI key as a Cloud Functions secret (v2 API) rather than a
@@ -5339,6 +5388,7 @@ exports.callWiseCoachOpenAI = onCall(
             if (userData.isPremium !== true) {
               const usedCount =
                   await countFreeWiseCoachMessagesThisMonth(uid, now);
+              
               if (usedCount >= FREE_MESSAGE_LIMIT) {
                 throw new HttpsError(
                     "resource-exhausted",

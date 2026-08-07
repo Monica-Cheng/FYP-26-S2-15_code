@@ -24,6 +24,12 @@ import { parseCommaList, buildDesignedBy } from '../utils/planUtils';
 const CANONICAL_LEVELS = ['Beginner', 'Intermediate', 'Advanced'];
 const CANONICAL_TYPES = ['Gym', 'Running'];
 
+const getPlanSource = (plan) => {
+  if (plan.isCoachPlan === true) return 'coach';
+  if (plan.isCustom === true) return 'custom';
+  return 'official';
+};
+
 const emptyAddForm = {
   name: '', level: 'Beginner', type: 'Gym', durationWeeks: '', daysPerWeek: '', equipment: '', description: '',
   goals: '', matchGoals: '', matchSport: 'Gym', matchLevel: 'Beginner', isActive: true, imageUrl: '',
@@ -314,8 +320,9 @@ function Plans() {
       (p.level || '').toLowerCase().includes(q);
     const matchesLevel = levelFilter === 'all' || p.level === levelFilter;
     const matchesType = typeFilter === 'all' || p.type === typeFilter;
-    const matchesSource = sourceFilter === 'all' ||
-      (sourceFilter === 'custom' ? !!p.isCustom : !p.isCustom);
+    const matchesSource =
+      sourceFilter === 'all' ||
+      getPlanSource(p) === sourceFilter;
     const matchesDays = daysFilter === 'all' || p.daysPerWeek === Number(daysFilter);
     const matchesStatus = statusFilter === 'all' ||
       (statusFilter === 'active' ? p.isActive !== false : p.isActive === false);
@@ -632,6 +639,7 @@ function Plans() {
               >
                 <option value="all">Source: All</option>
                 <option value="official">Source: Official</option>
+                <option value="coach">Source: Coach</option>
                 <option value="custom">Source: Custom</option>
               </select>
 
@@ -697,8 +705,20 @@ function Plans() {
                           <Badge tone="brand">{plan.type || plan.category || 'General'}</Badge>
                         </td>
                         <td>
-                          <Badge tone={plan.isCustom ? 'brand' : 'neutral'}>
-                            {plan.isCustom ? 'Custom' : 'Official/System'}
+                          <Badge
+                            tone={
+                              getPlanSource(plan) === 'coach'
+                                ? 'warning'
+                                : getPlanSource(plan) === 'custom'
+                                ? 'brand'
+                                : 'neutral'
+                            }
+                          >
+                            {getPlanSource(plan) === 'coach'
+                              ? 'Coach'
+                              : getPlanSource(plan) === 'custom'
+                              ? 'Custom'
+                              : 'Official/System'}
                           </Badge>
                         </td>
                         <td style={{ color: '#6b7280' }}>{getCreatorLabel(plan)}</td>

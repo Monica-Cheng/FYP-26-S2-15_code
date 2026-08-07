@@ -33,13 +33,7 @@ const GOAL_OPTIONS = [
   { value: 'Build Strength', label: 'Build Strength' },
 ];
 
-// Real enum values written by onboarding_step1_screen.dart's preferredUnits field.
-const UNITS_OPTIONS = [
-  { value: '', label: 'Not set' },
-  { value: 'metric', label: 'Metric' },
-  { value: 'imperial', label: 'Imperial' },
-];
-const UNITS_LABELS = { metric: 'Metric', imperial: 'Imperial' };
+
 
 const DEFAULT_BREAK_DAYS = 3;
 // Mirrors the largest preset chip in plan_schedule_screen.dart's break-day
@@ -274,7 +268,6 @@ function UserDetailPanel({ user, onClose, onSave }) {
       planMatchGoal: user.planMatchGoal || '',
       hometown: user.hometown || '',
       bio: user.bio || '',
-      preferredUnits: user.preferredUnits || '',
       notificationsEnabled: user.notificationsEnabled !== false,
       workoutReminders: user.workoutReminders !== false,
       streakAlerts: user.streakAlerts !== false,
@@ -322,7 +315,7 @@ function UserDetailPanel({ user, onClose, onSave }) {
     const trimmedBio = form.bio.trim();
     if (trimmedBio !== (user.bio || '')) changes.bio = trimmedBio;
 
-    if (form.preferredUnits !== (user.preferredUnits || '')) changes.preferredUnits = form.preferredUnits;
+    
 
     const currentNotif = user.notificationsEnabled !== false;
     if (form.notificationsEnabled !== currentNotif) changes.notificationsEnabled = form.notificationsEnabled;
@@ -559,23 +552,7 @@ function UserDetailPanel({ user, onClose, onSave }) {
           )}
         </div>
 
-        <div className="wwa-detail-row">
-          <span className="wwa-detail-label">Preferred Units</span>
-          {isEditing ? (
-            <select
-              className="wwa-select"
-              style={{ maxWidth: 180 }}
-              value={form.preferredUnits}
-              onChange={e => setForm(prev => ({ ...prev, preferredUnits: e.target.value }))}
-            >
-              {UNITS_OPTIONS.map(opt => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-          ) : (
-            <span className="wwa-detail-value">{UNITS_LABELS[user.preferredUnits] || '—'}</span>
-          )}
-        </div>
+        
 
         <DetailRow label="Total XP" value={user.totalXp !== undefined ? `${user.totalXp} XP` : undefined} />
         <DetailRow label="Weekly XP" value={user.weeklyXp !== undefined ? `${user.weeklyXp} XP` : undefined} />
