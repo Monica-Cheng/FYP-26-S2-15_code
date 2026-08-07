@@ -1,7 +1,7 @@
 // lib/screens/onboarding/onboarding_step2_screen.dart
-// Onboarding Step 2 — Goals Survey.
+// Onboarding Step 2 — Goals Survey (final onboarding step).
 // 6 questions shown one at a time. Saves via FirestoreService.saveOnboardingStep2()
-// then navigates to Routes.onboardingStep3.
+// then marks onboarding complete and navigates to Routes.home.
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -109,7 +109,7 @@ class _OnboardingStep2ScreenState extends State<OnboardingStep2Screen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Persists survey answers then navigates to step 3.
+  // Persists survey answers, marks onboarding complete, then navigates home.
   // ---------------------------------------------------------------------------
   Future<void> _save() async {
     final uid = _authService.getCurrentUser()?.uid;
@@ -126,7 +126,8 @@ class _OnboardingStep2ScreenState extends State<OnboardingStep2Screen> {
         if (_sessionLength != null) 'sessionLength': _sessionLength,
       };
       await _firestoreService.saveOnboardingStep2(uid, data);
-      if (mounted) context.go(Routes.onboardingStep3);
+      await _firestoreService.markOnboardingComplete(uid);
+      if (mounted) context.go(Routes.home);
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -204,7 +205,7 @@ class _OnboardingStep2ScreenState extends State<OnboardingStep2Screen> {
               ),
               const SizedBox(width: 6),
               Text(
-                'Step 2 of 3 · Q${_questionIndex + 1}/$_kTotal',
+                'Step 2 of 2 · Q${_questionIndex + 1}/$_kTotal',
                 style: const TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w700,
@@ -213,9 +214,9 @@ class _OnboardingStep2ScreenState extends State<OnboardingStep2Screen> {
                 ),
               ),
               const Spacer(),
-              // Three dot indicators — second dot active
+              // Two dot indicators — second dot active
               Row(
-                children: List.generate(3, (i) {
+                children: List.generate(2, (i) {
                   final active = i == 1;
                   return Container(
                     margin: const EdgeInsets.only(left: 6),

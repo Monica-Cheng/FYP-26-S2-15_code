@@ -45,7 +45,15 @@ const String _kMissedWorkoutsReferralMessage =
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
 class CoachScreen extends StatefulWidget {
-  const CoachScreen({super.key});
+  // Defaults to true so this compiles/behaves exactly as before for any
+  // call site that doesn't pass it — the actual live signal comes from
+  // MainShell (home_screen.dart) passing `_selectedIndex == <coach tab
+  // index>`, which this screen can't observe on its own since it lives
+  // inside an IndexedStack (see didUpdateWidget() below for why that
+  // matters).
+  const CoachScreen({super.key, this.isVisible = true});
+
+  final bool isVisible;
 
   @override
   State<CoachScreen> createState() => _CoachScreenState();
@@ -53,7 +61,12 @@ class CoachScreen extends StatefulWidget {
 
 class _CoachScreenState extends State<CoachScreen> {
   final List<Map<String, dynamic>> _messages = [];
-  final List<Map<String, String>> _chatHistory = [];
+  // dynamic (not String) so assistant entries can carry a bool
+  // wasPersonalized flag alongside role/content — see _sendToOpenAI() and
+  // _loadWiseCoachState() for where it's set/read, and
+  // filterUnpersonalizedHistory() in functions/index.js for how the
+  // server uses it.
+  final List<Map<String, dynamic>> _chatHistory = [];
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _isTyping = false;
@@ -102,6 +115,50 @@ class _CoachScreenState extends State<CoachScreen> {
     _checkCoachStatus();
     _loadWiseCoachState();
     _checkReferralTriggers();
+  }
+
+  // CoachScreen lives inside MainShell's IndexedStack (home_screen.dart),
+  // which keeps every tab's State alive and never re-runs initState() on
+  // a tab switch — so _loadWiseCoachState()'s one-time load of
+  // aiPersonalizationConsent (see that method's own doc comment) goes
+  // stale the moment the user toggles it in Settings and switches back
+  // here without a full app restart. MainShell passes `isVisible:
+  // _selectedIndex == <coach tab index>`, which changes on every tab
+  // switch even though this same State instance persists — didUpdateWidget
+  // is what a StatefulWidget uses to notice a new widget config at the
+  // same tree position, so the false→true edge here is the earliest
+  // reliable "this tab just became visible again" signal available
+  // without restructuring the IndexedStack itself.
+  @override
+  void didUpdateWidget(covariant CoachScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isVisible && !oldWidget.isVisible) {
+      _refreshConsentBanner();
+    }
+  }
+
+  // Narrow re-fetch of just aiPersonalizationConsent for
+  // _buildContextBanner() — deliberately NOT a full
+  // _loadWiseCoachState() re-run, which also re-queries wiseCoachMessages
+  // for both history and the monthly quota count and would be wasteful
+  // to repeat on every tab visit. Uses the same getUserProfile() read
+  // _loadWiseCoachState() already uses for this exact field — no new
+  // Firestore read shape introduced. Fully independent of the
+  // wasPersonalized/wiseCoachChatClearedAt logic elsewhere in this file:
+  // this never touches wiseCoachMessages at all.
+  Future<void> _refreshConsentBanner() async {
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      final profile = await _firestore.getUserProfile(uid);
+      if (!mounted) return;
+      final consent = profile?['aiPersonalizationConsent'] as bool? ?? false;
+      if (consent != _aiPersonalizationConsent) {
+        setState(() => _aiPersonalizationConsent = consent);
+      }
+    } catch (e) {
+      debugPrint('CoachScreen: _refreshConsentBanner failed — $e');
+    }
   }
 
   // Approved-coach accounts default to the "My Clients" side of the
@@ -367,19 +424,36 @@ class _CoachScreenState extends State<CoachScreen> {
     _startNewChat();
   }
 
-  // Local-only reset of what's currently displayed/loaded in memory.
-  // Deliberately does NOT touch users/{uid}/wiseCoachMessages in Firestore
-  // at all — old messages stay exactly as they are, this only clears this
-  // screen's in-memory _messages/_chatHistory and shows the greeting
-  // again, same as a brand-new conversation. Deliberately does NOT touch
-  // _remainingMessages either — the free-tier monthly quota is independent
-  // of how many separate conversations the user has started.
-  void _startNewChat() {
+  // Clears what's currently displayed/loaded in memory immediately, then
+  // best-effort writes wiseCoachChatClearedAt onto users/{uid} so the
+  // reset also survives a restart/reload — _loadWiseCoachState() below
+  // only ever loads wiseCoachMessages docs timestamped after this value.
+  // Still deliberately does NOT touch users/{uid}/wiseCoachMessages
+  // itself — old messages stay exactly as they are in Firestore, this is
+  // a read-time boundary, not a delete. Deliberately does NOT touch
+  // _remainingMessages either — the free-tier monthly quota (see
+  // _loadWiseCoachState()'s separate monthSnap query) is a real usage
+  // count independent of how many separate conversations the user has
+  // started, and must not be resettable by tapping this button.
+  Future<void> _startNewChat() async {
     setState(() {
       _messages.clear();
       _chatHistory.clear();
     });
     _addCoachMessage(_kGreeting);
+
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      await _firestore.updateUserProfile(
+          uid, {'wiseCoachChatClearedAt': FieldValue.serverTimestamp()});
+    } catch (e) {
+      // Best-effort, same reasoning as _persistExchange()'s own catch — a
+      // failed write here shouldn't surface as a chat error to the user,
+      // who already sees the reset locally. Worst case this boundary
+      // doesn't survive a restart, same as before this fix existed.
+      debugPrint('CoachScreen: _startNewChat cleared-at write failed — $e');
+    }
   }
 
   // Loads everything needed before the chat is fully usable: isPremium/
@@ -414,7 +488,20 @@ class _CoachScreenState extends State<CoachScreen> {
           .doc(uid)
           .collection(Collections.wiseCoachMessages);
 
-      final historySnap = await messagesRef
+      // Scoped to messages after the last "New Chat" tap, if there's
+      // ever been one (wiseCoachChatClearedAt absent — the common case,
+      // nobody's tapped it yet — means no filter, full history, exactly
+      // as before this field existed). Single-field range + orderBy on
+      // that same field, so this needs no composite index, same as the
+      // monthSnap query below. Deliberately independent of that query —
+      // see _startNewChat()'s own comment on why the quota must stay
+      // unaffected by this boundary.
+      final clearedAt = profile?['wiseCoachChatClearedAt'];
+      Query<Map<String, dynamic>> historyQuery = messagesRef;
+      if (clearedAt is Timestamp) {
+        historyQuery = historyQuery.where('timestamp', isGreaterThan: clearedAt);
+      }
+      final historySnap = await historyQuery
           .orderBy('timestamp', descending: true)
           .limit(50)
           .get();
@@ -453,6 +540,14 @@ class _CoachScreenState extends State<CoachScreen> {
             _chatHistory.add({
               'role': role == 'user' ? 'user' : 'assistant',
               'content': content,
+              // Deliberately omitted (not set to false) whenever the
+              // stored doc predates this field — the server treats a
+              // missing wasPersonalized the same as true (the safer
+              // "might have been personalized" default) when filtering
+              // history for a consent-off request. See
+              // filterUnpersonalizedHistory() in functions/index.js.
+              if (role != 'user' && data['wasPersonalized'] is bool)
+                'wasPersonalized': data['wasPersonalized'] as bool,
             });
           }
         });
@@ -484,6 +579,7 @@ class _CoachScreenState extends State<CoachScreen> {
     required String userText,
     required bool isQuickReply,
     required String assistantText,
+    required bool wasPersonalized,
   }) async {
     final uid = _auth.getCurrentUser()?.uid;
     if (uid == null) return;
@@ -501,6 +597,12 @@ class _CoachScreenState extends State<CoachScreen> {
       await messagesRef.add({
         'role': 'assistant',
         'content': assistantText,
+        // Set from the server's own account of whether THIS reply had
+        // personalization context injected (see _sendToOpenAI()) — never
+        // guessed client-side. Read back by filterUnpersonalizedHistory()
+        // server-side on future requests to decide whether this turn is
+        // safe to replay once consent is off.
+        'wasPersonalized': wasPersonalized,
         'timestamp': FieldValue.serverTimestamp(),
       });
     } catch (e) {
@@ -529,7 +631,17 @@ class _CoachScreenState extends State<CoachScreen> {
   // Cloud Functions secret, never in the app bundle. Same system prompt,
   // same conversation history, same model/max_tokens/temperature as
   // before; only WHERE the OpenAI call happens has changed.
-  Future<String> _sendToOpenAI(List<Map<String, String>> messages) async {
+  //
+  // Returns (reply, wasPersonalized) — the second element is the server's
+  // own account of whether THIS reply had personalization context
+  // injected (functions/index.js sets it only when the consent gate
+  // fired and buildPersonalizationContext() returned something), not a
+  // client-side guess. Callers persist it onto the assistant message so a
+  // later request, if consent is off by then, knows this specific turn
+  // needs to be excluded when replaying history — see
+  // filterUnpersonalizedHistory() server-side.
+  Future<(String, bool)> _sendToOpenAI(
+      List<Map<String, dynamic>> messages) async {
     final callable =
         FirebaseFunctions.instance.httpsCallable('callWiseCoachOpenAI');
     final result = await callable.call<Map<String, dynamic>>({
@@ -548,7 +660,8 @@ class _CoachScreenState extends State<CoachScreen> {
     if (content == null) {
       throw Exception('WiseCoach function returned no content');
     }
-    return content;
+    final wasPersonalized = result.data['wasPersonalized'] as bool? ?? false;
+    return (content, wasPersonalized);
   }
 
   // isQuickReply is true only when this send was triggered by a
@@ -572,13 +685,19 @@ class _CoachScreenState extends State<CoachScreen> {
     _scrollToBottom();
 
     try {
-      final reply = await _sendToOpenAI(List.from(_chatHistory));
-      _chatHistory.add({'role': 'assistant', 'content': reply});
+      final (reply, wasPersonalized) =
+          await _sendToOpenAI(List.from(_chatHistory));
+      _chatHistory.add({
+        'role': 'assistant',
+        'content': reply,
+        'wasPersonalized': wasPersonalized,
+      });
       _addCoachMessage(reply);
       await _persistExchange(
         userText: text,
         isQuickReply: isQuickReply,
         assistantText: reply,
+        wasPersonalized: wasPersonalized,
       );
       if (_referralTrigger != null && !_referralShownThisSession) {
         _referralShownThisSession = true;

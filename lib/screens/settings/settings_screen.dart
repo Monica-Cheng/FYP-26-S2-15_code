@@ -31,11 +31,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _auth = AuthService();
   final _firestore = FirestoreService();
 
-  bool _pushNotif = true;
   bool _workoutReminders = true;
   TimeOfDay _reminderTime = const TimeOfDay(hour: 7, minute: 0);
-  bool _streakAlerts = true;
-  bool _wiseCoachMessages = true;
   bool _aiPersonalizationConsent = false;
   bool _leaderboardVisible = true;
   bool _calorieGoalActive = false;
@@ -66,10 +63,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final healthData = await _firestore.getHealthData(uid);
       if (!mounted) return;
       setState(() {
-        _pushNotif = profile?['notificationsEnabled'] as bool? ?? true;
         _workoutReminders = profile?['workoutReminders'] as bool? ?? true;
-        _streakAlerts = profile?['streakAlerts'] as bool? ?? true;
-        _wiseCoachMessages = profile?['wiseCoachMessages'] as bool? ?? true;
         _aiPersonalizationConsent =
             profile?['aiPersonalizationConsent'] as bool? ?? false;
         _leaderboardVisible = profile?['leaderboardVisible'] as bool? ?? true;
@@ -91,10 +85,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (uid == null) return;
     try {
       await _firestore.updateUserProfile(uid, {
-        'notificationsEnabled': _pushNotif,
         'workoutReminders': _workoutReminders,
-        'streakAlerts': _streakAlerts,
-        'wiseCoachMessages': _wiseCoachMessages,
         'reminderHour': _reminderTime.hour,
         'reminderMinute': _reminderTime.minute,
       });
@@ -291,6 +282,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  // ── Delete Account flow ──────────────────────────────────────────────────
+  // Same single-sheet/plain-setState pattern as _startChangeEmailFlow()
+  // above. Step 0: warning + typed "DELETE" confirmation (local validation
+  // only, no network calls). Step 1: re-auth, then the actual deletion
+  // pipeline — FirestoreService.deleteUserAccount() (Cloud Function) must
+  // complete before AuthService.deleteAccount() (client-side Firebase Auth
+  // deletion), per this feature's own investigation: request.auth.uid stops
+  // resolving to a real account the moment Auth deletion succeeds, so any
+  // server-side cleanup has to happen while it still does. See
+  // _DeleteAccountSheetState's own doc comment for the full error-handling
+  // design, including the "data deleted but Auth account stuck" partial-
+  // failure case.
+  Future<void> _startDeleteAccountFlow() async {
+    if (_auth.getCurrentUser() == null) return;
+
+    final deleted = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: WW.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => _DeleteAccountSheet(
+        authService: _auth,
+        firestoreService: _firestore,
+      ),
+    );
+
+    if (deleted == true && mounted) {
+      await _auth.signOut();
+      if (mounted) context.go(Routes.login);
+    }
+  }
+
   Future<void> _handleLogOut() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -392,23 +417,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       )
                     else
                       _sectionCard([
-                        _row(
-                          icon: Icons.notifications_rounded,
-                          iconBg: WW.gold,
-                          title: 'Push Notifications',
-                          first: true,
-                          chevron: false,
-                          right: _buildToggle(_pushNotif, (v) {
-                            setState(() => _pushNotif = v);
-                            _savePrefs();
-                          }),
-                        ),
                         GestureDetector(
                           onTap: _showReminderTimePicker,
                           child: _row(
                             icon: Icons.fitness_center_rounded,
                             iconBg: WW.primary,
                             title: 'Workout Reminders',
+                            first: true,
                             chevron: false,
                             right: _buildToggle(_workoutReminders, (val) async {
                               if (val) {
@@ -420,26 +435,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               }
                             }),
                           ),
-                        ),
-                        _row(
-                          icon: Icons.local_fire_department_rounded,
-                          iconBg: WW.teal,
-                          title: 'Streak Alerts',
-                          chevron: false,
-                          right: _buildToggle(_streakAlerts, (v) {
-                            setState(() => _streakAlerts = v);
-                            _savePrefs();
-                          }),
-                        ),
-                        _row(
-                          icon: Icons.auto_awesome_rounded,
-                          iconBg: WW.lavender,
-                          title: 'WiseCoach Messages',
-                          chevron: false,
-                          right: _buildToggle(_wiseCoachMessages, (v) {
-                            setState(() => _wiseCoachMessages = v);
-                            _savePrefs();
-                          }),
                         ),
                         _row(
                           icon: Icons.psychology_rounded,
@@ -463,13 +458,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         right: _buildToggle(
                             _leaderboardVisible, _onLeaderboardVisibilityToggle),
                       ),
-                      _row(
-                        icon: Icons.block_rounded,
-                        iconBg: WW.lavender,
-                        title: 'Blocked Users',
-                        sub: '0 blocked',
-                        onTap: () => _snack('Blocked users coming soon'),
-                      ),
                     ]),
                     _sectionHeader('Support'),
                     _sectionCard([
@@ -486,21 +474,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         iconBg: _kGreen,
                         title: 'Help & FAQ',
                         sub: 'FAQs, contact, report a bug',
-                        onTap: () => _snack('Help coming soon'),
+                        onTap: () => context.push(Routes.helpFaq),
                       ),
                       _row(
                         icon: Icons.shield_rounded,
                         iconBg: _kGreen,
                         title: 'Privacy Policy',
-                        onTap: () => _snack('Privacy policy coming soon'),
-                      ),
-                      _row(
-                        icon: Icons.info_outline_rounded,
-                        iconBg: WW.elevated,
-                        iconColor: WW.textSec,
-                        title: 'App Version',
-                        right: _valueText('v1.0.0'),
-                        chevron: false,
+                        onTap: () => context.push(Routes.privacyPolicy),
                       ),
                     ]),
                     _sectionHeader('Danger Zone', danger: true),
@@ -705,7 +685,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _deleteRow() {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => _snack('Delete account coming soon'),
+      onTap: _startDeleteAccountFlow,
       child: Container(
         constraints: const BoxConstraints(minHeight: 52),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -1093,6 +1073,491 @@ class _ChangeEmailSheetState extends State<_ChangeEmailSheet> {
           backgroundColor: WW.primary,
           foregroundColor: Colors.white,
           disabledBackgroundColor: WW.primary.withValues(alpha: 0.6),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          elevation: 0,
+        ),
+        child: _isSubmitting
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2.5, color: Colors.white),
+              )
+            : Text(label,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      ),
+    );
+  }
+}
+
+// ── Delete Account sheet ─────────────────────────────────────────────────
+// Single-route, 2-step content for _startDeleteAccountFlow() above.
+//   Step 0 — warning list of exactly what gets deleted, plus a typed
+//   "DELETE" confirmation field (local validation only, no network calls
+//   yet) gating the Continue button.
+//   Step 1 — re-authenticate (same password/Google branch as
+//   _ChangeEmailSheet's Step 0), then run the actual deletion pipeline:
+//   FirestoreService.deleteUserAccount() (Cloud Function) first, then
+//   AuthService.deleteAccount() (client-side Firebase Auth deletion) —
+//   never the reverse, since request.auth.uid must still resolve to a
+//   real account while the Cloud Function's Admin-SDK cleanup runs.
+//
+// _firestoreCleanupDone tracks whether the Cloud Function has already
+// succeeded, so if the LATER Auth-deletion step fails (e.g. a stale
+// requires-recent-login on user.delete() itself) and the user retries,
+// _performDeletion() skips straight to the Auth deletion instead of
+// re-running Firestore cleanup a second time. _isCriticalError marks that
+// specific "data is already gone, only the Auth account is stuck" state
+// distinctly in the UI, since it's a materially worse partial failure than
+// a plain re-auth mistake and the user needs to know their data is
+// genuinely gone regardless of what they do next.
+//
+// Pops itself (Navigator.pop(context, true)) only once BOTH steps have
+// actually succeeded; swipe-dismiss/tap-outside/Cancel at any point before
+// that pops with false/null, which _startDeleteAccountFlow() treats as
+// "not deleted" — no sign-out, no navigation.
+class _DeleteAccountSheet extends StatefulWidget {
+  final AuthService authService;
+  final FirestoreService firestoreService;
+  const _DeleteAccountSheet({
+    required this.authService,
+    required this.firestoreService,
+  });
+
+  @override
+  State<_DeleteAccountSheet> createState() => _DeleteAccountSheetState();
+}
+
+class _DeleteAccountSheetState extends State<_DeleteAccountSheet> {
+  late final bool _isGoogleUser;
+  int _step = 0;
+  bool _isSubmitting = false;
+  bool _isCriticalError = false;
+  bool _firestoreCleanupDone = false;
+  String? _errorText;
+
+  final _confirmController = TextEditingController();
+  final _passwordController = TextEditingController();
+
+  static const _kConfirmWord = 'DELETE';
+
+  bool get _isConfirmTextValid =>
+      _confirmController.text.trim().toUpperCase() == _kConfirmWord;
+
+  @override
+  void initState() {
+    super.initState();
+    _isGoogleUser = widget.authService.isGoogleSignInUser();
+    _confirmController.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _confirmController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submitPassword() async {
+    final password = _passwordController.text;
+    if (password.isEmpty) {
+      setState(() => _errorText = 'Please enter your password.');
+      return;
+    }
+    setState(() {
+      _isSubmitting = true;
+      _errorText = null;
+    });
+    try {
+      await widget.authService.reauthenticateWithPassword(password);
+      if (!mounted) return;
+      await _performDeletion();
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorText = _friendlyAuthError(e.code);
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorText = 'Something went wrong. Please try again.';
+      });
+    }
+  }
+
+  Future<void> _submitGoogle() async {
+    setState(() {
+      _isSubmitting = true;
+      _errorText = null;
+    });
+    try {
+      final credential = await widget.authService.reauthenticateWithGoogle();
+      if (!mounted) return;
+      if (credential == null) {
+        // User cancelled the Google picker — same silent-cancel convention
+        // as _ChangeEmailSheet's own _submitGoogle().
+        setState(() => _isSubmitting = false);
+        return;
+      }
+      await _performDeletion();
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorText = _friendlyAuthError(e.code);
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorText = 'Google re-authentication failed. Please try again.';
+      });
+    }
+  }
+
+  // Runs the two-step deletion pipeline in the required order. Re-entrant:
+  // if Firestore cleanup already succeeded on a prior attempt, this skips
+  // straight to the Auth deletion retry rather than calling the Cloud
+  // Function a second time.
+  Future<void> _performDeletion() async {
+    if (!_firestoreCleanupDone) {
+      try {
+        await widget.firestoreService.deleteUserAccount();
+        _firestoreCleanupDone = true;
+      } catch (_) {
+        if (!mounted) return;
+        setState(() {
+          _isSubmitting = false;
+          _errorText = "We couldn't delete your data. Please try again, "
+              'or contact WiseWorkout@gmail.com if this keeps happening.';
+        });
+        return;
+      }
+    }
+
+    try {
+      await widget.authService.deleteAccount();
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _isCriticalError = true;
+        _errorText = e.code == 'requires-recent-login'
+            ? 'Your data has been deleted. Please confirm your identity '
+                'once more to finish closing your account.'
+            : 'Your data has been deleted, but we couldn\'t fully close '
+                'your account sign-in. Please contact '
+                'WiseWorkout@gmail.com so we can finish this for you.';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _isCriticalError = true;
+        _errorText = 'Your data has been deleted, but we couldn\'t fully '
+            'close your account sign-in. Please contact '
+            'WiseWorkout@gmail.com so we can finish this for you.';
+      });
+    }
+  }
+
+  // Same mapping style/precedent as _ChangeEmailSheetState's own
+  // _friendlyAuthError() — shared error codes, delete-account-specific copy.
+  String _friendlyAuthError(String code) {
+    switch (code) {
+      case 'wrong-password':
+      case 'invalid-credential':
+        return 'Incorrect password. Please try again.';
+      case 'requires-recent-login':
+        return 'This action requires you to sign in again. Please try again.';
+      case 'too-many-requests':
+        return 'Too many attempts. Please wait a moment and try again.';
+      case 'network-request-failed':
+        return 'Network error. Check your connection and try again.';
+      default:
+        return 'Something went wrong. Please try again.';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        24,
+        20,
+        24,
+        40 + MediaQuery.of(context).viewInsets.bottom,
+      ),
+      // Wraps the whole sheet body (handle + step content) in a scroll view
+      // — same pattern as cardio_session_screen.dart/gym_session_screen.dart's
+      // _buildFinishFormSheet — so longer content (the warning bullet list)
+      // scrolls instead of overflowing on smaller screens, and a focused
+      // TextField near the bottom auto-scrolls into view above the keyboard
+      // instead of being hidden behind it.
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: WW.border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            ..._step == 0 ? _buildStep0() : _buildStep1(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _bulletRow(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: Icon(Icons.circle, size: 4, color: WW.textSec),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(fontSize: 13, color: WW.text, height: 1.4),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildStep0() {
+    return [
+      const Text(
+        'Delete Your Account',
+        style: TextStyle(
+            fontSize: 20, fontWeight: FontWeight.w800, color: WW.primaryDark),
+      ),
+      const SizedBox(height: 6),
+      const Text(
+        'This will permanently delete:',
+        style: TextStyle(fontSize: 13, color: WW.textSec, height: 1.5),
+      ),
+      const SizedBox(height: 12),
+      Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: WW.elevated,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _bulletRow('Your workout and cardio history'),
+            _bulletRow('Your plans, custom routines, and progress'),
+            _bulletRow('Your streaks, XP, and badges'),
+            _bulletRow('Your friends list'),
+            _bulletRow('Your AI coach chat history'),
+            _bulletRow('Your weight and nutrition logs'),
+            _bulletRow('Your public profile'),
+          ],
+        ),
+      ),
+      const SizedBox(height: 14),
+      const Text(
+        'This cannot be undone.',
+        style: TextStyle(
+            fontSize: 13, fontWeight: FontWeight.w700, color: _kRed),
+      ),
+      const SizedBox(height: 20),
+      const Text(
+        'Type DELETE to confirm.',
+        style: TextStyle(
+            fontSize: 13, fontWeight: FontWeight.w600, color: WW.text),
+      ),
+      const SizedBox(height: 8),
+      TextField(
+        controller: _confirmController,
+        autofocus: true,
+        textCapitalization: TextCapitalization.characters,
+        style: const TextStyle(fontSize: 15, color: WW.text),
+        decoration: InputDecoration(
+          hintText: _kConfirmWord,
+          hintStyle: const TextStyle(fontSize: 15, color: WW.textSec),
+          filled: true,
+          fillColor: WW.elevated,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+      const SizedBox(height: 20),
+      SizedBox(
+        width: double.infinity,
+        height: 52,
+        child: ElevatedButton(
+          onPressed:
+              _isConfirmTextValid ? () => setState(() => _step = 1) : null,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _kRed,
+            foregroundColor: Colors.white,
+            disabledBackgroundColor: _kRed.withValues(alpha: 0.35),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            elevation: 0,
+          ),
+          child: const Text('Continue',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        ),
+      ),
+      const SizedBox(height: 12),
+      Center(
+        child: GestureDetector(
+          onTap: () => Navigator.pop(context, false),
+          child: const Text(
+            'Cancel',
+            style: TextStyle(
+                fontSize: 14, fontWeight: FontWeight.w600, color: WW.textSec),
+          ),
+        ),
+      ),
+    ];
+  }
+
+  List<Widget> _buildStep1() {
+    final errorBanner = _errorText == null
+        ? const SizedBox.shrink()
+        : Container(
+            margin: const EdgeInsets.only(top: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: _isCriticalError
+                  ? const Color(0xFFFEF2F2)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(10),
+              border: _isCriticalError
+                  ? Border.all(color: _kRed.withValues(alpha: 0.3))
+                  : null,
+            ),
+            child: Text(
+              _errorText!,
+              style: TextStyle(
+                fontSize: 12,
+                color: _kRed,
+                fontWeight: _isCriticalError ? FontWeight.w600 : FontWeight.w400,
+                height: 1.4,
+              ),
+            ),
+          );
+
+    if (_isGoogleUser) {
+      return [
+        const Text(
+          'Confirm Your Identity',
+          style: TextStyle(
+              fontSize: 20, fontWeight: FontWeight.w800, color: WW.primaryDark),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'For your security, please sign in with Google again before we '
+          'delete your account.',
+          style: TextStyle(fontSize: 13, color: WW.textSec, height: 1.5),
+        ),
+        errorBanner,
+        const SizedBox(height: 20),
+        _primaryButton(
+          label: 'Continue with Google',
+          onPressed: _isSubmitting ? null : _submitGoogle,
+        ),
+        const SizedBox(height: 12),
+        if (!_isSubmitting)
+          Center(
+            child: GestureDetector(
+              onTap: () => Navigator.pop(context, false),
+              child: const Text(
+                'Cancel',
+                style: TextStyle(
+                    fontSize: 14, fontWeight: FontWeight.w600, color: WW.textSec),
+              ),
+            ),
+          ),
+      ];
+    }
+    return [
+      const Text(
+        'Confirm Your Password',
+        style: TextStyle(
+            fontSize: 20, fontWeight: FontWeight.w800, color: WW.primaryDark),
+      ),
+      const SizedBox(height: 6),
+      const Text(
+        'For your security, please re-enter your password before we '
+        'delete your account.',
+        style: TextStyle(fontSize: 13, color: WW.textSec, height: 1.5),
+      ),
+      const SizedBox(height: 20),
+      TextField(
+        controller: _passwordController,
+        obscureText: true,
+        autofocus: true,
+        style: const TextStyle(fontSize: 15, color: WW.text),
+        decoration: InputDecoration(
+          hintText: 'Password',
+          hintStyle: const TextStyle(fontSize: 15, color: WW.textSec),
+          filled: true,
+          fillColor: WW.elevated,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+      errorBanner,
+      const SizedBox(height: 20),
+      _primaryButton(
+        label: 'Delete My Account',
+        onPressed: _isSubmitting ? null : _submitPassword,
+      ),
+      const SizedBox(height: 12),
+      if (!_isSubmitting)
+        Center(
+          child: GestureDetector(
+            onTap: () => Navigator.pop(context, false),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(
+                  fontSize: 14, fontWeight: FontWeight.w600, color: WW.textSec),
+            ),
+          ),
+        ),
+    ];
+  }
+
+  Widget _primaryButton({required String label, required VoidCallback? onPressed}) {
+    return SizedBox(
+      width: double.infinity,
+      height: 52,
+      child: ElevatedButton(
+        onPressed: onPressed,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: _kRed,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: _kRed.withValues(alpha: 0.6),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
           elevation: 0,
         ),

@@ -16,7 +16,6 @@ import '../screens/business/coach_register_screen.dart';
 import '../screens/home/home_screen.dart';
 import '../screens/onboarding/onboarding_step1_screen.dart';
 import '../screens/onboarding/onboarding_step2_screen.dart';
-import '../screens/onboarding/onboarding_step3_screen.dart';
 import '../screens/plans/gym_session_screen.dart';
 import '../screens/onboarding/onboarding_walkthrough_screen.dart';
 import '../screens/plans/post_session_summary_screen.dart';
@@ -26,7 +25,9 @@ import '../screens/profile/edit_profile_screen.dart';
 import '../screens/profile/profile_screen.dart';
 import '../screens/profile/user_profile_screen.dart';
 import '../screens/settings/health_profile_screen.dart';
+import '../screens/settings/help_faq_screen.dart';
 import '../screens/settings/manage_app_screen.dart';
+import '../screens/settings/privacy_policy_screen.dart';
 import '../screens/settings/settings_screen.dart';
 import '../screens/club/friends_screen.dart';
 import '../screens/club/create_challenge_screen.dart';
@@ -60,7 +61,6 @@ class Routes {
   static const String onboarding = '/onboarding';
   static const String onboardingStep1 = '/onboarding-step1';
   static const String onboardingStep2 = '/onboarding-step2';
-  static const String onboardingStep3 = '/onboarding-step3';
   static const String home = '/home';
   static const String plans = '/plans';
   static const String coach = '/coach';
@@ -77,6 +77,8 @@ class Routes {
   static const String settings = '/settings';
   static const String healthProfile = '/health-profile';
   static const String manageApp = '/manage-app';
+  static const String helpFaq = '/help-faq';
+  static const String privacyPolicy = '/privacy-policy';
   static const String editProfile = '/edit-profile';
   static const String manualActivityLog = '/manual-activity-log';
   static const String missedCheckin = '/missed-checkin';
@@ -131,7 +133,7 @@ ValueKey<String>? _lastGymSessionKey;
 // route to coach registration instead of Home once auth genuinely
 // completes — for an EXISTING account that's login_screen.dart's own
 // context.go(Routes.home); for a BRAND-NEW account that's several steps
-// later, after onboarding_step3_screen.dart's own context.go(Routes.home)
+// later, after onboarding_step2_screen.dart's own context.go(Routes.home)
 // (registering doesn't skip onboarding — a coach account still needs a
 // normal body profile like any other account). Intercepting in the
 // router's redirect is a single choke point that covers both paths (plus
@@ -209,10 +211,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.onboardingStep2,
         builder: (context, state) => const OnboardingStep2Screen(),
-      ),
-      GoRoute(
-        path: Routes.onboardingStep3,
-        builder: (context, state) => const OnboardingStep3Screen(),
       ),
       GoRoute(
         path: Routes.gymSession,
@@ -362,6 +360,14 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.manageApp,
         builder: (context, state) => const ManageAppScreen(),
+      ),
+      GoRoute(
+        path: Routes.helpFaq,
+        builder: (context, state) => const HelpFaqScreen(),
+      ),
+      GoRoute(
+        path: Routes.privacyPolicy,
+        builder: (context, state) => const PrivacyPolicyScreen(),
       ),
       GoRoute(
         path: Routes.editProfile,
