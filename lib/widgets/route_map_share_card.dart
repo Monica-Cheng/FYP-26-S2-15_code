@@ -73,6 +73,17 @@ class RouteMapShareCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasSnapshot = mapSnapshotBase64?.isNotEmpty ?? false;
+    // Diagnostic for the "map card shows a blank/grey gradient instead of
+    // the real map" bug — confirms whether this session's
+    // mapSnapshotBase64 actually reached this widget with real content
+    // (upstream capture problem, see outdoor_cardio_screen.dart's
+    // _captureMapSnapshot) vs. arrived fine and the CustomPainter/gradient
+    // fallback is being shown for some other reason (a rendering issue in
+    // this widget itself). Check this line's output the next time the bug
+    // reproduces before assuming which case it is.
+    debugPrint('[RouteMapShareCard] hasSnapshot=$hasSnapshot '
+        'mapSnapshotBase64.length=${mapSnapshotBase64?.length ?? 0} '
+        'routePoints.length=${routePoints.length}');
     final distanceKm = (distanceMeters / 1000).toStringAsFixed(2);
 
     return SizedBox(
@@ -101,7 +112,12 @@ class RouteMapShareCard extends StatelessWidget {
             _buildPaintedBackground(),
 
           if (routePoints.length >= 2)
-            Positioned.fill(child: RouteOverlay(routePoints: routePoints)),
+            Positioned.fill(
+              child: RouteOverlay(
+                routePoints: routePoints,
+                bounds: RouteOverlay.kSafeZone,
+              ),
+            ),
 
           // Dark scrim behind the bottom stat block, for legibility over
           // either a bright map snapshot or a bright photo-like painted
