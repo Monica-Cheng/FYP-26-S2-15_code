@@ -43,11 +43,11 @@ function App() {
   };
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: '#f5f5f5' }}>
+    <div className="wwa-app-shell">
       <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} onLogout={() => setIsLoggedIn(false)} />
-      <div style={{ flex: 1, padding: '32px', overflowY: 'auto' }}>
+      <main className="wwa-app-main">
         {renderPage()}
-      </div>
+      </main>
     </div>
   );
 }
