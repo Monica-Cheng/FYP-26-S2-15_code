@@ -15,6 +15,7 @@
 // mapSnapshotBase64/routePoints is non-empty — see RouteMapShareCard.isAvailable.
 
 import 'dart:convert';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -84,6 +85,25 @@ class RouteMapShareCard extends StatelessWidget {
     debugPrint('[RouteMapShareCard] hasSnapshot=$hasSnapshot '
         'mapSnapshotBase64.length=${mapSnapshotBase64?.length ?? 0} '
         'routePoints.length=${routePoints.length}');
+    // Real decoded pixel dimensions of the snapshot actually being
+    // displayed — a base64 STRING length alone doesn't say whether the
+    // source image is high-res-but-well-compressed or genuinely tiny.
+    // This card renders at 1080x1920 real pixels (360x640 logical @
+    // pixelRatio 3.0, see this widget's width/height constants) via
+    // BoxFit.cover below — if the decoded source is much smaller than
+    // that in either dimension, BoxFit.cover is upscaling it to fill the
+    // canvas, which is a blur no amount of JPEG-quality tuning at the
+    // share-card encoding step (see image_encode.dart's
+    // encodeCapturedCardBase64) can fix, since that step only re-encodes
+    // whatever this widget already rendered — it never touches this
+    // source image's own resolution.
+    if (hasSnapshot) {
+      ui.decodeImageFromList(base64Decode(mapSnapshotBase64!), (image) {
+        debugPrint('[RouteMapShareCard] mapSnapshotBase64 decoded '
+            'width=${image.width} height=${image.height} '
+            '(card target=1080x1920)');
+      });
+    }
     final distanceKm = (distanceMeters / 1000).toStringAsFixed(2);
 
     return SizedBox(
