@@ -1678,7 +1678,14 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
       children: [
         _sectionHeader('Fitness Preferences'),
         const Text(
-          'These preferences influence WiseCoach recommendations and plan matching.',
+          // Was "...influence WiseCoach recommendations and plan
+          // matching." — WiseCoach never reads any of these fields
+          // (grepped for every consumer; there are none), and only Sport
+          // does anything for plan matching today, as a one-time initial
+          // default for Plan Match's own sport survey (see
+          // plan_match_screen.dart's _loadSavedPrefs()), not an ongoing
+          // sync. Softened to avoid claiming more than that.
+          'Your sport preference helps set your starting point in Plan Match.',
           style: TextStyle(
             fontSize: 12,
             color: WW.textSec,

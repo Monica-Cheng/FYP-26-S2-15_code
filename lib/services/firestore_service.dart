@@ -1937,7 +1937,43 @@ class FirestoreService {
   // Returns weekly session statistics for users/{uid}.
   // Covers Mon–Sun of the current local week.
   // caloriesByDay / volumeByDay are indexed 0=Mon … 6=Sun.
+  //
+  // Extended (Progress-tab metrics expansion) to also compute, from this
+  // SAME single query/loop rather than firing additional date-range
+  // queries per new chart:
+  //  - gym/cardio/combined/manualCountByDay: per-bucket session-type
+  //    counts, same indexing as caloriesByBucket/volumeByBucket, for the
+  //    session-type-breakdown stacked bar chart. gymSessions/
+  //    cardioSessions above were already period TOTALS (not bucketed) —
+  //    these are the per-bucket equivalent, plus the two missing types.
+  //  - distanceByDay: per-bucket summed distanceMeters, for sessions
+  //    where it's present (outdoor cardio, and combined sessions whose
+  //    first cardio block had one — see finalizeInProgressSession()'s own
+  //    doc comment on why only the first block's fields get promoted to
+  //    the top level for a combined session). Never derived from `type`
+  //    directly — distanceMeters presence is the actual signal, since a
+  //    combined session's top-level type is 'combined', not 'cardio'.
+  //  - totalDistanceMeters / totalDistanceDurationSeconds: summed across
+  //    the same distance-having sessions, for computing one overall
+  //    average pace for the period (not per-bucket — a per-bucket pace
+  //    would need per-bucket duration too, which isn't needed for
+  //    anything else, so it's kept to the one period-level figure the
+  //    distance chart's caption actually shows).
+  //  - muscleSetCounts: NOT bucketed by day/week/month like the above —
+  //    a single Map<String,int> of setCount per muscle across the whole
+  //    period, for the muscle-group distribution chart, which shows
+  //    composition for the selected period, not a sub-period trend.
+  //    Counts every done set (flagged-timing/flagged-bounds sets
+  //    included) — flagging is an anti-cheat signal for XP/calorie
+  //    integrity, not a claim the set didn't happen, so it still counts
+  //    toward "what did you actually train" here. Exercises with a
+  //    missing/null muscle (exercises collection is admin-managed and not
+  //    guaranteed complete — see getAllExercises()'s own doc comment)
+  //    are counted under the fixed key '_unknownMuscleKey' below rather
+  //    than silently dropped.
   // ---------------------------------------------------------------------------
+  static const String unknownMuscleKey = 'Unknown';
+
   Future<Map<String, dynamic>> getSessionStats(
     String uid, {
     required DateTime startDate,
@@ -1956,11 +1992,21 @@ class FirestoreService {
 
     final caloriesByBucket = List<double>.filled(bucketCount, 0);
     final volumeByBucket = List<double>.filled(bucketCount, 0);
+    final gymCountByBucket = List<double>.filled(bucketCount, 0);
+    final cardioCountByBucket = List<double>.filled(bucketCount, 0);
+    final combinedCountByBucket = List<double>.filled(bucketCount, 0);
+    final manualCountByBucket = List<double>.filled(bucketCount, 0);
+    final distanceByBucket = List<double>.filled(bucketCount, 0);
     int totalCalories = 0;
     double totalVolume = 0;
     int totalSessions = 0;
     int gymSessions = 0;
     int cardioSessions = 0;
+    int combinedSessions = 0;
+    int manualSessions = 0;
+    double totalDistanceMeters = 0;
+    int totalDistanceDurationSeconds = 0;
+    final muscleSetCounts = <String, int>{};
 
     for (final doc in snapshot.docs) {
       final data = doc.data();
@@ -1983,8 +2029,19 @@ class FirestoreService {
         bucketIndex = (date.difference(startDate).inDays ~/ 7)
             .clamp(0, bucketCount - 1);
       } else {
+        // Elapsed calendar months since startDate, NOT just
+        // date.month - startDate.month — that only worked when the
+        // whole range stayed within one calendar year. Now that "This
+        // Year" (progress_screen.dart's _loadChartData()) is a rolling
+        // 365-day window, it almost always crosses a year boundary
+        // (e.g. startDate in August 2025, a date in January 2026 needs
+        // to land in a LATER bucket than one in August 2025, not wrap
+        // back to a negative/clamped-to-0 index the way the old
+        // month-only subtraction would).
         bucketIndex =
-            (date.month - startDate.month).clamp(0, bucketCount - 1);
+            ((date.year - startDate.year) * 12 +
+                    (date.month - startDate.month))
+                .clamp(0, bucketCount - 1);
       }
 
       caloriesByBucket[bucketIndex] += cals;
@@ -1992,8 +2049,46 @@ class FirestoreService {
       totalCalories += cals.round();
       totalVolume += vol;
       totalSessions++;
-      if (type == 'gym') gymSessions++;
-      if (type == 'cardio') cardioSessions++;
+      if (type == 'gym') {
+        gymSessions++;
+        gymCountByBucket[bucketIndex]++;
+      }
+      if (type == 'cardio') {
+        cardioSessions++;
+        cardioCountByBucket[bucketIndex]++;
+      }
+      if (type == 'combined') {
+        combinedSessions++;
+        combinedCountByBucket[bucketIndex]++;
+      }
+      if (type == 'manual') {
+        manualSessions++;
+        manualCountByBucket[bucketIndex]++;
+      }
+
+      // distanceMeters presence (not `type`) is the real signal — a
+      // combined session carries type:'combined' but can still have a
+      // top-level distanceMeters copied from its first cardio block.
+      final distance = data['distanceMeters'] as num?;
+      if (distance != null) {
+        distanceByBucket[bucketIndex] += distance.toDouble();
+        totalDistanceMeters += distance.toDouble();
+        totalDistanceDurationSeconds +=
+            (data['durationSeconds'] as num?)?.toInt() ?? 0;
+      }
+
+      if (type == 'gym') {
+        final exercises = data['exercises'] as List<dynamic>? ?? [];
+        for (final ex in exercises) {
+          if (ex is! Map) continue;
+          final muscle = ex['muscle'] as String?;
+          final sets = ex['sets'] as List<dynamic>? ?? [];
+          final key = (muscle == null || muscle.isEmpty)
+              ? unknownMuscleKey
+              : muscle;
+          muscleSetCounts[key] = (muscleSetCounts[key] ?? 0) + sets.length;
+        }
+      }
     }
 
     return {
@@ -2004,6 +2099,16 @@ class FirestoreService {
       'totalSessions': totalSessions,
       'gymSessions': gymSessions,
       'cardioSessions': cardioSessions,
+      'combinedSessions': combinedSessions,
+      'manualSessions': manualSessions,
+      'gymCountByDay': gymCountByBucket,
+      'cardioCountByDay': cardioCountByBucket,
+      'combinedCountByDay': combinedCountByBucket,
+      'manualCountByDay': manualCountByBucket,
+      'distanceByDay': distanceByBucket,
+      'totalDistanceMeters': totalDistanceMeters,
+      'totalDistanceDurationSeconds': totalDistanceDurationSeconds,
+      'muscleSetCounts': muscleSetCounts,
     };
   }
 

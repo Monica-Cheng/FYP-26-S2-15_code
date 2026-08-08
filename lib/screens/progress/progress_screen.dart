@@ -38,26 +38,46 @@ class _ProgressScreenState extends State<ProgressScreen> {
   int _timeFilter = 0;
   int _activityFilter = 0;
 
+  // Same fixed abbreviation set _monthNames (further below) already
+  // defines for the weight chart — kept as its own copy here rather than
+  // reordering declarations, since Dart class members are visible
+  // throughout the class regardless of declaration order; duplicating a
+  // 7-entry weekday list is cheaper than restructuring for one shared
+  // constant. Index via DateTime.weekday - 1 (1=Monday..7=Sunday).
+  static const List<String> _weekdayAbbrevs = [
+    'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun',
+  ];
+
+  // _timeFilter's three windows are now rolling (last 7/30/365 days
+  // ending today — see _loadChartData()'s own comment for why), not
+  // calendar week/month/year. Bucket labels must match: the OLD fixed
+  // 'Mon'..'Sun' assumed the 7-day window was always literally Monday
+  // through Sunday, which is only true once every 7 days now — WRONG the
+  // other 6 days (a Wednesday-anchored week would show today at bucket 6
+  // labeled 'Sun'). Same problem for the 12-bucket Year labels: a fixed
+  // 'Jan'..'Dec' assumed the window always started in January, which a
+  // 365-day rolling window essentially never does. Both are now derived
+  // from the actual rolling startDate. 'Wk 1'..'Wk 4' for This Month is
+  // left as-is — those never claimed to be specific calendar weeks, so
+  // they're not factually wrong for a rolling window the way named
+  // weekdays/months are.
   List<String> get _chartLabels {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
     if (_timeFilter == 0) {
-      return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      final start = today.subtract(const Duration(days: 6));
+      return List.generate(
+        7,
+        (i) => _weekdayAbbrevs[start.add(Duration(days: i)).weekday - 1],
+      );
     } else if (_timeFilter == 1) {
       return ['Wk 1', 'Wk 2', 'Wk 3', 'Wk 4'];
     } else {
-      return [
-        'Jan',
-        'Feb',
-        'Mar',
-        'Apr',
-        'May',
-        'Jun',
-        'Jul',
-        'Aug',
-        'Sep',
-        'Oct',
-        'Nov',
-        'Dec',
-      ];
+      final start = today.subtract(const Duration(days: 364));
+      return List.generate(
+        12,
+        (i) => _monthNames[(start.month - 1 + i) % 12],
+      );
     }
   }
 
@@ -99,6 +119,41 @@ class _ProgressScreenState extends State<ProgressScreen> {
   int _weekTotalSessions = 0;
   int _weekGymSessions = 0;
   bool _chartsLoading = true;
+
+  // Collapsible state for each Charts-tab chart section — same
+  // tap-to-toggle-chevron pattern as _weightExpanded/_calendarExpanded
+  // further below, just one flag per chart instead of one shared flag,
+  // since each section collapses independently. All default true so
+  // nothing looks different from before until a user actually taps one.
+  bool _caloriesChartExpanded = true;
+  bool _gymChartExpanded = true;
+  bool _sessionTypeChartExpanded = true;
+  bool _distancePaceChartExpanded = true;
+  bool _muscleGroupChartExpanded = true;
+
+  // Session-type breakdown (Part B) — per-bucket counts, same indexing/
+  // shape as _caloriesByDay/_volumeByDay above, from the same
+  // getSessionStats() call (no separate query).
+  List<double> _gymCountByDay = [0, 0, 0, 0, 0, 0, 0];
+  List<double> _cardioCountByDay = [0, 0, 0, 0, 0, 0, 0];
+  List<double> _combinedCountByDay = [0, 0, 0, 0, 0, 0, 0];
+  List<double> _manualCountByDay = [0, 0, 0, 0, 0, 0, 0];
+
+  // Distance/pace trend (Part C) — per-bucket summed distanceMeters, plus
+  // period totals for the one overall average-pace figure shown in the
+  // chart's caption (see getSessionStats()'s own doc comment for why pace
+  // itself isn't bucketed).
+  List<double> _distanceByDay = [0, 0, 0, 0, 0, 0, 0];
+  double _totalDistanceMeters = 0;
+  int _totalDistanceDurationSeconds = 0;
+
+  // Muscle-group distribution (Part D) — set count per muscle for the
+  // whole selected period, not bucketed (a composition snapshot, not a
+  // sub-period trend). FirestoreService.unknownMuscleKey covers exercises
+  // with a missing/null muscle field.
+  Map<String, int> _muscleSetCounts = {};
+
+
   bool _checkInsLoading = true;
   Stream<List<Map<String, dynamic>>>? _checkInsStream;
 
@@ -253,22 +308,35 @@ class _ProgressScreenState extends State<ProgressScreen> {
       int bucketCount;
       String bucketUnit;
 
+      // Rolling windows ending today, NOT calendar week/month/year —
+      // calendar-anchored ranges showed sparse/near-empty data early in
+      // a calendar week/month/year (e.g. only 1-2 days of data on the
+      // 2nd of a month) with no way to see the prior period once it
+      // rolled over (no picker exists for this control — a separate,
+      // deliberately out-of-scope concern). endDate is exclusive, so
+      // "through today" needs the upper bound at start-of-tomorrow, same
+      // convention the old code already used (start-of-day-after the
+      // last included day).
       if (_timeFilter == 0) {
-        // This Week — Mon to Sun, 7 day buckets
-        startDate = today.subtract(Duration(days: today.weekday - 1));
-        endDate = startDate.add(const Duration(days: 7));
+        // This Week — last 7 days (today minus 6 days through today)
+        startDate = today.subtract(const Duration(days: 6));
+        endDate = today.add(const Duration(days: 1));
         bucketCount = 7;
         bucketUnit = 'day';
       } else if (_timeFilter == 1) {
-        // This Month — 1st to end, 4 week buckets
-        startDate = DateTime(now.year, now.month, 1);
-        endDate = DateTime(now.year, now.month + 1, 1);
+        // This Month — last 30 days (today minus 29 days through today)
+        startDate = today.subtract(const Duration(days: 29));
+        endDate = today.add(const Duration(days: 1));
         bucketCount = 4;
         bucketUnit = 'week';
       } else {
-        // This Year — Jan to Dec, 12 month buckets
-        startDate = DateTime(now.year, 1, 1);
-        endDate = DateTime(now.year + 1, 1, 1);
+        // This Year — last 365 days (today minus 364 days through
+        // today). Almost always crosses a calendar-year boundary now —
+        // see getSessionStats()'s 'month' bucketIndex math, updated to
+        // handle that (it previously assumed a single-calendar-year
+        // span).
+        startDate = today.subtract(const Duration(days: 364));
+        endDate = today.add(const Duration(days: 1));
         bucketCount = 12;
         bucketUnit = 'month';
       }
@@ -289,6 +357,20 @@ class _ProgressScreenState extends State<ProgressScreen> {
         _weekTotalVolume = stats['totalVolume'] as int;
         _weekTotalSessions = stats['totalSessions'] as int;
         _weekGymSessions = stats['gymSessions'] as int;
+        _gymCountByDay = List<double>.from(stats['gymCountByDay'] as List);
+        _cardioCountByDay =
+            List<double>.from(stats['cardioCountByDay'] as List);
+        _combinedCountByDay =
+            List<double>.from(stats['combinedCountByDay'] as List);
+        _manualCountByDay =
+            List<double>.from(stats['manualCountByDay'] as List);
+        _distanceByDay = List<double>.from(stats['distanceByDay'] as List);
+        _totalDistanceMeters = stats['totalDistanceMeters'] as double;
+        _totalDistanceDurationSeconds =
+            stats['totalDistanceDurationSeconds'] as int;
+        _muscleSetCounts = Map<String, int>.from(
+          stats['muscleSetCounts'] as Map,
+        );
         _chartsLoading = false;
       });
     } catch (_) {
@@ -810,10 +892,6 @@ class _ProgressScreenState extends State<ProgressScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _buildWiseCoachCard(),
-          const SizedBox(height: 12),
-          _sectionDivider(),
-          const SizedBox(height: 12),
           _buildTimeFilter(),
           const SizedBox(height: 12),
           _sectionDivider(),
@@ -823,6 +901,18 @@ class _ProgressScreenState extends State<ProgressScreen> {
           _sectionDivider(),
           const SizedBox(height: 12),
           _buildGymChart(),
+          const SizedBox(height: 12),
+          _sectionDivider(),
+          const SizedBox(height: 12),
+          _buildSessionTypeChart(),
+          const SizedBox(height: 12),
+          _sectionDivider(),
+          const SizedBox(height: 12),
+          _buildDistancePaceChart(),
+          const SizedBox(height: 12),
+          _sectionDivider(),
+          const SizedBox(height: 12),
+          _buildMuscleGroupChart(),
           const SizedBox(height: 12),
           _sectionDivider(),
           const SizedBox(height: 12),
@@ -852,95 +942,16 @@ class _ProgressScreenState extends State<ProgressScreen> {
     return Container(height: 1, color: WW.elevated);
   }
 
-  // No boxed card background — content sits directly on WW.bg, matching
-  // Club's unboxed row style. The left accent stripe (WW.primary) and
-  // icon circle stay; they're an intentional design element, not part of
-  // the "card" look being removed. Label/body text uses WW.text/WW.textSec
-  // rather than a lavender tint, since there's no tinted background left
-  // to pair it with.
-  Widget _buildWiseCoachCard() {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
-      decoration: const BoxDecoration(
-        border: Border(left: BorderSide(color: WW.primary, width: 3)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 28,
-            height: 28,
-            decoration: const BoxDecoration(
-              color: WW.primary,
-              shape: BoxShape.circle,
-            ),
-            child: const Center(
-              child: Icon(
-                Icons.auto_awesome_rounded,
-                color: Colors.white,
-                size: 14,
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'WiseCoach Insight',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: WW.text,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  _buildInsightText(),
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: WW.textSec,
-                    height: 1.45,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _buildInsightText() {
-    final period = _timeFilter == 0
-        ? 'this week'
-        : _timeFilter == 1
-        ? 'this month'
-        : 'this year';
-    if (_weekTotalSessions == 0) {
-      return 'No sessions logged $period yet. Start a workout to see your insights here.';
-    }
-    final calStr = _weekTotalCalories > 0
-        ? ' and burned $_weekTotalCalories kcal'
-        : '';
-    final volStr = _weekTotalVolume > 0
-        ? ' with $_weekTotalVolume kg total volume'
-        : '';
-    final gymStr = _weekGymSessions > 0
-        ? '$_weekGymSessions gym session${_weekGymSessions == 1 ? '' : 's'}'
-        : '';
-    final cardioCount = _weekTotalSessions - _weekGymSessions;
-    final cardioStr = cardioCount > 0
-        ? '$cardioCount cardio session${cardioCount == 1 ? '' : 's'}'
-        : '';
-    final sessionStr = [
-      gymStr,
-      cardioStr,
-    ].where((s) => s.isNotEmpty).join(' and ');
-    return 'You completed $sessionStr $period$calStr$volStr. Keep it up!';
-  }
+  // REMOVED (Progress-tab metrics expansion, Part A): this used to be a
+  // "WiseCoach Insight" card — sparkle icon, WiseCoach branding, styled
+  // to look like an AI-generated summary — but was actually a pure
+  // client-side string template, interpolating _weekTotalSessions/
+  // _weekTotalCalories/_weekTotalVolume/_weekGymSessions/_timeFilter (all
+  // already-loaded local state; no OpenAI/Cloud Function call anywhere
+  // in this file). Confirmed no other call site depended on the card or
+  // its text-builder before deleting both. The four _week* fields it
+  // read stay — _buildCaloriesChart()/_buildGymChart()/
+  // _buildStatCardsRow() all still use them independently.
 
   // Segmented control: one continuous WW.elevated shell with a white
   // (WW.card) pill that slides to the active segment via AnimatedAlign —
@@ -1012,30 +1023,58 @@ class _ProgressScreenState extends State<ProgressScreen> {
   }
 
   Widget _buildCaloriesChart() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                Icons.local_fire_department_outlined,
-                color: WW.teal,
-                size: 18,
-              ),
-              const SizedBox(width: 8),
-              const Text(
-                'Calories Burned',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  color: WW.text,
-                ),
-              ),
-            ],
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: () => setState(
+            () => _caloriesChartExpanded = !_caloriesChartExpanded,
           ),
-          const SizedBox(height: 14),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: WW.tealBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.local_fire_department_outlined,
+                    color: WW.teal,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Calories Burned',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: WW.text,
+                    ),
+                  ),
+                ),
+                Icon(
+                  _caloriesChartExpanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  color: WW.textSec,
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_caloriesChartExpanded) ...[
+          const Divider(height: 1, color: WW.elevated),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
           SizedBox(
             height: 160,
             child: BarChart(
@@ -1127,36 +1166,66 @@ class _ProgressScreenState extends State<ProgressScreen> {
               color: WW.textSec,
             ),
           ),
+              ],
+            ),
+          ),
         ],
-      ),
+      ],
     );
   }
 
   Widget _buildGymChart() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.fitness_center_rounded,
-                color: WW.primary,
-                size: 18,
-              ),
-              const SizedBox(width: 8),
-              const Text(
-                'Gym Training',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  color: WW.text,
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: () =>
+              setState(() => _gymChartExpanded = !_gymChartExpanded),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: WW.chipBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.fitness_center_rounded,
+                    color: WW.primary,
+                    size: 18,
+                  ),
                 ),
-              ),
-            ],
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Gym Training',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: WW.text,
+                    ),
+                  ),
+                ),
+                Icon(
+                  _gymChartExpanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  color: WW.textSec,
+                  size: 20,
+                ),
+              ],
+            ),
           ),
-          const SizedBox(height: 14),
+        ),
+        if (_gymChartExpanded) ...[
+          const Divider(height: 1, color: WW.elevated),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
           SizedBox(
             height: 160,
             child: BarChart(
@@ -1246,8 +1315,606 @@ class _ProgressScreenState extends State<ProgressScreen> {
               color: WW.textSec,
             ),
           ),
+              ],
+            ),
+          ),
         ],
-      ),
+      ],
+    );
+  }
+
+  // Part B (Progress-tab metrics expansion): session-type breakdown,
+  // stacked-bar variant of the same per-bucket BarChart shape
+  // _buildCaloriesChart()/_buildGymChart() already use — one stacked bar
+  // per _timeFilter bucket instead of one solid-color bar, since this is
+  // a composition (which types made up that bucket), not a single scalar
+  // trend. Data comes from _gym/_cardio/_combined/_manualCountByDay,
+  // populated by the same getSessionStats() call the other two charts
+  // already trigger — no separate query.
+  Widget _buildSessionTypeChart() {
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: () => setState(
+            () => _sessionTypeChartExpanded = !_sessionTypeChartExpanded,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: WW.lavenderBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.donut_small_rounded,
+                    color: WW.lavender,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Session Type Breakdown',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: WW.text,
+                    ),
+                  ),
+                ),
+                Icon(
+                  _sessionTypeChartExpanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  color: WW.textSec,
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_sessionTypeChartExpanded) ...[
+          const Divider(height: 1, color: WW.elevated),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+          SizedBox(
+            height: 160,
+            child: BarChart(
+              BarChartData(
+                barGroups: List.generate(_bucketCount, (i) {
+                  final gym =
+                      i < _gymCountByDay.length ? _gymCountByDay[i] : 0.0;
+                  final cardio = i < _cardioCountByDay.length
+                      ? _cardioCountByDay[i]
+                      : 0.0;
+                  final combined = i < _combinedCountByDay.length
+                      ? _combinedCountByDay[i]
+                      : 0.0;
+                  final manual = i < _manualCountByDay.length
+                      ? _manualCountByDay[i]
+                      : 0.0;
+                  final total = gym + cardio + combined + manual;
+                  if (total <= 0) {
+                    return BarChartGroupData(
+                      x: i,
+                      barRods: [
+                        BarChartRodData(
+                          toY: 0.3,
+                          color: WW.border,
+                          width: 22,
+                          borderRadius: BorderRadius.circular(5),
+                        ),
+                      ],
+                    );
+                  }
+                  var from = 0.0;
+                  final stackItems = <BarChartRodStackItem>[];
+                  for (final segment in [
+                    (gym, WW.primary),
+                    (cardio, WW.teal),
+                    (combined, WW.lavender),
+                    (manual, WW.gold),
+                  ]) {
+                    final (count, color) = segment;
+                    if (count <= 0) continue;
+                    stackItems.add(
+                      BarChartRodStackItem(from, from + count, color),
+                    );
+                    from += count;
+                  }
+                  return BarChartGroupData(
+                    x: i,
+                    barRods: [
+                      BarChartRodData(
+                        toY: total,
+                        rodStackItems: stackItems,
+                        width: 22,
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                    ],
+                  );
+                }),
+                titlesData: FlTitlesData(
+                  show: true,
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 28,
+                      getTitlesWidget: (value, meta) {
+                        final i = value.toInt();
+                        final labels = _chartLabels;
+                        if (i < 0 || i >= labels.length) {
+                          return const SizedBox.shrink();
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            labels[i],
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: WW.textSec,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  leftTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                  topTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                  rightTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                ),
+                borderData: FlBorderData(show: false),
+                gridData: const FlGridData(show: false),
+                barTouchData: BarTouchData(
+                  touchTooltipData: BarTouchTooltipData(
+                    getTooltipColor: (_) => WW.primaryDark,
+                    getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                      final gym = group.x < _gymCountByDay.length
+                          ? _gymCountByDay[group.x]
+                          : 0.0;
+                      final cardio = group.x < _cardioCountByDay.length
+                          ? _cardioCountByDay[group.x]
+                          : 0.0;
+                      final combined = group.x < _combinedCountByDay.length
+                          ? _combinedCountByDay[group.x]
+                          : 0.0;
+                      final manual = group.x < _manualCountByDay.length
+                          ? _manualCountByDay[group.x]
+                          : 0.0;
+                      if (gym + cardio + combined + manual <= 0) return null;
+                      final parts = <String>[
+                        if (gym > 0) '${gym.round()} gym',
+                        if (cardio > 0) '${cardio.round()} cardio',
+                        if (combined > 0) '${combined.round()} combined',
+                        if (manual > 0) '${manual.round()} manual',
+                      ];
+                      return BarTooltipItem(
+                        parts.join('\n'),
+                        const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 14,
+            runSpacing: 6,
+            children: [
+              _buildTypeLegendChip('Gym', WW.primary),
+              _buildTypeLegendChip('Cardio', WW.teal),
+              _buildTypeLegendChip('Combined', WW.lavender),
+              _buildTypeLegendChip('Manual', WW.gold),
+            ],
+          ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // Small color-dot + label chip — a stacked bar chart needs a legend
+  // (unlike Calories/Gym's single-series bars, which don't) so a viewer
+  // can tell which color is which type.
+  Widget _buildTypeLegendChip(String label, Color color) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w500,
+            color: WW.textSec,
+          ),
+        ),
+      ],
+    );
+  }
+
+  // Part C (Progress-tab metrics expansion): distance trend for outdoor
+  // cardio, bucketed exactly like Calories/Gym above. Filters implicitly
+  // by distanceMeters presence (baked into _distanceByDay itself — see
+  // getSessionStats()'s doc comment) rather than session type, since a
+  // combined session can also carry a top-level distanceMeters.
+  //
+  // Pace is NOT a stored field — durationSeconds/distanceMeters aren't
+  // enough on their own for a per-bucket pace (would also need
+  // per-bucket duration, which nothing else needs), so only ONE overall
+  // average pace for the whole selected period is shown, in the caption,
+  // computed from _totalDistanceMeters/_totalDistanceDurationSeconds.
+  // Same 50m-floor + MM:SS/km formatting convention already duplicated
+  // across post_session_summary_screen.dart/activity_detail_screen.dart/
+  // outdoor_cardio_screen.dart/session_share_cards.dart — matched here
+  // rather than inventing a new pace format, kept as its own private
+  // copy rather than extracting a shared helper (same reasoning
+  // session_share_cards.dart's own copy gives: a wider dedup not asked
+  // for by this task).
+  Widget _buildDistancePaceChart() {
+    final avgPaceLabel = _avgPaceLabel(
+      _totalDistanceMeters,
+      _totalDistanceDurationSeconds,
+    );
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: () => setState(
+            () => _distancePaceChartExpanded = !_distancePaceChartExpanded,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: WW.tealBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.directions_run_rounded,
+                    color: WW.teal,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Distance & Pace (Outdoor)',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: WW.text,
+                    ),
+                  ),
+                ),
+                Icon(
+                  _distancePaceChartExpanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  color: WW.textSec,
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_distancePaceChartExpanded) ...[
+          const Divider(height: 1, color: WW.elevated),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+          SizedBox(
+            height: 160,
+            child: BarChart(
+              BarChartData(
+                barGroups: List.generate(_bucketCount, (i) {
+                  final meters =
+                      i < _distanceByDay.length ? _distanceByDay[i] : 0.0;
+                  final km = meters / 1000;
+                  return BarChartGroupData(
+                    x: i,
+                    barRods: [
+                      BarChartRodData(
+                        toY: km > 0 ? km : 0.3,
+                        color: km > 0 ? WW.teal : WW.border,
+                        width: 26,
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                    ],
+                  );
+                }),
+                titlesData: FlTitlesData(
+                  show: true,
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 28,
+                      getTitlesWidget: (value, meta) {
+                        final i = value.toInt();
+                        final labels = _chartLabels;
+                        if (i < 0 || i >= labels.length) {
+                          return const SizedBox.shrink();
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            labels[i],
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: WW.textSec,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  leftTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                  topTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                  rightTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                ),
+                borderData: FlBorderData(show: false),
+                gridData: const FlGridData(show: false),
+                barTouchData: BarTouchData(
+                  touchTooltipData: BarTouchTooltipData(
+                    getTooltipColor: (_) => WW.primaryDark,
+                    getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                      final meters = group.x < _distanceByDay.length
+                          ? _distanceByDay[group.x]
+                          : 0.0;
+                      if (meters <= 0) return null;
+                      return BarTooltipItem(
+                        '${(meters / 1000).toStringAsFixed(2)} km',
+                        const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Total: ${(_totalDistanceMeters / 1000).toStringAsFixed(1)} km'
+            '${avgPaceLabel != null ? '  ·  Avg pace: $avgPaceLabel' : ''}',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: WW.textSec,
+            ),
+          ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  String? _avgPaceLabel(double distanceMeters, int durationSeconds) {
+    if (distanceMeters < 50 || durationSeconds <= 0) return null;
+    final secondsPerKm = durationSeconds / (distanceMeters / 1000);
+    if (!secondsPerKm.isFinite) return null;
+    final mins = secondsPerKm ~/ 60;
+    final secs = (secondsPerKm % 60).round();
+    return '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')} /km';
+  }
+
+  // Part D (Progress-tab metrics expansion): muscle-group distribution —
+  // set count per muscle (not volume). Gym Training above already shows
+  // volume trend; a volume-weighted muscle chart would mostly re-show the
+  // same signal through heavy compound lifts, whereas set count answers
+  // a genuinely different question — training FREQUENCY/focus by muscle
+  // — using data already denormalized onto session exercises[] entries,
+  // no new lookup against the exercises collection needed. One bar per
+  // muscle for the whole selected _timeFilter period (a composition
+  // snapshot, not a bucketed trend — muscle categories don't have a
+  // natural per-day/week/month axis the way session counts do).
+  // FirestoreService.unknownMuscleKey ('Unknown') covers exercises whose
+  // muscle field was missing/null when logged — shown as its own bar
+  // (styled distinctly, WW.border) rather than dropped, since the
+  // exercises collection is admin-managed and documented as not always
+  // complete.
+  Widget _buildMuscleGroupChart() {
+    final entries = _muscleSetCounts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final totalSets = entries.fold<int>(0, (acc, e) => acc + e.value);
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: () => setState(
+            () => _muscleGroupChartExpanded = !_muscleGroupChartExpanded,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: WW.chipBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.accessibility_new_rounded,
+                    color: WW.primary,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Muscle Group Focus',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: WW.text,
+                    ),
+                  ),
+                ),
+                Icon(
+                  _muscleGroupChartExpanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  color: WW.textSec,
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_muscleGroupChartExpanded) ...[
+          const Divider(height: 1, color: WW.elevated),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+          if (entries.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: Center(
+                child: Text(
+                  'No gym sets logged this period',
+                  style: TextStyle(fontSize: 13, color: WW.textSec),
+                ),
+              ),
+            )
+          else
+            SizedBox(
+              height: 160,
+              child: BarChart(
+                BarChartData(
+                  barGroups: List.generate(entries.length, (i) {
+                    final isUnknown =
+                        entries[i].key == FirestoreService.unknownMuscleKey;
+                    return BarChartGroupData(
+                      x: i,
+                      barRods: [
+                        BarChartRodData(
+                          toY: entries[i].value.toDouble(),
+                          color: isUnknown ? WW.border : WW.primary,
+                          width: 20,
+                          borderRadius: BorderRadius.circular(5),
+                        ),
+                      ],
+                    );
+                  }),
+                  titlesData: FlTitlesData(
+                    show: true,
+                    bottomTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 36,
+                        getTitlesWidget: (value, meta) {
+                          final i = value.toInt();
+                          if (i < 0 || i >= entries.length) {
+                            return const SizedBox.shrink();
+                          }
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(
+                              entries[i].key,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w600,
+                                color: WW.textSec,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    leftTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                    topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                    rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                  ),
+                  borderData: FlBorderData(show: false),
+                  gridData: const FlGridData(show: false),
+                  barTouchData: BarTouchData(
+                    touchTooltipData: BarTouchTooltipData(
+                      getTooltipColor: (_) => WW.primaryDark,
+                      getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                        if (group.x >= entries.length) return null;
+                        final entry = entries[group.x];
+                        return BarTooltipItem(
+                          '${entry.key}\n${entry.value} set${entry.value == 1 ? '' : 's'}',
+                          const TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          const SizedBox(height: 10),
+          Text(
+            'Total: $totalSets set${totalSets == 1 ? '' : 's'} logged',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: WW.textSec,
+            ),
+          ),
+              ],
+            ),
+          ),
+        ],
+      ],
     );
   }
 
