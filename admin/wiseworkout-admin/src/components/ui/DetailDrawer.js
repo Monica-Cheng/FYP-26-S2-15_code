@@ -4,6 +4,7 @@ import { X } from 'lucide-react';
 function DetailDrawer({
   open = true,
   width = 'default',
+  viewportLocked = false,
   title,
   actions,
   summary,
@@ -18,7 +19,7 @@ function DetailDrawer({
 
   return (
     <aside
-      className={`wwa-detail-drawer ${width === 'wide' ? 'wwa-detail-drawer-wide' : ''} ${className}`.trim()}
+      className={`wwa-detail-drawer ${width === 'wide' ? 'wwa-detail-drawer-wide' : ''} ${viewportLocked ? 'wwa-detail-drawer-viewport-locked' : ''} ${className}`.trim()}
       role="dialog"
       aria-modal="false"
       aria-label={title || 'Detail drawer'}

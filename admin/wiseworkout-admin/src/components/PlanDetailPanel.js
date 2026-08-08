@@ -1,60 +1,344 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
+import { CalendarDays, Clock3, Dumbbell, Pencil, Trash2 } from 'lucide-react';
 import Badge from './ui/Badge';
-import ImageThumb from './ui/ImageThumb';
+import DetailDrawer from './ui/DetailDrawer';
+import FormSection from './ui/FormSection';
+import FormField from './ui/FormField';
+import SelectField from './ui/SelectField';
+import PlanSessionsEditor, {
+  buildDefaultSessions,
+  buildAndValidateSessions,
+  sessionsFromPlan,
+  buildDefaultCustomSessions,
+  buildAndValidateCustomSessions,
+  customSessionsFromPlan,
+} from './PlanSessionsEditor';
 import { formatDate } from '../utils/dateUtils';
 import { formatEquipment } from '../utils/formatUtils';
 import { parseCommaList, formatCommaList, buildDesignedBy } from '../utils/planUtils';
-import PlanSessionsEditor, {
-  buildDefaultSessions, buildAndValidateSessions, sessionsFromPlan,
-  buildDefaultCustomSessions, buildAndValidateCustomSessions, customSessionsFromPlan,
-} from './PlanSessionsEditor';
 
 const SET_TYPE_LABELS = { W: 'Warmup', N: 'Normal', D: 'Drop Set' };
 
-function DetailRow({ label, value }) {
+const getPlanSource = (plan) => {
+  if (plan.isCoachPlan === true) return 'coach';
+  if (plan.isCustom === true) return 'custom';
+  return 'official';
+};
+
+const sourceLabel = (plan) =>
+  getPlanSource(plan) === 'coach' ? 'Coach' : getPlanSource(plan) === 'custom' ? 'Custom' : 'Official/System';
+
+const sourceTone = (plan) =>
+  getPlanSource(plan) === 'coach' ? 'warning' : getPlanSource(plan) === 'custom' ? 'brand' : 'neutral';
+
+const levelTone = (level) =>
+  level === 'Advanced' ? 'danger' : level === 'Intermediate' ? 'warning' : 'success';
+
+const isValidImageUrl = (url) => /^https?:\/\//i.test((url || '').trim());
+
+function PlanDetailStyles() {
+  return (
+    <style>{`
+      .wwpdn-summary {
+        display: flex;
+        gap: 16px;
+        align-items: flex-start;
+      }
+      .wwpdn-summary__media {
+        width: 96px;
+        height: 96px;
+        border-radius: 16px;
+        border: 1px solid var(--ww-divider);
+        background: var(--ww-card);
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+      .wwpdn-summary__media img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+      }
+      .wwpdn-summary__fallback {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--ww-elevated);
+        color: var(--ww-text-sec);
+        font-size: var(--ww-type-secondary-size);
+      }
+      .wwpdn-summary__content {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .wwpdn-summary__title {
+        font-size: var(--ww-type-page-title-size);
+        font-weight: var(--ww-type-page-title-weight);
+        color: var(--ww-primary-dark);
+        line-height: 1.15;
+      }
+      .wwpdn-summary__meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .wwpdn-message-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .wwpdn-message-stack .wwa-status-pill,
+      .wwpdn-message-stack .wwa-alert-error {
+        margin: 0;
+      }
+      .wwpdn-description {
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text);
+        line-height: 1.6;
+        white-space: pre-wrap;
+      }
+      .wwpdn-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .wwpdn-list-item {
+        display: inline-flex;
+        align-items: center;
+        min-height: 28px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: var(--ww-elevated);
+        color: var(--ww-text);
+        font-size: var(--ww-type-secondary-size);
+        font-weight: 600;
+      }
+      .wwpdn-designer-quote {
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text-sec);
+        line-height: 1.6;
+        font-style: italic;
+      }
+      .wwpdn-schedule {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .wwpdn-session {
+        border: 1px solid var(--ww-divider);
+        border-radius: 14px;
+        background: var(--ww-card);
+        overflow: hidden;
+      }
+      .wwpdn-session__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        background: color-mix(in srgb, var(--ww-bg) 76%, white);
+        border-bottom: 1px solid var(--ww-divider);
+        flex-wrap: wrap;
+      }
+      .wwpdn-session__title-group {
+        min-width: 0;
+      }
+      .wwpdn-session__eyebrow {
+        font-size: var(--ww-type-caption-size);
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--ww-text-sec);
+      }
+      .wwpdn-session__title {
+        margin-top: 4px;
+        font-size: var(--ww-type-card-title-size);
+        font-weight: var(--ww-type-card-title-weight);
+        color: var(--ww-primary-dark);
+      }
+      .wwpdn-session__meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .wwpdn-session__rest {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 16px;
+        color: var(--ww-text-sec);
+        font-size: var(--ww-type-body-size);
+      }
+      .wwpdn-session__items {
+        display: flex;
+        flex-direction: column;
+      }
+      .wwpdn-item {
+        padding: 14px 16px;
+        border-top: 1px solid var(--ww-divider);
+      }
+      .wwpdn-item:first-child {
+        border-top: 0;
+      }
+      .wwpdn-item__header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .wwpdn-item__title {
+        font-size: var(--ww-type-body-size);
+        font-weight: 700;
+        color: var(--ww-text);
+      }
+      .wwpdn-item__meta {
+        margin-top: 6px;
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-text-sec);
+        line-height: 1.45;
+      }
+      .wwpdn-item__note {
+        margin-top: 8px;
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-text);
+        line-height: 1.55;
+      }
+      .wwpdn-set-list {
+        margin-top: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .wwpdn-set-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(80px, auto) minmax(80px, auto);
+        gap: 10px;
+        align-items: center;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: var(--ww-elevated);
+        color: var(--ww-text);
+        font-size: var(--ww-type-table-body-size);
+      }
+      .wwpdn-form {
+        display: flex;
+        flex-direction: column;
+        gap: var(--ww-space-5);
+      }
+      .wwpdn-footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .wwpdn-footer__primary {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-left: auto;
+      }
+      .wwpdn-form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .wwpdn-meta-value {
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text);
+      }
+      @media (max-width: 720px) {
+        .wwpdn-summary {
+          flex-direction: column;
+        }
+        .wwpdn-summary__media {
+          width: 100%;
+          max-width: 180px;
+        }
+        .wwpdn-set-row {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .wwpdn-form-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+    `}</style>
+  );
+}
+
+function DetailRow({ label, value, multiline = false }) {
   if (value === undefined || value === null || value === '') return null;
+
   return (
     <div className="wwa-detail-row">
       <span className="wwa-detail-label">{label}</span>
-      <span className="wwa-detail-value">{value}</span>
+      {multiline ? <div className="wwpdn-description">{value}</div> : <span className="wwa-detail-value">{value}</span>}
     </div>
   );
 }
 
-// sets may be an array of {type, kg, reps} maps, a plain integer count from
-// older data, or missing entirely — every shape must render safely.
+function ListRow({ label, values }) {
+  if (!Array.isArray(values) || values.length === 0) return null;
+
+  return (
+    <div className="wwa-detail-row">
+      <span className="wwa-detail-label">{label}</span>
+      <div className="wwpdn-list">
+        {values.map((value, index) => (
+          <span key={`${label}-${index}-${value}`} className="wwpdn-list-item">
+            {value}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SetList({ sets }) {
   if (Array.isArray(sets)) {
-    if (sets.length === 0) return <span className="wwa-detail-value">No set data</span>;
+    if (sets.length === 0) {
+      return <div className="wwpdn-item__meta">No set data</div>;
+    }
+
     return (
-      <div className="wwa-set-list">
-        {sets.map((s, i) => (
-          <span key={i} className="wwa-set-chip">
-            {SET_TYPE_LABELS[s?.type] || s?.type || 'Set'} · {s?.kg ?? '—'}kg × {s?.reps ?? '—'}
-          </span>
+      <div className="wwpdn-set-list">
+        {sets.map((setItem, index) => (
+          <div key={`set-${index}`} className="wwpdn-set-row">
+            <div>{SET_TYPE_LABELS[setItem?.type] || setItem?.type || 'Set'}</div>
+            <div>{setItem?.kg === '' || setItem?.kg === undefined || setItem?.kg === null ? '—' : `${setItem.kg} kg`}</div>
+            <div>{setItem?.reps === '' || setItem?.reps === undefined || setItem?.reps === null ? '—' : `${setItem.reps} reps`}</div>
+          </div>
         ))}
       </div>
     );
   }
+
   if (typeof sets === 'number') {
-    return <span className="wwa-detail-value">{sets} sets</span>;
+    return <div className="wwpdn-item__meta">{sets} sets</div>;
   }
-  return <span className="wwa-detail-value">No set data</span>;
+
+  return <div className="wwpdn-item__meta">No set data</div>;
 }
 
-// Only ever trusts a real `isCardio: true` flag to render the cardio-block
-// layout — anything merely cardio-shaped (e.g. muscle: "Cardio" without the
-// flag) renders as a normal gym exercise instead of being guessed at.
 function ExerciseRow({ exercise }) {
   if (exercise && exercise.isCardio === true) {
     return (
-      <div className="wwa-exercise-row">
-        <div className="wwa-exercise-name">
-          {exercise.name || 'Cardio block'}
+      <div className="wwpdn-item">
+        <div className="wwpdn-item__header">
+          <Clock3 aria-hidden="true" size={16} strokeWidth={2} />
+          <div className="wwpdn-item__title">{exercise.name || 'Cardio block'}</div>
           <Badge tone="brand">Cardio</Badge>
-          {exercise.tag && <Badge tone={exercise.tag === 'Primary' ? 'brand' : 'neutral'}>{exercise.tag}</Badge>}
+          {exercise.tag ? <Badge tone={exercise.tag === 'Primary' ? 'brand' : 'neutral'}>{exercise.tag}</Badge> : null}
         </div>
-        <div className="wwa-exercise-meta">
+        <div className="wwpdn-item__meta">
           {exercise.cardioActivity || '—'}
           {exercise.cardioMinutes !== undefined && exercise.cardioMinutes !== null ? ` · ${exercise.cardioMinutes} min` : ''}
         </div>
@@ -62,18 +346,18 @@ function ExerciseRow({ exercise }) {
     );
   }
 
-  const tag = exercise.tag || '';
   return (
-    <div className="wwa-exercise-row">
-      <div className="wwa-exercise-name">
-        {exercise.name || 'Unnamed exercise'}
-        {tag && <Badge tone={tag === 'Primary' ? 'brand' : 'neutral'}>{tag}</Badge>}
+    <div className="wwpdn-item">
+      <div className="wwpdn-item__header">
+        <Dumbbell aria-hidden="true" size={16} strokeWidth={2} />
+        <div className="wwpdn-item__title">{exercise.name || 'Unnamed exercise'}</div>
+        {exercise.tag ? <Badge tone={exercise.tag === 'Primary' ? 'brand' : 'neutral'}>{exercise.tag}</Badge> : null}
       </div>
-      <div className="wwa-exercise-meta">
+      <div className="wwpdn-item__meta">
         {exercise.muscle || '—'}
         {exercise.restTime !== undefined && exercise.restTime !== null ? ` · Rest ${exercise.restTime}s` : ''}
       </div>
-      {exercise.note && <div className="wwa-exercise-note">{exercise.note}</div>}
+      {exercise.note ? <div className="wwpdn-item__note">{exercise.note}</div> : null}
       <SetList sets={exercise.sets} />
     </div>
   );
@@ -86,19 +370,28 @@ function SessionCard({ session, index }) {
   const exercises = Array.isArray(session.exercises) ? session.exercises : [];
 
   return (
-    <div className="wwa-session-card">
-      <div className="wwa-session-header">
-        <span>Day {dayNumber}</span>
-        <span>{label}</span>
-        {session.type && <Badge tone="neutral">{session.type}</Badge>}
-        {session.estimatedMinutes ? <Badge tone="neutral">{session.estimatedMinutes} min</Badge> : null}
-        {isRestDay && <Badge tone="neutral">Rest Day</Badge>}
-        {!isRestDay && <Badge tone="neutral">{exercises.length} exercise{exercises.length === 1 ? '' : 's'}</Badge>}
+    <div className="wwpdn-session">
+      <div className="wwpdn-session__header">
+        <div className="wwpdn-session__title-group">
+          <div className="wwpdn-session__eyebrow">Day {dayNumber}</div>
+          <div className="wwpdn-session__title">{label}</div>
+        </div>
+        <div className="wwpdn-session__meta">
+          {session.type ? <Badge tone="neutral">{session.type}</Badge> : null}
+          {session.estimatedMinutes ? <Badge tone="neutral">{session.estimatedMinutes} min</Badge> : null}
+          {isRestDay ? <Badge tone="neutral">Rest Day</Badge> : <Badge tone="neutral">{exercises.length} item{exercises.length === 1 ? '' : 's'}</Badge>}
+        </div>
       </div>
-      {!isRestDay && (
-        exercises.length > 0
-          ? exercises.map((ex, i) => <ExerciseRow key={i} exercise={ex} />)
-          : <div className="wwa-exercise-meta">No exercises recorded for this session.</div>
+
+      {isRestDay ? (
+        <div className="wwpdn-session__rest">
+          <CalendarDays aria-hidden="true" size={16} strokeWidth={2} />
+          <span>Rest day</span>
+        </div>
+      ) : (
+        <div className="wwpdn-session__items">
+          {exercises.length > 0 ? exercises.map((exercise, index) => <ExerciseRow key={index} exercise={exercise} />) : <div className="wwpdn-session__rest">No exercises recorded for this session.</div>}
+        </div>
       )}
     </div>
   );
@@ -107,9 +400,6 @@ function SessionCard({ session, index }) {
 function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerciseCatalog, onClose, onSave, onDelete }) {
   const [isEditing, setIsEditing] = useState(false);
   const [form, setForm] = useState(null);
-  // Populated only for custom-plan editing (isEditing && isCustom) — the
-  // custom-mode counterpart of officialSessions below, using the same
-  // PlanSessionsEditor component in mode="custom".
   const [customSessions, setCustomSessions] = useState([]);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -117,9 +407,6 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
   const [successMsg, setSuccessMsg] = useState('');
   const planId = plan ? plan.id : null;
 
-  // Official-plan editing is a separate state track from the custom-plan
-  // `isEditing`/`form` above — kept fully independent so nothing here can
-  // change custom-plan edit behavior.
   const [isEditingOfficial, setIsEditingOfficial] = useState(false);
   const [officialForm, setOfficialForm] = useState(null);
   const [officialSessions, setOfficialSessions] = useState([]);
@@ -134,6 +421,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     setDeleting(false);
     setIsEditingOfficial(false);
     setOfficialForm(null);
+    setOfficialSessions([]);
   }, [planId]);
 
   if (!plan) return null;
@@ -142,6 +430,9 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
   const isCustom = !!plan.isCustom;
   const isActive = plan.isActive !== false;
   const designedBy = plan.designedBy && typeof plan.designedBy === 'object' ? plan.designedBy : null;
+  const isEditMode = isEditing || isEditingOfficial;
+  const canEdit = typeof onSave === 'function';
+  const canDelete = typeof onDelete === 'function';
 
   const startEdit = () => {
     setForm({
@@ -149,9 +440,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       description: plan.description || '',
       daysPerWeek: plan.daysPerWeek ?? '',
     });
-    setCustomSessions(
-      sessions.length > 0 ? customSessionsFromPlan(sessions) : buildDefaultCustomSessions(plan.daysPerWeek)
-    );
+    setCustomSessions(sessions.length > 0 ? customSessionsFromPlan(sessions) : buildDefaultCustomSessions(plan.daysPerWeek));
     setError('');
     setSuccessMsg('');
     setIsEditing(true);
@@ -163,12 +452,6 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     setError('');
   };
 
-  // Full custom-plan edit, reusing PlanSessionsEditor in mode="custom" (sets
-  // stay arrays of {type, kg, reps} — never converted to official-plan
-  // integer sets). level ("Custom") and type ("Gym") are intentionally never
-  // touched here: updateCustomRoutine in firestore_service.dart — the app's
-  // own edit path — never writes them either, so the app itself treats them
-  // as fixed once a custom plan is created.
   const handleSave = async () => {
     if (!form.name.trim()) {
       setError('Plan Name cannot be empty.');
@@ -181,7 +464,10 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     }
 
     const { sessions: builtSessions, error: sessionsError } = buildAndValidateCustomSessions(customSessions);
-    if (sessionsError) { setError(sessionsError); return; }
+    if (sessionsError) {
+      setError(sessionsError);
+      return;
+    }
 
     const changes = {};
     if (form.name.trim() !== (plan.name || '')) changes.name = form.name.trim();
@@ -210,9 +496,6 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     setSaving(false);
   };
 
-  // Official-plan edit: full form matching Add Plan's fields, reusing the
-  // exact same PlanSessionsEditor + buildAndValidateSessions used there so
-  // there's only one editor for the official-plan session/exercise shape.
   const startEditOfficial = () => {
     setOfficialForm({
       name: plan.name || '',
@@ -233,9 +516,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       designedByCredential: designedBy?.credential || '',
       designedByQuote: designedBy?.quote || '',
     });
-    setOfficialSessions(
-      sessions.length > 0 ? sessionsFromPlan(sessions) : buildDefaultSessions(plan.daysPerWeek)
-    );
+    setOfficialSessions(sessions.length > 0 ? sessionsFromPlan(sessions) : buildDefaultSessions(plan.daysPerWeek));
     setError('');
     setSuccessMsg('');
     setIsEditingOfficial(true);
@@ -248,9 +529,18 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
   };
 
   const handleSaveOfficial = async () => {
-    if (!officialForm.name.trim()) { setError('Plan Name cannot be empty.'); return; }
-    if (!officialForm.level) { setError('Level is required.'); return; }
-    if (!officialForm.type) { setError('Type is required.'); return; }
+    if (!officialForm.name.trim()) {
+      setError('Plan Name cannot be empty.');
+      return;
+    }
+    if (!officialForm.level) {
+      setError('Level is required.');
+      return;
+    }
+    if (!officialForm.type) {
+      setError('Type is required.');
+      return;
+    }
     const days = Number(officialForm.daysPerWeek);
     if (!Number.isInteger(days) || days <= 0) {
       setError('Days per Week must be a valid positive integer.');
@@ -263,7 +553,10 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     }
 
     const { sessions: builtSessions, error: sessionsError } = buildAndValidateSessions(officialSessions, days);
-    if (sessionsError) { setError(sessionsError); return; }
+    if (sessionsError) {
+      setError(sessionsError);
+      return;
+    }
 
     const equipmentList = parseCommaList(officialForm.equipment);
     const goalsList = parseCommaList(officialForm.goals);
@@ -275,9 +568,6 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       quote: officialForm.designedByQuote,
     });
 
-    // Diff-based, like every other edit in this codebase — untouched fields
-    // are never included, so updateDoc's partial write leaves them exactly
-    // as they were. isCustom/createdBy/createdAt are never written here.
     const changes = {};
     if (officialForm.name.trim() !== (plan.name || '')) changes.name = officialForm.name.trim();
     if (officialForm.description.trim() !== (plan.description || '')) changes.description = officialForm.description.trim();
@@ -332,8 +622,6 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     setError('');
     try {
       await onDelete(plan);
-      // On success the parent removes this plan and clears the selection,
-      // which unmounts this panel — no further local state update needed.
     } catch (err) {
       console.error(err);
       setError('Failed to delete plan. Please try again.');
@@ -341,319 +629,371 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     }
   };
 
-  return (
-    <div className="wwa-panel">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 }}>
-        <div className="wwa-panel-title" style={{ marginBottom: 0 }}>Plan Detail</div>
-        <button className="wwa-panel-close" onClick={onClose} aria-label="Close plan detail">✕</button>
+  const summary = (
+    <div className="wwpdn-summary">
+      <div className="wwpdn-summary__media">
+        {isValidImageUrl(plan.imageUrl) ? (
+          <img src={plan.imageUrl} alt={plan.title || plan.name || 'Plan'} />
+        ) : (
+          <div className="wwpdn-summary__fallback">No image</div>
+        )}
       </div>
-
-      {successMsg && (
-        <div className="wwa-status-pill" style={{ marginBottom: 16 }}>
-          <span className="wwa-status-dot" />
-          {successMsg}
+      <div className="wwpdn-summary__content">
+        <div className="wwpdn-summary__title">{plan.title || plan.name || 'Unnamed Plan'}</div>
+        <div className="wwpdn-summary__meta">
+          <Badge tone={sourceTone(plan)}>{sourceLabel(plan)}</Badge>
+          <Badge tone={levelTone(plan.level)}>{plan.level || 'Beginner'}</Badge>
+          <Badge tone="brand">{plan.type || plan.category || 'General'}</Badge>
+          <Badge tone={isActive ? 'success' : 'danger'}>{isActive ? 'Active' : 'Inactive'}</Badge>
         </div>
-      )}
-      {error && <div className="wwa-alert-error" style={{ marginBottom: 16 }}>{error}</div>}
-
-      {!isEditing && !isEditingOfficial && plan.imageUrl && (
-        <ImageThumb url={plan.imageUrl} size={64} icon="📋" />
-      )}
-
-      {isEditing ? (
-        <input
-          className="wwa-input"
-          value={form.name}
-          onChange={e => setForm(prev => ({ ...prev, name: e.target.value }))}
-          placeholder="Plan name"
-          style={{ marginBottom: 8, marginTop: 12, fontSize: 15, fontWeight: 700 }}
-        />
-      ) : isEditingOfficial ? (
-        <input
-          className="wwa-input"
-          value={officialForm.name}
-          onChange={e => setOfficialForm(prev => ({ ...prev, name: e.target.value }))}
-          placeholder="Plan name"
-          style={{ marginBottom: 8, marginTop: 12, fontSize: 15, fontWeight: 700 }}
-        />
-      ) : (
-        <div style={{ fontSize: '16px', fontWeight: 700, color: '#111827', marginBottom: 8, marginTop: plan.imageUrl ? 10 : 0 }}>
-          {plan.title || plan.name || 'Unnamed Plan'}
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 6, marginBottom: 20, flexWrap: 'wrap' }}>
-        <Badge tone={isCustom ? 'brand' : 'neutral'}>{isCustom ? 'Custom' : 'Official/System'}</Badge>
-        <Badge tone="neutral">{plan.level || 'Beginner'}</Badge>
-        <Badge tone="brand">{plan.type || plan.category || 'General'}</Badge>
-        <Badge tone={isActive ? 'success' : 'danger'}>{isActive ? 'Active' : 'Inactive'}</Badge>
       </div>
-
-      {isEditing ? (
-        <div className="wwa-form-grid" style={{ marginBottom: 18 }}>
-          <div className="wwa-field-full">
-            <label className="wwa-field-label">Description</label>
-            <input
-              className="wwa-input"
-              value={form.description}
-              onChange={e => setForm(prev => ({ ...prev, description: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Days per Week</label>
-            <input
-              type="number"
-              min="1"
-              className="wwa-input"
-              value={form.daysPerWeek}
-              onChange={e => setForm(prev => ({ ...prev, daysPerWeek: e.target.value }))}
-            />
-          </div>
-        </div>
-      ) : isEditingOfficial ? (
-        <div className="wwa-form-grid" style={{ marginBottom: 4 }}>
-          <div>
-            <label className="wwa-field-label">Level</label>
-            <select
-              className="wwa-select"
-              value={officialForm.level}
-              onChange={e => setOfficialForm(prev => ({
-                ...prev, level: e.target.value, matchLevel: e.target.value,
-              }))}
-            >
-              {(levelOptions || [officialForm.level]).map(l => <option key={l} value={l}>{l}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="wwa-field-label">Type</label>
-            <select
-              className="wwa-select"
-              value={officialForm.type}
-              onChange={e => setOfficialForm(prev => ({
-                ...prev, type: e.target.value, matchSport: e.target.value,
-              }))}
-            >
-              {(typeOptions || [officialForm.type]).map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="wwa-field-label">Days per Week</label>
-            <input
-              type="number"
-              min="1"
-              className="wwa-input"
-              value={officialForm.daysPerWeek}
-              onChange={e => setOfficialForm(prev => ({ ...prev, daysPerWeek: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Duration (weeks)</label>
-            <input
-              type="number"
-              min="1"
-              className="wwa-input"
-              value={officialForm.durationWeeks}
-              onChange={e => setOfficialForm(prev => ({ ...prev, durationWeeks: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Equipment</label>
-            <input
-              className="wwa-input"
-              value={officialForm.equipment}
-              onChange={e => setOfficialForm(prev => ({ ...prev, equipment: e.target.value }))}
-              placeholder="Comma-separated, e.g. Barbell, Dumbbells, Bench"
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Goals</label>
-            <input
-              className="wwa-input"
-              value={officialForm.goals}
-              onChange={e => setOfficialForm(prev => ({ ...prev, goals: e.target.value }))}
-              placeholder="Comma-separated, e.g. Build Muscle, Build Strength"
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Match Sport</label>
-            <input
-              className="wwa-input"
-              value={officialForm.matchSport}
-              onChange={e => setOfficialForm(prev => ({ ...prev, matchSport: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Match Level</label>
-            <input
-              className="wwa-input"
-              value={officialForm.matchLevel}
-              onChange={e => setOfficialForm(prev => ({ ...prev, matchLevel: e.target.value }))}
-            />
-          </div>
-          <div className="wwa-field-full">
-            <label className="wwa-field-label">Match Goals</label>
-            <input
-              className="wwa-input"
-              value={officialForm.matchGoals}
-              onChange={e => setOfficialForm(prev => ({ ...prev, matchGoals: e.target.value }))}
-              placeholder="Comma-separated — feeds the Plan Match algorithm"
-            />
-          </div>
-          <div className="wwa-field-full">
-            <label className="wwa-field-label">Description</label>
-            <input
-              className="wwa-input"
-              value={officialForm.description}
-              onChange={e => setOfficialForm(prev => ({ ...prev, description: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Image URL</label>
-            <input
-              className="wwa-input"
-              value={officialForm.imageUrl}
-              onChange={e => setOfficialForm(prev => ({ ...prev, imageUrl: e.target.value }))}
-              placeholder="https://… (optional)"
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Status</label>
-            <div style={{ paddingTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#374151' }}>
-                <input
-                  type="checkbox"
-                  checked={officialForm.isActive}
-                  onChange={e => setOfficialForm(prev => ({ ...prev, isActive: e.target.checked }))}
-                />
-                Active (visible to users)
-              </label>
-            </div>
-          </div>
-
-          <div className="wwa-field-full" style={{ marginTop: 8 }}>
-            <div className="wwa-panel-subtitle" style={{ marginBottom: 4 }}>Designed By (optional)</div>
-          </div>
-          <div>
-            <label className="wwa-field-label">Name</label>
-            <input
-              className="wwa-input"
-              value={officialForm.designedByName}
-              onChange={e => setOfficialForm(prev => ({ ...prev, designedByName: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Title</label>
-            <input
-              className="wwa-input"
-              value={officialForm.designedByTitle}
-              onChange={e => setOfficialForm(prev => ({ ...prev, designedByTitle: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Credential</label>
-            <input
-              className="wwa-input"
-              value={officialForm.designedByCredential}
-              onChange={e => setOfficialForm(prev => ({ ...prev, designedByCredential: e.target.value }))}
-            />
-          </div>
-          <div className="wwa-field-full">
-            <label className="wwa-field-label">Quote</label>
-            <input
-              className="wwa-input"
-              value={officialForm.designedByQuote}
-              onChange={e => setOfficialForm(prev => ({ ...prev, designedByQuote: e.target.value }))}
-            />
-          </div>
-        </div>
-      ) : (
-        <div style={{ marginBottom: 20 }}>
-          <DetailRow label="Description" value={plan.description || '—'} />
-          <DetailRow label="Creator" value={creatorLabel} />
-          <DetailRow label="Days per Week" value={plan.daysPerWeek ?? '—'} />
-          <DetailRow label="Duration (weeks)" value={plan.durationWeeks ?? undefined} />
-          <DetailRow label="Equipment" value={formatEquipment(plan.equipment)} />
-          <DetailRow label="Goals" value={formatCommaList(plan.goals) || undefined} />
-          <DetailRow label="Match Goals" value={formatCommaList(plan.matchGoals) || undefined} />
-          <DetailRow label="Match Sport" value={plan.matchSport || undefined} />
-          <DetailRow label="Match Level" value={plan.matchLevel || undefined} />
-          {designedBy && (
-            <>
-              <DetailRow label="Designed By" value={designedBy.name || undefined} />
-              <DetailRow label="Designer Title" value={designedBy.title || undefined} />
-              <DetailRow label="Designer Credential" value={designedBy.credential || undefined} />
-              <DetailRow label="Designer Quote" value={designedBy.quote || undefined} />
-            </>
-          )}
-          <DetailRow label="Created At" value={formatDate(plan.createdAt)} />
-          <DetailRow label="Updated At" value={plan.updatedAt ? formatDate(plan.updatedAt) : '—'} />
-        </div>
-      )}
-
-      {isEditingOfficial && (
-        <>
-          <div className="wwa-panel-subtitle" style={{ marginTop: 4 }}>Training Sessions (Week Schedule)</div>
-          <PlanSessionsEditor
-            sessions={officialSessions}
-            onChange={setOfficialSessions}
-            exerciseCatalog={exerciseCatalog || []}
-            mode="official"
-          />
-        </>
-      )}
-
-      {isEditing && (
-        <>
-          <div className="wwa-panel-subtitle" style={{ marginTop: 4 }}>Training Sessions</div>
-          <PlanSessionsEditor
-            sessions={customSessions}
-            onChange={setCustomSessions}
-            exerciseCatalog={exerciseCatalog || []}
-            mode="custom"
-          />
-        </>
-      )}
-
-      {isEditing ? (
-        <div className="wwa-cell-actions" style={{ marginTop: 16, marginBottom: 20 }}>
-          <button className="wwa-btn wwa-btn-primary" onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving...' : 'Save Changes'}
-          </button>
-          <button className="wwa-btn wwa-btn-secondary" onClick={cancelEdit} disabled={saving}>
-            Cancel
-          </button>
-        </div>
-      ) : isEditingOfficial ? (
-        <div className="wwa-cell-actions" style={{ marginTop: 16, marginBottom: 20 }}>
-          <button className="wwa-btn wwa-btn-primary" onClick={handleSaveOfficial} disabled={officialSaving}>
-            {officialSaving ? 'Saving...' : 'Save Changes'}
-          </button>
-          <button className="wwa-btn wwa-btn-secondary" onClick={cancelEditOfficial} disabled={officialSaving}>
-            Cancel
-          </button>
-        </div>
-      ) : (
-        <div className="wwa-cell-actions" style={{ marginBottom: 20 }}>
-          <button className="wwa-btn wwa-btn-sm wwa-btn-brand-soft" onClick={isCustom ? startEdit : startEditOfficial}>
-            Edit
-          </button>
-          <button className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={handleDeleteClick} disabled={deleting}>
-            {deleting ? 'Deleting...' : 'Delete'}
-          </button>
-        </div>
-      )}
-
-      {!isEditing && !isEditingOfficial && (
-        <>
-          <div className="wwa-panel-subtitle" style={{ marginBottom: 8 }}>Sessions</div>
-          {sessions.length > 0 ? (
-            sessions.map((session, i) => <SessionCard key={i} session={session} index={i} />)
-          ) : (
-            <div className="wwa-detail-value" style={{ color: '#9ca3af' }}>No session data available.</div>
-          )}
-        </>
-      )}
     </div>
+  );
+
+  const scheduleSection = (
+    <section className="wwa-detail-section">
+      <div className="wwa-detail-section__title">Training Schedule</div>
+      <div className="wwpdn-schedule">
+        {sessions.length > 0 ? sessions.map((session, index) => <SessionCard key={`${plan.id}-session-${index}`} session={session} index={index} />) : <div className="wwa-help-text">No session data available.</div>}
+      </div>
+    </section>
+  );
+
+  return (
+    <>
+      <PlanDetailStyles />
+      <DetailDrawer
+        title="Plan"
+        width={isEditMode ? 'wide' : 'default'}
+        viewportLocked
+        open={Boolean(plan)}
+        onClose={onClose}
+        actions={
+          !isEditMode && canEdit ? (
+            <button type="button" className="wwa-btn wwa-btn-secondary" onClick={isCustom ? startEdit : startEditOfficial}>
+              <Pencil aria-hidden="true" size={16} strokeWidth={2} />
+              Edit
+            </button>
+          ) : null
+        }
+        summary={summary}
+        footer={
+          isEditing ? (
+            <div className="wwpdn-footer">
+              {canDelete ? (
+                <button type="button" className="wwa-btn wwa-btn-danger" onClick={handleDeleteClick} disabled={deleting}>
+                  <Trash2 aria-hidden="true" size={16} strokeWidth={2} />
+                  {deleting ? 'Deleting...' : 'Delete'}
+                </button>
+              ) : null}
+              <div className="wwpdn-footer__primary">
+                <button type="button" className="wwa-btn wwa-btn-secondary" onClick={cancelEdit} disabled={saving}>
+                  Cancel
+                </button>
+                <button type="button" className="wwa-btn wwa-btn-primary" onClick={handleSave} disabled={saving}>
+                  {saving ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </div>
+          ) : isEditingOfficial ? (
+            <div className="wwpdn-footer">
+              {canDelete ? (
+                <button type="button" className="wwa-btn wwa-btn-danger" onClick={handleDeleteClick} disabled={deleting}>
+                  <Trash2 aria-hidden="true" size={16} strokeWidth={2} />
+                  {deleting ? 'Deleting...' : 'Delete'}
+                </button>
+              ) : null}
+              <div className="wwpdn-footer__primary">
+                <button type="button" className="wwa-btn wwa-btn-secondary" onClick={cancelEditOfficial} disabled={officialSaving}>
+                  Cancel
+                </button>
+                <button type="button" className="wwa-btn wwa-btn-primary" onClick={handleSaveOfficial} disabled={officialSaving}>
+                  {officialSaving ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="wwpdn-footer">
+              {canDelete ? (
+                <button type="button" className="wwa-btn wwa-btn-danger" onClick={handleDeleteClick} disabled={deleting}>
+                  <Trash2 aria-hidden="true" size={16} strokeWidth={2} />
+                  {deleting ? 'Deleting...' : 'Delete'}
+                </button>
+              ) : null}
+            </div>
+          )
+        }
+      >
+        {(successMsg || error) ? (
+          <div className="wwpdn-message-stack">
+            {successMsg ? (
+              <div className="wwa-status-pill">
+                <span className="wwa-status-dot" />
+                {successMsg}
+              </div>
+            ) : null}
+            {error ? <div className="wwa-alert-error">{error}</div> : null}
+          </div>
+        ) : null}
+
+        {isEditing ? (
+          <div className="wwpdn-form">
+            <FormSection title="Basic Information" columns={2}>
+              <FormField label="Plan Name" labelFor="custom-plan-name" required>
+                <input
+                  id="custom-plan-name"
+                  className="wwa-input"
+                  value={form.name}
+                  onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
+                />
+              </FormField>
+              <FormField label="Days per Week" labelFor="custom-plan-days" required>
+                <input
+                  id="custom-plan-days"
+                  type="number"
+                  min="1"
+                  className="wwa-input"
+                  value={form.daysPerWeek}
+                  onChange={(event) => setForm((prev) => ({ ...prev, daysPerWeek: event.target.value }))}
+                />
+              </FormField>
+              <FormField label="Description" labelFor="custom-plan-description" fullWidth>
+                <input
+                  id="custom-plan-description"
+                  className="wwa-input"
+                  value={form.description}
+                  onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))}
+                />
+              </FormField>
+            </FormSection>
+
+            <FormSection title="Training Schedule" columns={1}>
+              <PlanSessionsEditor
+                sessions={customSessions}
+                onChange={setCustomSessions}
+                exerciseCatalog={exerciseCatalog || []}
+                mode="custom"
+              />
+            </FormSection>
+          </div>
+        ) : isEditingOfficial ? (
+          <div className="wwpdn-form">
+            <FormSection title="Basic Information" columns={2}>
+              <FormField label="Plan Name" labelFor="official-plan-name" required>
+                <input
+                  id="official-plan-name"
+                  className="wwa-input"
+                  value={officialForm.name}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, name: event.target.value }))}
+                />
+              </FormField>
+              <SelectField
+                id="official-plan-level"
+                label="Level"
+                value={officialForm.level}
+                onChange={(event) =>
+                  setOfficialForm((prev) => ({
+                    ...prev,
+                    level: event.target.value,
+                    matchLevel: event.target.value,
+                  }))
+                }
+                options={levelOptions || [officialForm.level]}
+              />
+              <SelectField
+                id="official-plan-type"
+                label="Type"
+                value={officialForm.type}
+                onChange={(event) =>
+                  setOfficialForm((prev) => ({
+                    ...prev,
+                    type: event.target.value,
+                    matchSport: event.target.value,
+                  }))
+                }
+                options={typeOptions || [officialForm.type]}
+              />
+              <FormField label="Days per Week" labelFor="official-plan-days" required>
+                <input
+                  id="official-plan-days"
+                  type="number"
+                  min="1"
+                  className="wwa-input"
+                  value={officialForm.daysPerWeek}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, daysPerWeek: event.target.value }))}
+                />
+              </FormField>
+              <FormField label="Duration (weeks)" labelFor="official-plan-duration" required>
+                <input
+                  id="official-plan-duration"
+                  type="number"
+                  min="1"
+                  className="wwa-input"
+                  value={officialForm.durationWeeks}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, durationWeeks: event.target.value }))}
+                />
+              </FormField>
+              <FormField label="Status" labelFor="official-plan-status" fullWidth>
+                <label id="official-plan-status" className="wwa-toggle-inline">
+                  <input
+                    type="checkbox"
+                    checked={officialForm.isActive}
+                    onChange={(event) => setOfficialForm((prev) => ({ ...prev, isActive: event.target.checked }))}
+                  />
+                  <span>Active (visible to users)</span>
+                </label>
+              </FormField>
+            </FormSection>
+
+            <FormSection title="Plan Matching" columns={2}>
+              <FormField label="Match Sport" labelFor="official-plan-match-sport">
+                <input
+                  id="official-plan-match-sport"
+                  className="wwa-input"
+                  value={officialForm.matchSport}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, matchSport: event.target.value }))}
+                />
+              </FormField>
+              <FormField label="Match Level" labelFor="official-plan-match-level">
+                <input
+                  id="official-plan-match-level"
+                  className="wwa-input"
+                  value={officialForm.matchLevel}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, matchLevel: event.target.value }))}
+                />
+              </FormField>
+              <FormField label="Goals" labelFor="official-plan-goals">
+                <input
+                  id="official-plan-goals"
+                  className="wwa-input"
+                  value={officialForm.goals}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, goals: event.target.value }))}
+                  placeholder="Comma-separated, e.g. Build Muscle, Build Strength"
+                />
+              </FormField>
+              <FormField label="Equipment" labelFor="official-plan-equipment">
+                <input
+                  id="official-plan-equipment"
+                  className="wwa-input"
+                  value={officialForm.equipment}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, equipment: event.target.value }))}
+                  placeholder="Comma-separated, e.g. Barbell, Dumbbells, Bench"
+                />
+              </FormField>
+              <FormField label="Match Goals" labelFor="official-plan-match-goals" fullWidth>
+                <input
+                  id="official-plan-match-goals"
+                  className="wwa-input"
+                  value={officialForm.matchGoals}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, matchGoals: event.target.value }))}
+                  placeholder="Comma-separated — feeds the Plan Match algorithm"
+                />
+              </FormField>
+            </FormSection>
+
+            <FormSection title="Presentation" columns={2}>
+              <FormField label="Description" labelFor="official-plan-description" fullWidth>
+                <input
+                  id="official-plan-description"
+                  className="wwa-input"
+                  value={officialForm.description}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, description: event.target.value }))}
+                />
+              </FormField>
+              <FormField label="Image URL" labelFor="official-plan-image">
+                <input
+                  id="official-plan-image"
+                  className="wwa-input"
+                  value={officialForm.imageUrl}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, imageUrl: event.target.value }))}
+                  placeholder="https://… (optional)"
+                />
+              </FormField>
+            </FormSection>
+
+            <FormSection title="Designed By" description="Optional plan attribution shown to users." columns={2}>
+              <FormField label="Name" labelFor="official-plan-designer-name">
+                <input
+                  id="official-plan-designer-name"
+                  className="wwa-input"
+                  value={officialForm.designedByName}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, designedByName: event.target.value }))}
+                />
+              </FormField>
+              <FormField label="Title" labelFor="official-plan-designer-title">
+                <input
+                  id="official-plan-designer-title"
+                  className="wwa-input"
+                  value={officialForm.designedByTitle}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, designedByTitle: event.target.value }))}
+                />
+              </FormField>
+              <FormField label="Credential" labelFor="official-plan-designer-credential">
+                <input
+                  id="official-plan-designer-credential"
+                  className="wwa-input"
+                  value={officialForm.designedByCredential}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, designedByCredential: event.target.value }))}
+                />
+              </FormField>
+              <FormField label="Quote" labelFor="official-plan-designer-quote" fullWidth>
+                <input
+                  id="official-plan-designer-quote"
+                  className="wwa-input"
+                  value={officialForm.designedByQuote}
+                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, designedByQuote: event.target.value }))}
+                />
+              </FormField>
+            </FormSection>
+
+            <FormSection title="Training Schedule" columns={1}>
+              <PlanSessionsEditor
+                sessions={officialSessions}
+                onChange={setOfficialSessions}
+                exerciseCatalog={exerciseCatalog || []}
+                mode="official"
+              />
+            </FormSection>
+          </div>
+        ) : (
+          <>
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Overview</div>
+              <DetailRow label="Description" value={plan.description || undefined} multiline />
+              <DetailRow label="Creator" value={creatorLabel} />
+              <DetailRow label="Creator UID" value={plan.createdBy || undefined} />
+              <DetailRow label="Duration" value={plan.durationWeeks ? `${plan.durationWeeks} weeks` : undefined} />
+              <DetailRow label="Days per Week" value={plan.daysPerWeek ?? undefined} />
+              <DetailRow label="Equipment" value={formatEquipment(plan.equipment) || undefined} />
+              <ListRow label="Goals" values={Array.isArray(plan.goals) ? plan.goals.filter(Boolean) : parseCommaList(plan.goals)} />
+              <DetailRow label="Created" value={plan.createdAt ? formatDate(plan.createdAt) : undefined} />
+              <DetailRow label="Updated" value={plan.updatedAt ? formatDate(plan.updatedAt) : undefined} />
+            </section>
+
+            {(plan.matchSport || plan.matchLevel || (Array.isArray(plan.matchGoals) && plan.matchGoals.length > 0)) ? (
+              <section className="wwa-detail-section">
+                <div className="wwa-detail-section__title">Matching</div>
+                <DetailRow label="Match Sport" value={plan.matchSport || undefined} />
+                <DetailRow label="Match Level" value={plan.matchLevel || undefined} />
+                <ListRow label="Match Goals" values={Array.isArray(plan.matchGoals) ? plan.matchGoals.filter(Boolean) : parseCommaList(plan.matchGoals)} />
+              </section>
+            ) : null}
+
+            {designedBy && Object.values(designedBy).some(Boolean) ? (
+              <section className="wwa-detail-section">
+                <div className="wwa-detail-section__title">Designed By</div>
+                <DetailRow label="Name" value={designedBy.name || undefined} />
+                <DetailRow label="Title" value={designedBy.title || undefined} />
+                <DetailRow label="Credential" value={designedBy.credential || undefined} />
+                {designedBy.quote ? <div className="wwpdn-designer-quote">“{designedBy.quote}”</div> : null}
+              </section>
+            ) : null}
+
+            {scheduleSection}
+          </>
+        )}
+      </DetailDrawer>
+    </>
   );
 }
 

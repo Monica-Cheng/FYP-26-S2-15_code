@@ -885,6 +885,11 @@ function AdminStyles() {
         flex-direction: column;
         overflow: hidden;
       }
+      .wwa-detail-drawer-viewport-locked {
+        position: sticky;
+        top: var(--ww-space-4);
+        max-height: calc(100vh - (var(--ww-space-4) * 2));
+      }
       .wwa-detail-drawer-wide {
         width: var(--ww-drawer-width-wide);
       }
@@ -940,6 +945,7 @@ function AdminStyles() {
         display: flex;
         flex-direction: column;
         gap: 20px;
+        min-height: 0;
       }
 
       .wwa-form-section {
@@ -1386,8 +1392,11 @@ function AdminStyles() {
         .wwa-split-layout { flex-direction: column; }
         .wwa-split-side, .wwa-split-side-wide { width: 100%; }
         .wwa-detail-drawer,
-        .wwa-detail-drawer-wide {
+        .wwa-detail-drawer-wide,
+        .wwa-detail-drawer-viewport-locked {
           width: 100%;
+          max-height: none;
+          position: static;
         }
         .wwa-filterbar__left,
         .wwa-filterbar__right {
