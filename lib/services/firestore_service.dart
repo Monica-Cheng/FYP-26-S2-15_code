@@ -3766,16 +3766,30 @@ class FirestoreService {
 
   // ---------------------------------------------------------------------------
   // Stream of weight logs for live updates, ordered by date ascending.
+  // Bounded to the most recent [limit] entries (previously fully
+  // unbounded) — queries descending + limit so the cap always keeps the
+  // NEWEST entries (never silently drops the true latest log, which
+  // progress_screen.dart's summary row and log-weight prefill both rely
+  // on), then reverses back to ascending so every existing caller's
+  // "first = oldest, last = newest" assumption still holds. 400 comfortably
+  // covers a full year of daily logging (the writer enforces at most one
+  // entry per calendar day — see saveWeightEntry() above) plus headroom.
   // ---------------------------------------------------------------------------
-  Stream<List<Map<String, dynamic>>> getWeightLogsStream(String uid) {
+  Stream<List<Map<String, dynamic>>> getWeightLogsStream(
+    String uid, {
+    int limit = 400,
+  }) {
     return _db
         .collection(Collections.users)
         .doc(uid)
         .collection('weightLogs')
-        .orderBy('date', descending: false)
+        .orderBy('date', descending: true)
+        .limit(limit)
         .snapshots()
         .map((snapshot) => snapshot.docs
             .map((doc) => {'id': doc.id, ...doc.data()})
+            .toList()
+            .reversed
             .toList());
   }
 

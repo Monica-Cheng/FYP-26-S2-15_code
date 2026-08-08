@@ -1,6 +1,7 @@
 // lib/screens/progress/progress_screen.dart
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -114,6 +115,20 @@ class _ProgressScreenState extends State<ProgressScreen> {
   bool _weightGoalActive = false;
   bool _weightExpanded = true;
   StreamSubscription<List<Map<String, dynamic>>>? _weightSub;
+
+  // The weight chart's OWN range control — fully decoupled from
+  // _timeFilter (which stays scoped to the Calories/Gym charts above,
+  // untouched). Reusing _timeFilter here previously meant the weight
+  // chart inherited its "This Week" default, hiding almost all history
+  // on load for a goal-tracking chart where the whole point is the
+  // longer trend. Rolling windows (last 30/90/180 days), not
+  // calendar-anchored like _timeFilter's Week/Month/Year — a
+  // calendar-month "Month" option would reintroduce the exact same
+  // "too-narrow on some days" bug this replaces. See
+  // _buildWeightRangeFilter() and _buildWeightSection()'s filterStart
+  // computation.
+  int _weightChartRange = 0;
+  static const List<String> _weightRangeLabels = ['1M', '3M', '6M', 'All'];
 
   // Activity Calendar section — collapsed by default (unlike
   // _weightExpanded above) since it's a new, opt-in addition to an
@@ -619,6 +634,51 @@ class _ProgressScreenState extends State<ProgressScreen> {
     if (diff.inDays == 0) return 'Today';
     if (diff.inDays == 1) return 'Yesterday';
     return '${diff.inDays} days ago';
+  }
+
+  // Compact "Jan 5" calendar date for the weight chart's tap tooltip —
+  // deliberately not _formatDate() above (relative-to-now, "3 days ago",
+  // wrong here) and not the existing _formatShortDate() further below
+  // (day-month-year, e.g. "5 Jan 2026" — needlessly wide for a tooltip).
+  // Reuses the existing _monthNames constant that _formatShortDate()
+  // already defines rather than duplicating the month-abbreviation list
+  // a third time. NOT used for the axis labels below (see
+  // _formatWeightAxisDate()) — a tooltip is a single floating label with
+  // room to spare, a fundamentally different space budget than 4
+  // simultaneous axis labels competing for the same row.
+  String _formatWeightChartDate(DateTime date) {
+    return '${_monthNames[date.month - 1]} ${date.day}';
+  }
+
+  // Compact numeric "M/d" (no leading zeros, e.g. "8/12", "9/1") for the
+  // weight chart's fixed 4-label x-axis row below — shorter than the
+  // "Jan 5" tooltip format specifically because 4 of these render at
+  // once side by side, where every extra pixel of width narrows the
+  // margin before adjacent labels crowd each other.
+  String _formatWeightAxisDate(DateTime date) {
+    return '${date.month}/${date.day}';
+  }
+
+  // Rounds a raw axis-tick interval up to a "nice" 1/2/5x10^n step (e.g.
+  // 7.3 -> 10, 2.4 -> 5, 43 -> 50) instead of the raw division result —
+  // otherwise the weight chart's y-axis showed awkward values like
+  // "42, 49, 57, 64" instead of "40, 50, 60, 70".
+  double _niceAxisInterval(double raw) {
+    if (raw <= 0) return 1;
+    final magnitude = math.pow(10, (math.log(raw) / math.ln10).floor())
+        .toDouble();
+    final normalized = raw / magnitude;
+    double niceNormalized;
+    if (normalized <= 1) {
+      niceNormalized = 1;
+    } else if (normalized <= 2) {
+      niceNormalized = 2;
+    } else if (normalized <= 5) {
+      niceNormalized = 5;
+    } else {
+      niceNormalized = 10;
+    }
+    return niceNormalized * magnitude;
   }
 
   String _formatDuration(int? seconds) {
@@ -1245,6 +1305,66 @@ class _ProgressScreenState extends State<ProgressScreen> {
     );
   }
 
+  // Weight chart's own range control — same segmented-pill visual as
+  // _buildTimeFilter() above, but a fully separate, independently-wired
+  // control. Purely a client-side filter over already-loaded _weightLogs
+  // (no refetch needed, unlike _buildTimeFilter()'s tap handler, which
+  // triggers a fresh _loadChartData() network call) — so tapping a
+  // segment here is just a setState, nothing async.
+  Widget _buildWeightRangeFilter() {
+    return Container(
+      height: 34,
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: WW.elevated,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Stack(
+        children: [
+          AnimatedAlign(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOut,
+            alignment: Alignment(
+              -1 + (2 * _weightChartRange) / (_weightRangeLabels.length - 1),
+              0,
+            ),
+            child: FractionallySizedBox(
+              widthFactor: 1 / _weightRangeLabels.length,
+              heightFactor: 1,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: WW.card,
+                  borderRadius: BorderRadius.circular(7),
+                ),
+              ),
+            ),
+          ),
+          Row(
+            children: List.generate(_weightRangeLabels.length, (i) {
+              final active = i == _weightChartRange;
+              return Expanded(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => setState(() => _weightChartRange = i),
+                  child: Center(
+                    child: Text(
+                      _weightRangeLabels[i],
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                        color: active ? WW.text : WW.textSec,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildWeightSection() {
     double? startWeight;
     double? currentWeight;
@@ -1260,25 +1380,100 @@ class _ProgressScreenState extends State<ProgressScreen> {
       }
     }
 
+    // Weight chart's own range, driven by _weightChartRange (see
+    // _buildWeightRangeFilter()) — deliberately NOT _timeFilter, and
+    // deliberately a ROLLING window (last N days), not calendar-anchored
+    // like _timeFilter's Week/Month/Year: a calendar-month "Month" option
+    // would reintroduce the same "too little data visible on some days"
+    // bug this replaces (e.g. only 1 day of history showing if today
+    // happens to be the 1st). Applied as a DERIVED filtered list, never
+    // mutating _weightLogs itself — _weightLogs.last must keep pointing
+    // at the true latest entry regardless of chart filter, both for
+    // currentWeight above and for _showLogWeightSheet()'s prefill.
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    DateTime filterStart;
+    if (_weightChartRange == 0) {
+      filterStart = today.subtract(const Duration(days: 30));
+    } else if (_weightChartRange == 1) {
+      filterStart = today.subtract(const Duration(days: 90));
+    } else if (_weightChartRange == 2) {
+      filterStart = today.subtract(const Duration(days: 180));
+    } else {
+      // All — no rolling lower bound. Anchored to the earliest real entry
+      // purely so the goal-line/x-interval fallbacks below always have a
+      // concrete start to work with; _weightLogs is already
+      // ascending-ordered (see getWeightLogsStream()), so .first is the
+      // earliest by construction.
+      final earliestDateStr = _weightLogs.isNotEmpty
+          ? _weightLogs.first['date'] as String?
+          : null;
+      filterStart = earliestDateStr != null
+          ? (DateTime.tryParse(earliestDateStr) ?? today)
+          : today;
+    }
+    final filterEnd = now;
+    final filteredLogs = _weightChartRange == 3
+        ? _weightLogs
+        : _weightLogs.where((log) {
+            final dateStr = log['date'] as String?;
+            if (dateStr == null) return false;
+            final date = DateTime.tryParse(dateStr);
+            if (date == null) return false;
+            return !date.isBefore(filterStart);
+          }).toList();
+
+    // Real calendar-time x-axis (millisecondsSinceEpoch) instead of array
+    // index — points now space out by actual elapsed time between entries
+    // (previously e.g. 3 logs spread across 3 months rendered as 3 evenly
+    // -spaced points, implying a steady day-to-day trend that wasn't
+    // real), and date labels/tooltip can read the date straight off
+    // spot.x instead of indexing back into _weightLogs.
     final spots = <FlSpot>[];
-    for (int i = 0; i < _weightLogs.length; i++) {
-      final w = _weightLogs[i]['weightKg'];
-      if (w is num) {
-        spots.add(FlSpot(i.toDouble(), w.toDouble()));
-      }
+    for (final log in filteredLogs) {
+      final w = log['weightKg'];
+      final dateStr = log['date'] as String?;
+      if (w is! num || dateStr == null) continue;
+      final date = DateTime.tryParse(dateStr);
+      if (date == null) continue;
+      spots.add(FlSpot(date.millisecondsSinceEpoch.toDouble(), w.toDouble()));
     }
 
+    // +/-5 (was +/-3) — a bit more vertical breathing room above/below the
+    // real data range, part of this section's layout/collision fix (the
+    // plotted line was reported running into the bottom axis labels).
     double minY = 40;
     double maxY = 120;
     if (spots.isNotEmpty) {
       final weights = spots.map((s) => s.y).toList();
-      minY = (weights.reduce((a, b) => a < b ? a : b) - 3).clamp(30, 200);
-      maxY = (weights.reduce((a, b) => a > b ? a : b) + 3).clamp(50, 250);
+      minY = (weights.reduce((a, b) => a < b ? a : b) - 5).clamp(30, 200);
+      maxY = (weights.reduce((a, b) => a > b ? a : b) + 5).clamp(50, 250);
       if (_goalWeight != null && _weightGoalActive) {
         minY = minY.clamp(0, _goalWeight! - 2);
         maxY = maxY < _goalWeight! + 2 ? _goalWeight! + 2 : maxY;
       }
     }
+    // Rounded to a clean 1/2/5x10^n step (see _niceAxisInterval()) rather
+    // than the raw division result, which produced awkward label values
+    // like "42, 49, 57, 64" instead of "40, 50, 60, 70".
+    final yLabelInterval = _niceAxisInterval((maxY - minY) / 4);
+    // Sized to comfortably fit the widest label this scale can produce
+    // (maxY's digit count), rather than a fixed size that only worked for
+    // 2-digit numbers — maxY can reach 3 digits (clamped up to 250).
+    final yAxisReservedSize =
+        (maxY.toStringAsFixed(0).length * 7.0) + 16;
+
+    // Fallback x-bounds for the goal line when there's 0 or 1 points in
+    // the filtered range to anchor to — spans the selected range window
+    // itself (rather than an arbitrary placeholder) so the dashed goal
+    // line still reads sensibly even with sparse data in range. Also set
+    // as the chart's explicit minX/maxX below, and reused again further
+    // down to compute the 4 fixed x-axis label positions — one shared
+    // source of truth for "what the visible window is" across the plot,
+    // the goal line, and the axis labels, instead of each guessing at it
+    // separately.
+    final filterStartMillis = filterStart.millisecondsSinceEpoch.toDouble();
+    final filterEndMillis = filterEnd.millisecondsSinceEpoch.toDouble();
 
     return Column(
       children: [
@@ -1410,25 +1605,53 @@ class _ProgressScreenState extends State<ProgressScreen> {
                 : Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      _buildWeightRangeFilter(),
+                      const SizedBox(height: 12),
                       SizedBox(
-                        height: 160,
+                        height: 190,
                         child: LineChart(
                           LineChartData(
+                            minX: filterStartMillis,
+                            maxX: filterEndMillis,
                             minY: minY,
                             maxY: maxY,
                             gridData: const FlGridData(show: false),
                             borderData: FlBorderData(show: false),
-                            titlesData: const FlTitlesData(
+                            titlesData: FlTitlesData(
                               leftTitles: AxisTitles(
+                                sideTitles: SideTitles(
+                                  showTitles: true,
+                                  reservedSize: yAxisReservedSize,
+                                  interval: yLabelInterval,
+                                  getTitlesWidget: (value, meta) {
+                                    return Padding(
+                                      padding: const EdgeInsets.only(
+                                        right: 4,
+                                      ),
+                                      child: Text(
+                                        value.toStringAsFixed(0),
+                                        style: const TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                          color: WW.textSec,
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                              rightTitles: const AxisTitles(
                                 sideTitles: SideTitles(showTitles: false),
                               ),
-                              rightTitles: AxisTitles(
+                              topTitles: const AxisTitles(
                                 sideTitles: SideTitles(showTitles: false),
                               ),
-                              topTitles: AxisTitles(
-                                sideTitles: SideTitles(showTitles: false),
-                              ),
-                              bottomTitles: AxisTitles(
+                              // Disabled — the bottom-axis date labels are
+                              // now rendered by a plain, fixed 4-label Row
+                              // right below this chart (see below) instead
+                              // of fl_chart's own tick-generation, so
+                              // there's nothing left for this to draw.
+                              bottomTitles: const AxisTitles(
                                 sideTitles: SideTitles(showTitles: false),
                               ),
                             ),
@@ -1461,23 +1684,24 @@ class _ProgressScreenState extends State<ProgressScreen> {
                               ),
                               if (_goalWeight != null && _weightGoalActive)
                                 LineChartBarData(
-                                  spots: spots.isEmpty
-                                      ? [
-                                          FlSpot(0, _goalWeight!),
-                                          FlSpot(1, _goalWeight!),
-                                        ]
-                                      : spots.length == 1
-                                      ? [
-                                          FlSpot(0, _goalWeight!),
-                                          FlSpot(1, _goalWeight!),
-                                        ]
-                                      : [
-                                          FlSpot(0, _goalWeight!),
-                                          FlSpot(
-                                            (spots.length - 1).toDouble(),
-                                            _goalWeight!,
-                                          ),
-                                        ],
+                                  // Always the full visible window
+                                  // (filterStart to filterEnd — same as
+                                  // the chart's own minX/maxX above), not
+                                  // spots.first.x/spots.last.x — a goal is
+                                  // a constant target that applies across
+                                  // the whole visible range regardless of
+                                  // where the actual logged data happens
+                                  // to start/end. Using the data's own
+                                  // span here previously made the goal
+                                  // line visually start partway across
+                                  // wider ranges (e.g. 6M) whenever
+                                  // logging didn't begin until partway
+                                  // through the window, reading like a
+                                  // data gap instead of a constant target.
+                                  spots: [
+                                    FlSpot(filterStartMillis, _goalWeight!),
+                                    FlSpot(filterEndMillis, _goalWeight!),
+                                  ],
                                   isCurved: false,
                                   color: WW.teal,
                                   barWidth: 1.5,
@@ -1501,13 +1725,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
                                         ),
                                       );
                                     }
-                                    final idx = spot.x.toInt();
-                                    final date = idx < _weightLogs.length
-                                        ? _weightLogs[idx]['date'] as String? ??
-                                              ''
-                                        : '';
+                                    final date =
+                                        DateTime.fromMillisecondsSinceEpoch(
+                                          spot.x.toInt(),
+                                        );
                                     return LineTooltipItem(
-                                      '${spot.y.toStringAsFixed(1)} kg\n$date',
+                                      '${spot.y.toStringAsFixed(1)} kg\n'
+                                      '${_formatWeightChartDate(date)}',
                                       const TextStyle(
                                         color: Colors.white,
                                         fontSize: 11,
@@ -1519,6 +1743,54 @@ class _ProgressScreenState extends State<ProgressScreen> {
                               ),
                             ),
                           ),
+                        ),
+                      ),
+                      // Fixed 4-label x-axis row, rendered entirely by
+                      // this code — deliberately NOT fl_chart's own
+                      // bottomTitles/interval/getTitlesWidget mechanism
+                      // (that's now disabled below, showTitles: false).
+                      // Tuning fl_chart's interval math (span/4, then a
+                      // pixel-width-aware LayoutBuilder version) still
+                      // left labels cramped depending on where real log
+                      // dates happened to fall — fl_chart's own tick
+                      // placement (getBestInitialIntervalValue's "nice"
+                      // snapping, plus minIncluded/maxIncluded forcing
+                      // extra edge ticks — the same mechanism the prior
+                      // maxIncluded: false fix addressed for the right
+                      // edge only) isn't something this code fully
+                      // controls. Always exactly 4 labels — start, 1/3,
+                      // 2/3, end of [filterStart, filterEnd] — laid out
+                      // with a plain spaceBetween Row instead, so count
+                      // and spacing no longer depend on fl_chart's
+                      // internal tick-generation at all. Since fl_chart
+                      // never generates a bottom-axis tick anymore, its
+                      // minIncluded/maxIncluded forced-edge-label
+                      // mechanism (the earlier collision's root cause)
+                      // can't fire here — not just disabled via a flag,
+                      // structurally inapplicable.
+                      Padding(
+                        padding: EdgeInsets.only(left: yAxisReservedSize),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: List.generate(4, (i) {
+                            final labelDate =
+                                DateTime.fromMillisecondsSinceEpoch(
+                                  (filterStartMillis +
+                                          (filterEndMillis -
+                                                  filterStartMillis) *
+                                              i /
+                                              3)
+                                      .round(),
+                                );
+                            return Text(
+                              _formatWeightAxisDate(labelDate),
+                              style: const TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                                color: WW.textSec,
+                              ),
+                            );
+                          }),
                         ),
                       ),
                       const SizedBox(height: 12),

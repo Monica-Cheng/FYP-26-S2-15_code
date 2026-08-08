@@ -1908,12 +1908,37 @@ function normalizeAdminDesignedBy(value) {
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
 
+// Canonical plan.type values. "Running" was renamed to "Cardio" (see
+// functions/scripts/migrate_running_to_cardio.js for the one-time data
+// migration this pairs with) and "Combine" added as a new third value —
+// this only governs plans/{id}.type (validated below) and, by extension,
+// matchSport when it defaults to type. matchSport itself stays free-text
+// when the admin sets it explicitly (see normalizeOfficialPlanData below),
+// since it's used for fuzzy substring matching in plan_match_screen.dart,
+// not as a strict enum. Never touches the unrelated lowercase 'gym'/
+// 'rest'/'cardio'/'combined' type fields on plan.sessions[] entries or on
+// sessions/{id} docs (logged workouts) — those are separate namespaces.
+const VALID_PLAN_TYPES = ["Gym", "Cardio", "Combine"];
+
+function requireValidPlanType(value, fieldName) {
+  const normalized = requireNonEmptyAdminString(value, fieldName);
+
+  if (!VALID_PLAN_TYPES.includes(normalized)) {
+    throw new HttpsError(
+        "invalid-argument",
+        `${fieldName} must be one of: ${VALID_PLAN_TYPES.join(", ")}.`,
+    );
+  }
+
+  return normalized;
+}
+
 function normalizeOfficialPlanData(rawData) {
   const data = rawData || {};
 
   const name = requireNonEmptyAdminString(data.name, "Plan name");
   const level = requireNonEmptyAdminString(data.level, "Level");
-  const type = requireNonEmptyAdminString(data.type, "Type");
+  const type = requireValidPlanType(data.type, "Type");
 
   const daysPerWeek = Number(data.daysPerWeek);
   const durationWeeks = Number(data.durationWeeks);
@@ -1972,6 +1997,14 @@ function normalizeOfficialPlanData(rawData) {
       typeof data.imageUrl === "string" ?
         data.imageUrl.trim() :
         "",
+    // Admin-only curation flag for a future "Featured Plans" admin UI —
+    // defaults to false for every official plan, including brand-new ones
+    // (adminCreateOfficialPlan below has no separate default to set; it
+    // gets this for free by calling this same normalizer). Deliberately
+    // absent from the custom-plan update path in adminUpdatePlan's
+    // allowedFields — custom/coach plans can never set this field, by
+    // omission from that allowlist rather than a runtime check here.
+    featured: data.featured === true,
   };
 
   const designedBy = normalizeAdminDesignedBy(data.designedBy);
@@ -2126,6 +2159,7 @@ exports.adminUpdatePlan = onCall(async (request) => {
       "matchSport",
       "imageUrl",
       "designedBy",
+      "featured",
     ]);
 
     const unsafeField = Object.keys(requestedChanges)

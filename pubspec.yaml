@@ -46,6 +46,9 @@ dependencies:
   # JPEG encoding for session photos (see outdoor_cardio_screen.dart's
   # _encodeImageForSession) — dart:ui has no JPEG encoder of its own.
   image: ^4.9.1
+  # Explore Plans images (plan.imageUrl) — cached network image loading with
+  # built-in placeholder/error-widget support.
+  cached_network_image: ^3.4.1
 
 dev_dependencies:
   flutter_test:
