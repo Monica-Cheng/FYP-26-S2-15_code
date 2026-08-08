@@ -368,56 +368,81 @@ class _ClubScreenState extends State<ClubScreen> {
     final weeklyXp = (entry['weeklyXp'] as int?) ?? 0;
     final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
     final photoBase64 = entry['photoBase64'] as String?;
-    return Container(
-      decoration: BoxDecoration(
-        color: WW.card,
-        border: Border(
-          left: BorderSide(
-            color: isMe ? WW.text : Colors.transparent,
-            width: 3,
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _openLeaderboardProfile(entry, isMe: isMe),
+      child: Container(
+        decoration: BoxDecoration(
+          color: WW.card,
+          border: Border(
+            left: BorderSide(
+              color: isMe ? WW.text : Colors.transparent,
+              width: 3,
+            ),
+            bottom: isLast
+                ? BorderSide.none
+                : const BorderSide(color: _kDivider, width: 0.5),
           ),
-          bottom: isLast
-              ? BorderSide.none
-              : const BorderSide(color: _kDivider, width: 0.5),
         ),
-      ),
-      padding: EdgeInsets.fromLTRB(isMe ? 17 : 20, 12, 20, 12),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 28,
-            child: Center(
-              child: Text(
-                '#$rank',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: isFirst ? FontWeight.w800 : FontWeight.w700,
-                  color: isFirst ? WW.text : WW.textSec,
+        padding: EdgeInsets.fromLTRB(isMe ? 17 : 20, 12, 20, 12),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 28,
+              child: Center(
+                child: Text(
+                  '#$rank',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: isFirst ? FontWeight.w800 : FontWeight.w700,
+                    color: isFirst ? WW.text : WW.textSec,
+                  ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(width: 10),
-          _avatar(initial, photoBase64: photoBase64, isMe: isMe),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  name,
-                  style: WW.rowName.copyWith(
-                    fontWeight: isMe ? FontWeight.w700 : FontWeight.w600,
+            const SizedBox(width: 10),
+            _avatar(initial, photoBase64: photoBase64, isMe: isMe),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name,
+                    style: WW.rowName.copyWith(
+                      fontWeight: isMe ? FontWeight.w700 : FontWeight.w600,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 2),
-                Text(levelLabel, style: WW.rowSecondary),
-              ],
+                  const SizedBox(height: 2),
+                  Text(levelLabel, style: WW.rowSecondary),
+                ],
+              ),
             ),
-          ),
-          Text('${_fmtXp(weeklyXp)} XP', style: WW.rowStat),
-        ],
+            Text('${_fmtXp(weeklyXp)} XP', style: WW.rowStat),
+          ],
+        ),
       ),
+    );
+  }
+
+  // Tapping your own row opens the existing own-profile screen
+  // (Routes.profile) rather than user_profile_screen.dart, which is
+  // built specifically for viewing OTHER people (Follow/Unfollow,
+  // someone else's posts) — same navigation FeedPostCard's avatar/name
+  // already uses for other users (see its _openProfile()).
+  void _openLeaderboardProfile(Map<String, dynamic> entry, {required bool isMe}) {
+    if (isMe) {
+      context.push(Routes.profile);
+      return;
+    }
+    final uid = entry['uid'] as String?;
+    if (uid == null || uid.isEmpty) return;
+    context.push(
+      Routes.userProfile,
+      extra: {
+        'uid': uid,
+        'authorName': entry['displayName'] as String?,
+      },
     );
   }
 
