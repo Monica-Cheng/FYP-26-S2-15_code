@@ -1,688 +1,685 @@
-import React, { useState, useEffect } from 'react';
-import { functions } from '../firebase';
+import React, { useEffect, useState } from 'react';
 import { httpsCallable } from 'firebase/functions';
+import {
+  Activity,
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  ClipboardList,
+  Dumbbell,
+  FileText,
+  HeartPulse,
+  MessageSquare,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  Trophy,
+  UserCog,
+  User,
+  Users,
+} from 'lucide-react';
+import { functions } from '../firebase';
+import AdminStyles from '../styles/AdminStyles';
+import MetricCard from '../components/ui/MetricCard';
+import PageHeader from '../components/ui/PageHeader';
+import SkeletonBlock from '../components/ui/SkeletonBlock';
+import ErrorState from '../components/ui/ErrorState';
+import EmptyState from '../components/ui/EmptyState';
 import { toDate, formatDate } from '../utils/dateUtils';
-
-// Shared color palette for this page — keeps stat cards, icons and
-// quick-action tiles visually consistent with each other.
-const COLORS = {
-  primary: { base: '#6c63ff', light: '#eef0ff' },
-  cyan: { base: '#48cae4', light: '#e8f8fb' },
-  green: { base: '#06d6a0', light: '#e5fbf3' },
-  red: { base: '#ff6b6b', light: '#ffeded' },
-  amber: { base: '#ffd166', light: '#fff6df' },
-};
 
 function DashboardStyles() {
   return (
     <style>{`
-      .wwdash-header-row {
+      .wwdash-page {
         display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        flex-wrap: wrap;
-        gap: 12px;
-        margin-bottom: 28px;
-      }
-      .wwdash-title {
-        font-size: 26px;
-        font-weight: 800;
-        color: #111827;
-        letter-spacing: -0.02em;
-        margin-bottom: 6px;
-      }
-      .wwdash-subtitle {
-        color: #9ca3af;
-        font-size: 14px;
+        flex-direction: column;
+        gap: var(--ww-space-6);
       }
       .wwdash-live-pill {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
-        font-size: 12px;
-        font-weight: 600;
-        color: #06a97e;
-        background: #e5fbf3;
+        gap: 8px;
+        min-height: 32px;
         padding: 6px 12px;
         border-radius: 999px;
-        white-space: nowrap;
+        border: 1px solid color-mix(in srgb, var(--ww-success) 14%, transparent);
+        background: var(--ww-card);
+        color: var(--ww-text-sec);
+        font-size: var(--ww-type-secondary-size);
+        font-weight: 600;
       }
       .wwdash-live-dot {
-        width: 6px;
-        height: 6px;
+        width: 8px;
+        height: 8px;
         border-radius: 50%;
-        background: #06d6a0;
-        box-shadow: 0 0 0 0 rgba(6, 214, 160, 0.5);
-        animation: wwdash-pulse 1.8s infinite;
+        background: var(--ww-success);
       }
-      @keyframes wwdash-pulse {
-        0% { box-shadow: 0 0 0 0 rgba(6, 214, 160, 0.5); }
-        70% { box-shadow: 0 0 0 6px rgba(6, 214, 160, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(6, 214, 160, 0); }
-      }
-
-      .wwdash-stats-grid {
+      .wwdash-primary-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-        gap: 20px;
-        margin-bottom: 28px;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: var(--ww-space-4);
       }
-      .wwdash-stat-card {
-        background: #ffffff;
-        border-radius: 16px;
-        padding: 22px 24px;
-        border: 1px solid #eef0f4;
-        border-top: 3px solid var(--accent);
-        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
-        transition: transform 0.15s ease, box-shadow 0.15s ease;
+      .wwdash-primary-grid .wwa-metric-card {
+        min-height: 0;
+        padding: 18px;
+        box-shadow: none;
+      }
+      .wwdash-primary-grid .wwa-metric-card__value {
+        font-size: 28px;
+      }
+      .wwdash-loading-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: var(--ww-space-4);
+      }
+      .wwdash-loading-grid .wwa-skeleton {
+        border-radius: var(--ww-radius-card);
+      }
+      .wwdash-main-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.8fr) minmax(320px, 1fr);
+        gap: var(--ww-space-5);
+        align-items: start;
+      }
+      .wwdash-side-stack {
+        display: grid;
+        gap: var(--ww-space-5);
+      }
+      .wwdash-section-header {
         display: flex;
-        flex-direction: column;
-        gap: 10px;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 16px;
       }
-      .wwdash-stat-card:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 10px 24px rgba(16, 24, 40, 0.08);
+      .wwdash-section-title {
+        font-size: var(--ww-type-section-title-size);
+        font-weight: var(--ww-type-section-title-weight);
+        color: var(--ww-primary-dark);
+        line-height: 1.2;
       }
-      .wwdash-stat-top {
+      .wwdash-section-subtitle {
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        color: var(--ww-text-sec);
+        margin-top: 4px;
+      }
+      .wwdash-quick-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .wwdash-quick-action {
+        width: 100%;
+        min-height: 48px;
+        padding: 12px 14px;
+        border-radius: 12px;
+        border: 1px solid var(--ww-divider);
+        background: var(--ww-card);
         display: flex;
         align-items: center;
         justify-content: space-between;
-      }
-      .wwdash-stat-title {
-        font-size: 12.5px;
-        font-weight: 700;
-        color: #6b7280;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-      }
-      .wwdash-stat-icon {
-        width: 36px;
-        height: 36px;
-        border-radius: 10px;
-        background: var(--accent-light);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 16px;
-        flex-shrink: 0;
-      }
-      .wwdash-stat-value {
-        font-size: 30px;
-        font-weight: 700;
-        color: #111827;
-        line-height: 1;
-      }
-      .wwdash-stat-sub {
-        font-size: 13px;
-        color: #9ca3af;
-      }
-
-      .wwdash-panel {
-        background: #ffffff;
-        border-radius: 16px;
-        padding: 24px;
-        border: 1px solid #eef0f4;
-        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
-      }
-      .wwdash-panel-title {
-        font-size: 16px;
-        font-weight: 700;
-        color: #111827;
-      }
-      .wwdash-panel-subtitle {
-        font-size: 13px;
-        color: #9ca3af;
-        margin-top: 2px;
-        margin-bottom: 18px;
-      }
-      .wwdash-actions-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
         gap: 12px;
-      }
-      .wwdash-action {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 14px 16px;
-        border-radius: 12px;
-        border: 1px solid #eef0f4;
-        background: #fafafe;
-        color: #1f2937;
-        font-size: 14px;
-        font-weight: 600;
-        font-family: inherit;
-        cursor: pointer;
         text-align: left;
-        transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+        transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
       }
-      .wwdash-action:hover {
-        border-color: var(--accent);
-        background: var(--accent-light);
-        color: var(--accent);
-        transform: translateY(-2px);
-        box-shadow: 0 8px 18px rgba(16, 24, 40, 0.08);
+      .wwdash-quick-action:hover {
+        border-color: var(--ww-primary);
+        background: var(--ww-hover);
       }
-      .wwdash-action-icon {
-        width: 34px;
-        height: 34px;
-        border-radius: 9px;
-        background: var(--accent-light);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 16px;
-        flex-shrink: 0;
-      }
-
-      .wwdash-skeleton-card {
-        border-radius: 16px;
-        height: 128px;
-        background: linear-gradient(90deg, #eef0f4 25%, #f7f8fa 37%, #eef0f4 63%);
-        background-size: 400% 100%;
-        animation: wwdash-shimmer 1.4s ease infinite;
-      }
-      .wwdash-skeleton-panel {
-        border-radius: 16px;
-        height: 160px;
-        background: linear-gradient(90deg, #eef0f4 25%, #f7f8fa 37%, #eef0f4 63%);
-        background-size: 400% 100%;
-        animation: wwdash-shimmer 1.4s ease infinite;
-      }
-      @keyframes wwdash-shimmer {
-        0% { background-position: 100% 50%; }
-        100% { background-position: 0 50%; }
-      }
-
-      .wwdash-alert-item {
+      .wwdash-quick-action__content {
         display: flex;
         align-items: center;
         gap: 12px;
-        padding: 12px 0;
-        border-bottom: 1px solid #f3f4f6;
+        min-width: 0;
       }
-      .wwdash-alert-item:last-child { border-bottom: none; }
-      .wwdash-alert-icon {
-        width: 36px;
-        height: 36px;
+      .wwdash-quick-action__icon {
+        width: 32px;
+        height: 32px;
         border-radius: 10px;
-        display: flex;
+        background: var(--ww-elevated);
+        color: var(--ww-primary-dark);
+        display: inline-flex;
         align-items: center;
         justify-content: center;
-        font-size: 16px;
         flex-shrink: 0;
       }
-      .wwdash-alert-icon-warning { background: #fff8e6; }
-      .wwdash-alert-icon-danger { background: #ffeded; }
-      .wwdash-alert-title { font-size: 14px; font-weight: 600; color: #111827; }
-      .wwdash-alert-sub { font-size: 12px; color: #9ca3af; margin-top: 2px; }
-
-      .wwdash-empty-note { font-size: 13px; color: #9ca3af; padding: 8px 0; }
-
-      .wwdash-overview-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 20px;
-        margin-top: 20px;
+      .wwdash-quick-action__label {
+        font-size: var(--ww-type-body-size);
+        font-weight: 600;
+        color: var(--ww-text);
       }
-
-      .wwdash-insight-row,
+      .wwdash-quick-action__arrow {
+        color: var(--ww-text-sec);
+        flex-shrink: 0;
+      }
+      .wwdash-health-list,
+      .wwdash-attention-list,
+      .wwdash-recent-list {
+        display: flex;
+        flex-direction: column;
+      }
+      .wwdash-health-row,
       .wwdash-attention-row,
       .wwdash-recent-row {
         display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 11px 0;
-        border-bottom: 1px solid #f3f4f6;
-        font-size: 13.5px;
-        color: #374151;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 14px 0;
+        border-bottom: 1px solid var(--ww-divider);
       }
-
-      .wwdash-insight-row:last-child,
+      .wwdash-health-row:first-child,
+      .wwdash-attention-row:first-child,
+      .wwdash-recent-row:first-child {
+        padding-top: 0;
+      }
+      .wwdash-health-row:last-child,
       .wwdash-attention-row:last-child,
       .wwdash-recent-row:last-child {
+        padding-bottom: 0;
         border-bottom: none;
       }
-
-      .wwdash-insight-icon,
-      .wwdash-recent-icon {
-        width: 24px;
+      .wwdash-health-row__icon,
+      .wwdash-attention-row__icon,
+      .wwdash-recent-row__icon {
+        width: 32px;
+        height: 32px;
+        border-radius: 10px;
+        background: var(--ww-elevated);
+        color: var(--ww-primary-dark);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         flex-shrink: 0;
-        text-align: center;
       }
-
-      .wwdash-attention-panel {
-        border-top: 3px solid #ff6b6b;
+      .wwdash-attention-row__icon-warning {
+        background: var(--ww-warning-bg);
+        color: #92400E;
       }
-
-      .wwdash-attention-row {
-        color: #a83232;
+      .wwdash-attention-row__icon-danger {
+        background: var(--ww-danger-bg);
+        color: #b91c1c;
       }
-
-      .wwdash-recent-text {
+      .wwdash-attention-row__icon-success {
+        background: var(--ww-success-bg);
+        color: #166534;
+      }
+      .wwdash-health-row__main,
+      .wwdash-attention-row__main,
+      .wwdash-recent-row__main {
         flex: 1;
         min-width: 0;
       }
-
-      .wwdash-recent-date {
-        color: #9ca3af;
-        font-size: 12px;
+      .wwdash-health-row__top {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 6px;
+      }
+      .wwdash-health-row__label,
+      .wwdash-attention-row__title,
+      .wwdash-recent-row__title {
+        font-size: var(--ww-type-body-size);
+        font-weight: 600;
+        color: var(--ww-text);
+      }
+      .wwdash-health-row__value {
+        font-size: 18px;
+        font-weight: 800;
+        color: var(--ww-primary-dark);
+        white-space: nowrap;
+      }
+      .wwdash-health-row__meta,
+      .wwdash-attention-row__detail,
+      .wwdash-recent-row__detail {
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        color: var(--ww-text-sec);
+      }
+      .wwdash-health-progress {
+        width: 100%;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--ww-elevated);
+        overflow: hidden;
+        margin-top: 10px;
+      }
+      .wwdash-health-progress__fill {
+        height: 100%;
+        border-radius: inherit;
+        background: var(--ww-primary);
+      }
+      .wwdash-recent-row {
+        align-items: center;
+      }
+      .wwdash-recent-row__date {
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        color: var(--ww-text-sec);
         white-space: nowrap;
         margin-left: auto;
       }
-
-      .wwdash-error {
-        color: #cc3333;
-        background: #ffeded;
-        border: 1px solid #ffd2d2;
-        border-radius: 12px;
-        padding: 14px 16px;
-        font-size: 13px;
+      .wwdash-empty-compact {
+        padding: 12px 0 0;
       }
-
-      @media (max-width: 900px) {
-        .wwdash-overview-grid {
-          grid-template-columns: 1fr;
+      @media (max-width: 1200px) {
+        .wwdash-primary-grid,
+        .wwdash-loading-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
-
-      @media (max-width: 480px) {
-        .wwdash-title { font-size: 22px; }
-        .wwdash-stat-value { font-size: 26px; }
-        .wwdash-stat-card, .wwdash-panel { padding: 18px; }
+      @media (max-width: 960px) {
+        .wwdash-main-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      @media (max-width: 640px) {
+        .wwdash-primary-grid,
+        .wwdash-loading-grid,
+        .wwdash-quick-actions {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .wwdash-health-row__top {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 4px;
+        }
+        .wwdash-recent-row {
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+        .wwdash-recent-row__date {
+          margin-left: 44px;
+        }
       }
     `}</style>
   );
 }
 
-function StatCard({ title, value, sub, icon, color }) {
-  return (
-    <div
-      className="wwdash-stat-card"
-      style={{ '--accent': color.base, '--accent-light': color.light }}
-    >
-      <div className="wwdash-stat-top">
-        <span className="wwdash-stat-title">{title}</span>
-        <span className="wwdash-stat-icon">{icon}</span>
-      </div>
-      <div className="wwdash-stat-value">{value}</div>
-      <div className="wwdash-stat-sub">{sub}</div>
-    </div>
-  );
+function getActivityIcon(text = '') {
+  const lower = text.toLowerCase();
+
+  if (lower.includes('post') || lower.includes('comment') || lower.includes('reaction')) return FileText;
+  if (lower.includes('message')) return MessageSquare;
+  if (lower.includes('challenge')) return Trophy;
+  if (lower.includes('plan')) return ClipboardList;
+  if (lower.includes('user')) return User;
+  if (lower.includes('exercise')) return Dumbbell;
+  if (lower.includes('partner') || lower.includes('application')) return UserCog;
+  return Activity;
 }
 
-
-function QuickAction({ icon, label, color, onClick }) {
+function QuickAction({ icon: Icon, label, onClick }) {
   return (
-    <button
-      type="button"
-      className="wwdash-action"
-      style={{
-        '--accent': color.base,
-        '--accent-light': color.light,
-      }}
-      onClick={onClick}
-    >
-      <span className="wwdash-action-icon">{icon}</span>
-      <span>{label}</span>
+    <button type="button" className="wwdash-quick-action" onClick={onClick}>
+      <span className="wwdash-quick-action__content">
+        <span className="wwdash-quick-action__icon">
+          <Icon aria-hidden="true" size={16} strokeWidth={2} />
+        </span>
+        <span className="wwdash-quick-action__label">{label}</span>
+      </span>
+      <span className="wwdash-quick-action__arrow" aria-hidden="true">
+        <ArrowRight size={16} strokeWidth={2} />
+      </span>
     </button>
   );
 }
-
-
 
 function Dashboard({ setCurrentPage }) {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
 
-useEffect(() => {
-  const fetchDashboard = async () => {
-    setLoading(true);
-    setLoadError('');
+  useEffect(() => {
+    const fetchDashboard = async () => {
+      setLoading(true);
+      setLoadError('');
 
-    try {
-      const adminGetAnalyticsDashboard = httpsCallable(
-        functions,
-        'adminGetAnalyticsDashboard'
-      );
+      try {
+        const adminGetAnalyticsDashboard = httpsCallable(functions, 'adminGetAnalyticsDashboard');
+        const result = await adminGetAnalyticsDashboard();
+        const receivedStats = result.data?.stats;
 
-      const result = await adminGetAnalyticsDashboard();
-      const receivedStats = result.data?.stats;
+        if (!receivedStats) {
+          throw new Error('Dashboard data was missing from the server response.');
+        }
 
-      if (!receivedStats) {
-        throw new Error(
-          'Dashboard data was missing from the server response.'
-        );
+        const recentActivity = Array.isArray(receivedStats.recentActivity)
+          ? receivedStats.recentActivity.map((event) => {
+              const date = toDate(event.createdAt);
+
+              return {
+                ...event,
+                dateLabel: date ? formatDate(date) : '—',
+              };
+            })
+          : [];
+
+        setStats({
+          ...receivedStats,
+          recentActivity,
+        });
+      } catch (err) {
+        console.error('Failed to load dashboard:', err);
+        const detail = err?.code ? ` (${err.code})` : '';
+        setLoadError(`Failed to load dashboard.${detail}`);
+      } finally {
+        setLoading(false);
       }
+    };
 
-      const recentActivity = Array.isArray(
-        receivedStats.recentActivity
-      )
-        ? receivedStats.recentActivity.map(event => {
-            const date = toDate(event.createdAt);
+    fetchDashboard();
+  }, []);
 
-            return {
-              ...event,
-              dateLabel: date ? formatDate(date) : '—',
-            };
-          })
-        : [];
+  const percentage = (value, total) => (total > 0 ? Math.round((value / total) * 100) : 0);
 
-      setStats({
-        ...receivedStats,
-        recentActivity,
-      });
-    } catch (err) {
-      console.error('Failed to load dashboard:', err);
+  const onboardedPct = stats ? percentage(stats.onboarded, stats.totalUsers) : 0;
+  const healthPct = stats ? percentage(stats.healthConnected, stats.totalUsers) : 0;
+  const premiumPct = stats ? percentage(stats.premiumUsers, stats.totalUsers) : 0;
+  const activeUsers = stats ? stats.totalUsers - stats.suspended : 0;
+  const activePct = stats ? percentage(activeUsers, stats.totalUsers) : 0;
 
-      const detail = err?.code ? ` (${err.code})` : '';
-
-      setLoadError(`Failed to load dashboard.${detail}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  fetchDashboard();
-}, []);
-
-const percentage = (value, total) =>
-  total > 0 ? Math.round((value / total) * 100) : 0;
-
-const onboardedPct = stats
-  ? percentage(stats.onboarded, stats.totalUsers)
-  : 0;
-
-const healthPct = stats
-  ? percentage(stats.healthConnected, stats.totalUsers)
-  : 0;
-
-const premiumPct = stats
-  ? percentage(stats.premiumUsers, stats.totalUsers)
-  : 0;
-
-const activeUsers = stats
-  ? stats.totalUsers - stats.suspended
-  : 0;
-
-const activePct = stats
-  ? percentage(activeUsers, stats.totalUsers)
-  : 0;
-
-const platformInsights =
-  stats && stats.totalUsers > 0
+  const primaryMetrics = stats
     ? [
-        `${onboardedPct}% of registered users have completed onboarding.`,
-        `${healthPct}% of users have connected health data.`,
-        `${activePct}% of users are currently active.`,
-        `${premiumPct}% of users are currently premium.`,
+        {
+          label: 'Total Users',
+          value: stats.totalUsers,
+          meta: 'Registered accounts',
+        },
+        {
+          label: 'Total Plans',
+          value: stats.totalPlans,
+          meta: 'In plan library',
+        },
+        {
+          label: 'Total Exercises',
+          value: stats.totalExercises,
+          meta: 'In exercise library',
+        },
+        {
+          label: 'Pending BP Approvals',
+          value: stats.pendingBP,
+          meta: 'Awaiting review',
+          statusLabel: stats.pendingBP > 0 ? 'Needs review' : 'Up to date',
+          statusTone: stats.pendingBP > 0 ? 'warning' : 'neutral',
+        },
       ]
     : [];
 
-const attentionItems = [];
+  const platformHealth = stats
+    ? [
+        {
+          label: 'Onboarding completion',
+          value: `${onboardedPct}%`,
+          detail: `${stats.onboarded} of ${stats.totalUsers} users completed onboarding`,
+          progress: onboardedPct,
+          icon: ShieldCheck,
+        },
+        {
+          label: 'Health connections',
+          value: `${healthPct}%`,
+          detail: `${stats.healthConnected} users connected health data`,
+          progress: healthPct,
+          icon: HeartPulse,
+        },
+        {
+          label: 'Active accounts',
+          value: `${activePct}%`,
+          detail: `${activeUsers} active, ${stats.suspended} suspended`,
+          progress: activePct,
+          icon: Activity,
+        },
+        {
+          label: 'Premium adoption',
+          value: `${premiumPct}%`,
+          detail: `${stats.premiumUsers} premium users currently registered`,
+          progress: premiumPct,
+          icon: Sparkles,
+        },
+      ]
+    : [];
 
-if (stats) {
-  const notConnected =
-    stats.totalUsers - stats.healthConnected;
+  const attentionItems = [];
 
-  const notOnboarded =
-    stats.totalUsers - stats.onboarded;
+  if (stats) {
+    const notConnected = stats.totalUsers - stats.healthConnected;
+    const notOnboarded = stats.totalUsers - stats.onboarded;
 
-  if (notConnected > 0) {
-    attentionItems.push(
-      `⚠️ ${notConnected} user${
-        notConnected === 1 ? '' : 's'
-      } have not connected health data`
-    );
+    if (stats.pendingBP > 0) {
+      attentionItems.push({
+        key: 'pending-bp',
+        title: `${stats.pendingBP} business partner application${stats.pendingBP === 1 ? '' : 's'} pending review`,
+        detail: 'Review applications from the Business Partners page.',
+        tone: 'warning',
+      });
+    }
+
+    if (stats.suspended > 0) {
+      attentionItems.push({
+        key: 'suspended-users',
+        title: `${stats.suspended} suspended user${stats.suspended === 1 ? '' : 's'}`,
+        detail: 'Suspended accounts are excluded from active-user operations.',
+        tone: 'danger',
+      });
+    }
+
+    if (notConnected > 0) {
+      attentionItems.push({
+        key: 'health-connections',
+        title: `${notConnected} user${notConnected === 1 ? '' : 's'} without health data`,
+        detail: 'Health integrations remain incomplete for part of the user base.',
+        tone: 'warning',
+      });
+    }
+
+    if (notOnboarded > 0) {
+      attentionItems.push({
+        key: 'onboarding',
+        title: `${notOnboarded} user${notOnboarded === 1 ? '' : 's'} have not completed onboarding`,
+        detail: 'These accounts may have reduced engagement or incomplete profiles.',
+        tone: 'warning',
+      });
+    }
+
+    if (stats.totalUsers > 0 && stats.premiumUsers === 0) {
+      attentionItems.push({
+        key: 'premium-users',
+        title: 'No premium users currently registered',
+        detail: 'Premium conversion is currently at 0%.',
+        tone: 'danger',
+      });
+    }
   }
-
-  if (stats.suspended > 0) {
-    attentionItems.push(
-      `🚫 ${stats.suspended} user${
-        stats.suspended === 1 ? '' : 's'
-      } currently suspended`
-    );
-  }
-
-  if (stats.pendingBP > 0) {
-    attentionItems.push(
-      `⏳ ${stats.pendingBP} business partner application${
-        stats.pendingBP === 1 ? '' : 's'
-      } pending review`
-    );
-  }
-
-  if (notOnboarded > 0) {
-    attentionItems.push(
-      `🧭 ${notOnboarded} user${
-        notOnboarded === 1 ? '' : 's'
-      } have not completed onboarding`
-    );
-  }
-
-  if (
-    stats.totalUsers > 0 &&
-    stats.premiumUsers === 0
-  ) {
-    attentionItems.push(
-      '⭐ No premium users currently registered'
-    );
-  }
-}
 
   return (
-    <div>
+    <div className="wwdash-page">
+      <AdminStyles />
       <DashboardStyles />
 
-      <div className="wwdash-header-row">
-        <div>
-          <h1 className="wwdash-title">Dashboard</h1>
-          <p className="wwdash-subtitle">{new Date().toDateString()}</p>
-        </div>
-        <span className="wwdash-live-pill">
-          <span className="wwdash-live-dot" />
-          Live from Firebase
-        </span>
-      </div>
+      <PageHeader
+        title="Dashboard"
+        description={new Date().toDateString()}
+        actions={
+          <span className="wwdash-live-pill">
+            <span className="wwdash-live-dot" />
+            Live from Firebase
+          </span>
+        }
+      />
 
       {loading ? (
-  <>
-    <div className="wwdash-stats-grid">
-      <div className="wwdash-skeleton-card" />
-      <div className="wwdash-skeleton-card" />
-      <div className="wwdash-skeleton-card" />
-      <div className="wwdash-skeleton-card" />
-    </div>
-
-    <div className="wwdash-skeleton-panel" />
-  </>
-) : loadError ? (
-  <div className="wwdash-panel">
-    <div className="wwdash-error">
-      {loadError}
-    </div>
-  </div>
-) : !stats ? (
-  <div className="wwdash-panel">
-    <div className="wwdash-empty-note">
-      Dashboard data is unavailable.
-    </div>
-  </div>
-) : (
-  <>
-    <div className="wwdash-stats-grid">
-      <StatCard
-        title="Total Users"
-        value={stats.totalUsers}
-        sub="registered accounts"
-        icon="👥"
-        color={COLORS.primary}
-      />
-
-      <StatCard
-        title="Total Plans"
-        value={stats.totalPlans}
-        sub="in plan library"
-        icon="📋"
-        color={COLORS.cyan}
-      />
-
-      <StatCard
-        title="Total Exercises"
-        value={stats.totalExercises}
-        sub="in exercise library"
-        icon="💪"
-        color={COLORS.green}
-      />
-
-      <StatCard
-        title="Pending BP Approvals"
-        value={stats.pendingBP}
-        sub="awaiting review"
-        icon="🤝"
-        color={COLORS.red}
-      />
-    </div>
-
-    <div className="wwdash-panel">
-      <div className="wwdash-panel-title">
-        Quick Actions
-      </div>
-
-      <div className="wwdash-panel-subtitle">
-        Jump straight into common admin tasks
-      </div>
-
-      
-
-      <div className="wwdash-actions-grid">
-        <QuickAction
-          icon="🤝"
-          label="Review BP Applications"
-          color={COLORS.red}
-          onClick={() => setCurrentPage('businessPartners')}
-        />
-
-        <QuickAction
-          icon="👥"
-          label="Manage Users"
-          color={COLORS.primary}
-          onClick={() => setCurrentPage('users')}
-        />
-
-        <QuickAction
-          icon="💪"
-          label="Add Exercise"
-          color={COLORS.green}
-          onClick={() => setCurrentPage('exercises')}
-        />
-
-        <QuickAction
-          icon="⚙️"
-          label="Configure XP Settings"
-          color={COLORS.amber}
-          onClick={() => setCurrentPage('settings')}
-        />
-      </div>
-    </div>
-
-    <div className="wwdash-overview-grid">
-      <div className="wwdash-panel">
-        <div className="wwdash-panel-title">
-          Platform Insights
-        </div>
-
-        <div className="wwdash-panel-subtitle">
-          Executive summary from current platform data
-        </div>
-
-        {platformInsights.length > 0 ? (
-          platformInsights.map(text => (
-            <div
-              key={text}
-              className="wwdash-insight-row"
-            >
-              <span className="wwdash-insight-icon">
-                💡
-              </span>
-              <span>{text}</span>
-            </div>
-          ))
-        ) : (
-          <div className="wwdash-empty-note">
-            Not enough user data to generate insights.
+        <>
+          <div className="wwdash-loading-grid">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <SkeletonBlock key={index} height={118} />
+            ))}
           </div>
-        )}
-      </div>
-
-      <div className="wwdash-panel wwdash-attention-panel">
-        <div className="wwdash-panel-title">
-          Needs Attention
-        </div>
-
-        <div className="wwdash-panel-subtitle">
-          Actionable items for the admin team
-        </div>
-
-        {attentionItems.length > 0 ? (
-          attentionItems.map(text => (
-            <div
-              key={text}
-              className="wwdash-attention-row"
-            >
-              <span>{text}</span>
-            </div>
-          ))
-        ) : (
-          <div className="wwdash-empty-note">
-            Nothing needs attention right now.
+          <div className="wwdash-main-grid">
+            <SkeletonBlock height={360} />
+            <SkeletonBlock height={360} />
           </div>
-        )}
-      </div>
-    </div>
-
-    <div
-      className="wwdash-panel"
-      style={{ marginTop: 20 }}
-    >
-      <div className="wwdash-panel-title">
-        Recent Activity
-      </div>
-
-      <div className="wwdash-panel-subtitle">
-        Latest timestamped events across the platform
-      </div>
-
-      {stats.recentActivity.length > 0 ? (
-        stats.recentActivity.map((event, index) => (
-          <div
-            key={`${event.text}-${index}`}
-            className="wwdash-recent-row"
-          >
-            <span className="wwdash-recent-icon">
-              {event.icon}
-            </span>
-
-            <span className="wwdash-recent-text">
-              {event.text}
-            </span>
-
-            <span className="wwdash-recent-date">
-              {event.dateLabel}
-            </span>
-          </div>
-        ))
+        </>
+      ) : loadError ? (
+        <ErrorState title="Failed to load dashboard" message={loadError} />
+      ) : !stats ? (
+        <div className="wwa-panel">
+          <EmptyState icon={null} title="No dashboard data available" message="The dashboard response did not include usable data." />
+        </div>
       ) : (
-        <div className="wwdash-empty-note">
-          No recent timestamped activity yet.
-        </div>
+        <>
+          <div className="wwdash-primary-grid">
+            {primaryMetrics.map((metric) => (
+              <MetricCard
+                key={metric.label}
+                label={metric.label}
+                value={metric.value}
+                meta={metric.meta}
+                statusLabel={metric.statusLabel}
+                statusTone={metric.statusTone}
+              />
+            ))}
+          </div>
+
+          <div className="wwdash-main-grid">
+            <section className="wwa-panel">
+              <div className="wwdash-section-header">
+                <div>
+                  <h2 className="wwdash-section-title">Recent Activity</h2>
+                  <p className="wwdash-section-subtitle">Latest timestamped events across the platform</p>
+                </div>
+              </div>
+
+              {stats.recentActivity.length > 0 ? (
+                <div className="wwdash-recent-list">
+                  {stats.recentActivity.map((event, index) => {
+                    const Icon = getActivityIcon(event.text);
+
+                    return (
+                      <div key={`${event.text}-${index}`} className="wwdash-recent-row">
+                        <span className="wwdash-recent-row__icon">
+                          <Icon aria-hidden="true" size={16} strokeWidth={2} />
+                        </span>
+                        <div className="wwdash-recent-row__main">
+                          <div className="wwdash-recent-row__title">{event.text}</div>
+                          {event.type ? <div className="wwdash-recent-row__detail">{event.type}</div> : null}
+                        </div>
+                        <div className="wwdash-recent-row__date">{event.dateLabel}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <EmptyState
+                  className="wwdash-empty-compact"
+                  icon={null}
+                  title="No recent activity yet"
+                  message="Timestamped platform events will appear here once available."
+                />
+              )}
+            </section>
+
+            <div className="wwdash-side-stack">
+              <section className="wwa-panel">
+                <div className="wwdash-section-header">
+                  <div>
+                    <h2 className="wwdash-section-title">Needs Attention</h2>
+                    <p className="wwdash-section-subtitle">Operational items requiring admin follow-up</p>
+                  </div>
+                </div>
+
+                {attentionItems.length > 0 ? (
+                  <div className="wwdash-attention-list">
+                    {attentionItems.map((item) => (
+                      <div key={item.key} className="wwdash-attention-row">
+                        <span
+                          className={`wwdash-attention-row__icon wwdash-attention-row__icon-${item.tone}`}
+                        >
+                          <AlertTriangle aria-hidden="true" size={16} strokeWidth={2} />
+                        </span>
+                        <div className="wwdash-attention-row__main">
+                          <div className="wwdash-attention-row__title">{item.title}</div>
+                          <div className="wwdash-attention-row__detail">{item.detail}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="wwdash-attention-row">
+                    <span className="wwdash-attention-row__icon wwdash-attention-row__icon-success">
+                      <CheckCircle2 aria-hidden="true" size={16} strokeWidth={2} />
+                    </span>
+                    <div className="wwdash-attention-row__main">
+                      <div className="wwdash-attention-row__title">Nothing needs attention right now</div>
+                      <div className="wwdash-attention-row__detail">Current operational checks are clear.</div>
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              <section className="wwa-panel">
+                <div className="wwdash-section-header">
+                  <div>
+                    <h2 className="wwdash-section-title">Platform Health</h2>
+                    <p className="wwdash-section-subtitle">High-level operational summary from current platform data</p>
+                  </div>
+                </div>
+
+                {platformHealth.length > 0 ? (
+                  <div className="wwdash-health-list">
+                    {platformHealth.map((item) => {
+                      const Icon = item.icon;
+
+                      return (
+                        <div key={item.label} className="wwdash-health-row">
+                          <span className="wwdash-health-row__icon">
+                            <Icon aria-hidden="true" size={16} strokeWidth={2} />
+                          </span>
+                          <div className="wwdash-health-row__main">
+                            <div className="wwdash-health-row__top">
+                              <div className="wwdash-health-row__label">{item.label}</div>
+                              <div className="wwdash-health-row__value">{item.value}</div>
+                            </div>
+                            <div className="wwdash-health-row__meta">{item.detail}</div>
+                            <div className="wwdash-health-progress" aria-hidden="true">
+                              <div className="wwdash-health-progress__fill" style={{ width: `${item.progress}%` }} />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <EmptyState
+                    className="wwdash-empty-compact"
+                    icon={null}
+                    title="Not enough data yet"
+                    message="Platform health metrics will appear once user data is available."
+                  />
+                )}
+              </section>
+            </div>
+          </div>
+
+          <section className="wwa-panel">
+            <div className="wwdash-section-header">
+              <div>
+                <h2 className="wwdash-section-title">Quick Actions</h2>
+                <p className="wwdash-section-subtitle">Common admin destinations for operational work</p>
+              </div>
+            </div>
+
+            <div className="wwdash-quick-actions">
+              <QuickAction icon={UserCog} label="Review BP Applications" onClick={() => setCurrentPage('businessPartners')} />
+              <QuickAction icon={Users} label="Manage Users" onClick={() => setCurrentPage('users')} />
+              <QuickAction icon={Dumbbell} label="Add Exercise" onClick={() => setCurrentPage('exercises')} />
+              <QuickAction icon={Settings} label="Configure XP Settings" onClick={() => setCurrentPage('settings')} />
+            </div>
+          </section>
+        </>
       )}
     </div>
-  </>
-  )}
-</div>
-);
+  );
 }
 
 export default Dashboard;
