@@ -90,6 +90,13 @@ class _CoachScreenState extends State<CoachScreen> {
   bool _aiPersonalizationConsent = false;
   int? _remainingMessages;
 
+  // Per-session only — deliberately NOT persisted to Firestore, so the
+  // banner reappears the next time this screen is opened. Distinct from
+  // hasSeenAiConsentPrompt (the one-time consent dialog's permanent flag,
+  // see _maybeShowConsentPrompt) — dismissing this banner is a transient
+  // "hide this for now", not a recorded user decision.
+  bool _contextBannerDismissed = false;
+
   bool get _canSend =>
       _isPremium || (_remainingMessages ?? AppConstants.freeMessageLimit) > 0;
 
@@ -240,18 +247,14 @@ class _CoachScreenState extends State<CoachScreen> {
         return;
       }
 
-      String dateKey(DateTime d) =>
-          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
       final now = DateTime.now();
       final windowStart = now.subtract(const Duration(days: 7));
-      final snap = await FirebaseFirestore.instance
-          .collection(Collections.users)
-          .doc(uid)
-          .collection('missedSessions')
-          .where('date', isGreaterThanOrEqualTo: dateKey(windowStart))
-          .where('date', isLessThanOrEqualTo: dateKey(now))
-          .get();
-      if (snap.docs.length >= 5 && mounted) {
+      final missedCount = await _firestore.getMissedSessionCountInRange(
+        uid,
+        windowStart,
+        now,
+      );
+      if (missedCount >= 5 && mounted) {
         setState(() => _referralTrigger = _ReferralTrigger.missedWorkouts);
       }
     } catch (e) {
@@ -744,7 +747,11 @@ class _CoachScreenState extends State<CoachScreen> {
             children: [
               _buildTopBar(),
               if (_isApprovedCoach) _buildModeToggle(),
-              if (!showingClients) _buildContextBanner(),
+              // !showingClients gates the whole banner area; the
+              // per-piece visibility (personalization dismissal vs the
+              // free-messages condition) is decided inside
+              // _buildBannerArea() so the two stay independent.
+              if (!showingClients) _buildBannerArea(),
               Expanded(
                 child: showingClients
                     ? const CoachManagementBody()
@@ -786,81 +793,74 @@ class _CoachScreenState extends State<CoachScreen> {
             child: const Center(child: _SparkleIcon(size: 16, color: Colors.white)),
           ),
           const Spacer(),
-          // Title + online status
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Text(
-                'WiseCoach',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w800,
-                  color: WW.primaryDark,
-                  letterSpacing: -0.1,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF10B981),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  const Text(
-                    'Online',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF059669),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const Spacer(),
-          // "New Chat" — meaningless in "My Clients" mode, so hidden there
-          // same as _buildContextBanner()'s own gating.
-          if (!(_isApprovedCoach && _showingMyClients)) _buildNewChatButton(),
-          // Find Professional button
-          GestureDetector(
-            onTap: () => context.push(Routes.findProfessional),
-            child: const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              child: Text(
-                'Find Professional',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: WW.primary,
-                ),
-              ),
+          // Title only — the "● Online" status row that used to sit under
+          // this was removed as part of the WiseCoach redesign (it implied
+          // a presence/availability state WiseCoach doesn't actually have).
+          const Text(
+            'WiseCoach',
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+              color: WW.primaryDark,
+              letterSpacing: -0.1,
             ),
           ),
+          const Spacer(),
+          // "New Chat" — meaningless in "My Clients" mode, so it AND the
+          // divider that separates it from Find Professional are hidden
+          // there (same gating as _buildContextBanner()'s). The divider is
+          // inside this conditional deliberately: leaving it outside would
+          // strand a dangling separator with nothing on its left.
+          if (!(_isApprovedCoach && _showingMyClients)) ...[
+            _buildHeaderAction(
+              icon: Icons.add_comment_rounded,
+              label: 'New Chat',
+              onTap: _confirmNewChat,
+            ),
+            Container(width: 0.5, height: 26, color: WW.border),
+          ],
+          _buildHeaderAction(
+            icon: Icons.person_search_rounded,
+            label: 'Find Professional',
+            onTap: () => context.push(Routes.findProfessional),
+          ),
+          const SizedBox(width: 10),
         ],
       ),
     );
   }
 
-  // New-chat icon button — add_comment_rounded matches this app's
-  // established "_rounded" Material icon suffix convention (send_rounded,
-  // visibility_rounded, star_rounded, etc. elsewhere in this file/app) and
-  // reads clearly as "start a new conversation" without needing a label.
-  Widget _buildNewChatButton() {
+  // Stacked icon-over-label header action. Both header buttons share this
+  // so they can't drift apart visually. add_comment_rounded /
+  // person_search_rounded match this app's established "_rounded" Material
+  // icon suffix convention (send_rounded, visibility_rounded, star_rounded,
+  // etc. elsewhere in this file/app).
+  Widget _buildHeaderAction({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
     return GestureDetector(
-      onTap: _confirmNewChat,
-      child: const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-        child: Icon(
-          Icons.add_comment_rounded,
-          size: 20,
-          color: WW.primary,
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 18, color: WW.primary),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 9,
+                fontWeight: FontWeight.w600,
+                color: WW.primary,
+                height: 1.1,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -921,49 +921,135 @@ class _CoachScreenState extends State<CoachScreen> {
     );
   }
 
-  // ── Context banner ────────────────────────────────────────────────────────
+  // ── Banner area ───────────────────────────────────────────────────────────
   //
-  // Always shown (never omitted) when not in "My Clients" mode — even the
-  // consent==false case gets a short actionable line rather than nothing,
-  // since it's the cheapest way to remind the user personalization exists
-  // and where to turn it on. Text mirrors what Phase 2's
-  // buildPersonalizationContext() in functions/index.js actually sends
-  // today (body/injury/plan profile + session-trend insights), not the
-  // PRD's original generic placeholder copy.
-
-  Widget _buildContextBanner() {
+  // Composes two INDEPENDENTLY-gated pieces that share one padded
+  // container (so the spacing between them stays correct whichever of the
+  // two is showing):
+  //
+  //   1. The personalization banner — dismissible for the session via its
+  //      own X (_contextBannerDismissed).
+  //   2. The free-messages card — shown purely on
+  //      !_isPremium && remaining != null, and deliberately NOT affected
+  //      by _contextBannerDismissed and NOT given a close button: a free
+  //      user should always be able to see their remaining credit.
+  //
+  // Both are additionally gated on !showingClients at the call site.
+  // Whole area collapses to nothing when neither piece qualifies.
+  Widget _buildBannerArea() {
     final remaining = _remainingMessages;
+    final showPersonalization = !_contextBannerDismissed;
+    final showFreeMessages = !_isPremium && remaining != null;
+    if (!showPersonalization && !showFreeMessages) {
+      return const SizedBox.shrink();
+    }
     return Container(
       width: double.infinity,
-      color: WW.lavender.withValues(alpha: 0.12),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: WW.card,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            _aiPersonalizationConsent
-                ? 'Using: your training history, current plan, and injury '
-                    'profile to personalize answers.'
-                : 'Turn on personalization in Settings for tailored answers.',
-            style: const TextStyle(
-              fontSize: 11.5,
-              color: WW.textSec,
-              height: 1.3,
-            ),
+          if (showPersonalization) _buildPersonalizationBanner(),
+          if (showPersonalization && showFreeMessages)
+            const SizedBox(height: 6),
+          if (showFreeMessages) _buildFreeMessagesCard(remaining),
+        ],
+      ),
+    );
+  }
+
+  // Personalization banner — even the consent==false case gets a short
+  // actionable line rather than nothing, since it's the cheapest way to
+  // remind the user personalization exists and where to turn it on. Text
+  // mirrors what Phase 2's buildPersonalizationContext() in
+  // functions/index.js actually sends today (body/injury/plan profile +
+  // session-trend insights), not the PRD's original generic placeholder
+  // copy. The _aiPersonalizationConsent ternary itself is unchanged.
+  Widget _buildPersonalizationBanner() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
+      decoration: BoxDecoration(
+        color: WW.lavender.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: WW.lavender.withValues(alpha: 0.25),
+          width: 0.5,
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 1),
+            child: Icon(Icons.auto_awesome_rounded,
+                size: 13, color: WW.lavenderDark),
           ),
-          if (!_isPremium && remaining != null) ...[
-            const SizedBox(height: 2),
-            Text(
-              '$remaining of ${AppConstants.freeMessageLimit} free messages '
-              'left this month.',
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _aiPersonalizationConsent
+                  ? 'Using: your training history, current plan, and injury '
+                      'profile to personalize answers.'
+                  : 'Turn on personalization in Settings for tailored answers.',
               style: const TextStyle(
                 fontSize: 11.5,
-                fontWeight: FontWeight.w700,
-                color: WW.primary,
+                color: WW.textSec,
+                height: 1.3,
               ),
             ),
-          ],
+          ),
+          const SizedBox(width: 4),
+          // Per-session dismiss — see _contextBannerDismissed's own doc
+          // comment for why this isn't persisted. Hides ONLY this banner;
+          // the free-messages card below is deliberately unaffected.
+          GestureDetector(
+            onTap: () => setState(() => _contextBannerDismissed = true),
+            behavior: HitTestBehavior.opaque,
+            child: const Padding(
+              padding: EdgeInsets.all(4),
+              child: Icon(Icons.close_rounded, size: 14, color: WW.textSec),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Free-messages card — same data and same condition as before
+  // (!_isPremium && remaining != null, evaluated by _buildBannerArea()).
+  // No close button by design: this is the user's remaining credit, not a
+  // dismissible hint.
+  Widget _buildFreeMessagesCard(int remaining) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        color: WW.chipBg,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.bolt_rounded, size: 14, color: WW.primary),
+          const SizedBox(width: 8),
+          const Expanded(
+            child: Text(
+              'Free messages this month',
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: WW.primaryDark,
+              ),
+            ),
+          ),
+          Text(
+            '$remaining / ${AppConstants.freeMessageLimit}',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: WW.primary,
+            ),
+          ),
         ],
       ),
     );
@@ -1056,12 +1142,15 @@ class _CoachScreenState extends State<CoachScreen> {
     return Container(
       width: double.infinity,
       color: WW.card,
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 4),
-      child: const Text(
-        'WiseCoach gives general fitness guidance, not medical advice — '
-        'see a professional for injuries or health concerns.',
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 2),
+      child: Text(
+        'General guidance, not medical advice.',
         textAlign: TextAlign.center,
-        style: TextStyle(fontSize: 10.5, color: WW.textSec, height: 1.3),
+        style: TextStyle(
+          fontSize: 9.5,
+          color: WW.textSec.withValues(alpha: 0.7),
+          height: 1.3,
+        ),
       ),
     );
   }
@@ -1077,11 +1166,20 @@ class _CoachScreenState extends State<CoachScreen> {
             color: WW.card,
             border: Border(top: BorderSide(color: WW.border, width: 0.5)),
           ),
+          // The old bottom value was `MediaQuery.padding.bottom + 84` —
+          // that 84 is exactly _BottomNav's own height, but MainShell
+          // renders it via Scaffold's bottomNavigationBar slot, which
+          // already reserves that space above the body. So the +84 was
+          // dead padding, showing up as a large empty gap between the
+          // input bar and the nav. MediaQuery.padding.bottom is kept
+          // (Scaffold zeroes it for the body when a bottomNavigationBar
+          // is present, so it's a no-op there, but it keeps this correct
+          // if this screen is ever hosted without one).
           padding: EdgeInsets.fromLTRB(
             12,
             8,
             12,
-            MediaQuery.of(context).padding.bottom + 84,
+            MediaQuery.of(context).padding.bottom + 10,
           ),
           child: ValueListenableBuilder<TextEditingValue>(
             valueListenable: _inputController,

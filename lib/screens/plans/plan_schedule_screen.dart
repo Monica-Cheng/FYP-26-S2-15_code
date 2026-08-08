@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/compress_utils.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
@@ -45,7 +46,13 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
 
   int _selectedWeekIdx = 0;
   bool _isLoading = true;
-  Set<int> _compressedDays = {};
+  // Keyed by dayIndex. See core/compress_utils.dart's CompressedDayData
+  // for the shape and parseCompressedDays() for how this is built from
+  // whatever Firestore actually has (new map format, legacy boolean-array
+  // format, or nothing at all) — shared with gym_session_screen.dart/
+  // home_screen.dart/plan_detail_screen.dart so all 4 screens can never
+  // disagree on what "compressed" means for a given day again.
+  Map<int, CompressedDayData> _compressedDays = {};
 
   final _fs = FirestoreService();
   final _auth = AuthService();
@@ -137,12 +144,8 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
 
         final currentDay = (progress?['currentDayIndex'] as num?)?.toInt() ?? 1;
 
-        final rawCompressedDays = progress?['compressedDays'];
-        Set<int> loadedCompressedDays = {};
-        if (rawCompressedDays is List) {
-          loadedCompressedDays =
-              rawCompressedDays.map((d) => (d as num).toInt()).toSet();
-        }
+        final loadedCompressedDays =
+            parseCompressedDays(progress?['compressedDays'], _sessions);
 
         final rawCompletedDayIndices = progress?['completedDayIndices'];
         Set<int> loadedCompletedDayIndices = {};
@@ -424,14 +427,22 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
       ),
       builder: (ctx) => _CompressSheet(
         session: session,
-        onConfirm: (_) async {
+        onConfirm: (removedExercises, cardioOverrides) async {
           Navigator.of(ctx).pop();
           if (_uid != null && _planId != null) {
-            final updated = {..._compressedDays, dayIndex};
-            setState(() => _compressedDays = updated);
-            await _fs.updatePlanProgress(_uid!, _planId!, {
-              'compressedDays': updated.toList(),
+            setState(() {
+              _compressedDays = {
+                ..._compressedDays,
+                dayIndex: CompressedDayData(
+                  removedExercises: removedExercises,
+                  cardioOverrides: cardioOverrides,
+                ),
+              };
             });
+            await _fs.updatePlanProgress(_uid!, _planId!, {
+              'compressedDays': serializeCompressedDays(_compressedDays),
+            });
+            await _deleteStaleInProgressSession(dayIndex);
           }
           if (mounted) _snack('Session compressed! ⚡');
         },
@@ -439,13 +450,47 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
     );
   }
 
+  // Deletes any existing inProgressSessions doc for this exact day, if one
+  // exists — called after a compression change or a restore. Without this,
+  // _hydrateFromInProgressSession() in gym_session_screen.dart would keep
+  // resuming a frozen blocks[] snapshot taken whenever that doc was first
+  // created (as early as the user merely opening the session once, even if
+  // they backed out immediately), silently ignoring any compression change
+  // made afterward — the exact bug this fixes. findInProgressSessionRunId()
+  // returning null (nothing to delete) is the common, expected case, not an
+  // error — deleteInProgressSession() is only called when a real doc was
+  // found. Best-effort: a failure here isn't surfaced to the user, since
+  // compressedDays itself was already saved successfully by the time this
+  // runs — matching this method's own existing fail-soft convention
+  // elsewhere in this file (e.g. _restoreDaySession's try/catch below).
+  Future<void> _deleteStaleInProgressSession(int dayIndex) async {
+    if (_uid == null || _planId == null) return;
+    try {
+      final existingSessionRunId =
+          await _fs.findInProgressSessionRunId(_uid!, _planId!, dayIndex);
+      if (existingSessionRunId != null) {
+        await _fs.deleteInProgressSession(_uid!, existingSessionRunId);
+      }
+    } catch (_) {}
+  }
+
+  // Just clears this day's entry from the map — compression has always
+  // been a display-time filter, never a mutation to the plan's actual
+  // stored exercise list (see _showCompressSheet's onConfirm above, which
+  // never touches session['exercises']), so restoring is still trivially
+  // correct: nothing was ever removed from storage to restore. Also
+  // deletes any stale in-progress session doc for this day (see
+  // _deleteStaleInProgressSession's own doc comment) — a resume after
+  // restoring should see the plan's original, uncompressed exercises, not
+  // whatever was frozen into blocks[] while the day was still compressed.
   Future<void> _restoreDaySession(int dayIndex) async {
     if (_uid == null || _planId == null) return;
     setState(() => _compressedDays.remove(dayIndex));
     try {
       await _fs.updatePlanProgress(_uid!, _planId!, {
-        'compressedDays': _compressedDays.toList(),
+        'compressedDays': serializeCompressedDays(_compressedDays),
       });
+      await _deleteStaleInProgressSession(dayIndex);
       if (mounted) _snack('Session restored to full workout');
     } catch (_) {
       if (mounted) _snack('Something went wrong. Please try again.');
@@ -719,7 +764,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
       final dayIndex = _dayIndexOf(_selectedWeekIdx, i);
       final isRest = session['isRestDay'] == true;
       final status = _statusOf(dayIndex, isRest);
-      final isCompressed = _compressedDays.contains(dayIndex);
+      final isCompressed = _compressedDays.containsKey(dayIndex);
 
       final exercises = (session['exercises'] as List<dynamic>?)
               ?.map((e) => e as Map<String, dynamic>)
@@ -733,7 +778,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
           session: session,
           dayIndex: dayIndex,
           status: status,
-          isCompressed: isCompressed,
+          compressedData: _compressedDays[dayIndex],
           showTodayActions: status == 'today',
           showCompress: hasAccessory && !isCompressed,
           onStartSession: () => _handleStartSession(dayIndex),
@@ -943,7 +988,12 @@ class _ScheduleDayCard extends StatelessWidget {
   final Map<String, dynamic> session;
   final int dayIndex;
   final String status;
-  final bool isCompressed;
+  // Null means this day has no compression entry at all — replaces the
+  // old plain isCompressed bool so this widget can actually apply the
+  // real per-exercise removals/cardio overrides (via
+  // core/compress_utils.dart's applyCompression()) instead of the old
+  // blanket tag == 'Primary' filter below.
+  final CompressedDayData? compressedData;
   final bool showTodayActions;
   final bool showCompress;
   final VoidCallback? onStartSession;
@@ -954,13 +1004,15 @@ class _ScheduleDayCard extends StatelessWidget {
     required this.session,
     required this.dayIndex,
     required this.status,
-    required this.isCompressed,
+    required this.compressedData,
     required this.showTodayActions,
     required this.showCompress,
     required this.onStartSession,
     required this.onCompress,
     required this.onRestore,
   });
+
+  bool get isCompressed => compressedData != null;
 
   Color get _stripColor {
     switch (status) {
@@ -996,17 +1048,22 @@ class _ScheduleDayCard extends StatelessWidget {
     final isRest = status == 'rest';
     final dayLabel = session['day'] as String? ?? 'Day $dayIndex';
     final sessionName = session['name'] as String? ?? '';
-    final estimatedMinutes = (session['estimatedMinutes'] as num?)?.toInt() ?? 0;
+    final baseEstimatedMinutes =
+        (session['estimatedMinutes'] as num?)?.toInt() ?? 0;
 
     final allExercises = (session['exercises'] as List<dynamic>?)
             ?.map((e) => e as Map<String, dynamic>)
             .toList() ??
         [];
 
-    // FIX 2: filter to Primary-only when compressed.
-    final displayExercises = isCompressed
-        ? allExercises.where((e) => e['tag'] == 'Primary').toList()
-        : allExercises;
+    // Applies this day's real per-exercise removals/cardio overrides —
+    // replaces the old blanket tag == 'Primary' filter (which not only
+    // disagreed with gym_session_screen.dart's tag != 'Accessory' but,
+    // more importantly, never reflected the user's actual checkbox/cardio
+    // choices from the Compress sheet at all).
+    final displayExercises = applyCompression(allExercises, compressedData);
+    final estimatedMinutes = estimatedMinutesAfterCompression(
+        baseEstimatedMinutes, compressedData, allExercises);
 
     return Container(
       decoration: BoxDecoration(
@@ -1364,24 +1421,116 @@ class _StatusBadge extends StatelessWidget {
 }
 
 // ── Compress bottom sheet ─────────────────────────────────────────────────────
-
-class _CompressSheet extends StatelessWidget {
+// Rework of the original StatelessWidget version: now stateful so the user
+// can actually adjust the auto-identified candidates (checkboxes on
+// accessory-tagged strength exercises, default all-checked — "auto-identify
+// candidates, user confirms/adjusts") and shorten cardio blocks (a stepper
+// on cardioMinutes, floored at 5) with a live-updating time-saved estimate,
+// instead of the previous fully-automatic, non-interactive version.
+//
+// Cardio blocks (isCardio: true) get their own section — the original
+// version had no cardio handling at all and would have rendered them in
+// the "KEEPING" list using sets/reps fields a cardio block doesn't
+// actually have at the top level (reps lives nested in sets[0] on a real
+// cardio block), producing a nonsensical "1×0" row. They're never
+// eligible for removal here, only duration reduction — accidentally
+// stripping a whole cardio block isn't the intent of a "shorten my
+// workout" action.
+class _CompressSheet extends StatefulWidget {
   final Map<String, dynamic> session;
-  final Future<void> Function(List<Map<String, dynamic>>) onConfirm;
+  final Future<void> Function(Set<int> removedExercises, Map<int, int> cardioOverrides)
+      onConfirm;
 
   const _CompressSheet({required this.session, required this.onConfirm});
 
   @override
-  Widget build(BuildContext context) {
-    final exercises = (session['exercises'] as List<dynamic>?)
+  State<_CompressSheet> createState() => _CompressSheetState();
+}
+
+class _CompressSheetState extends State<_CompressSheet> {
+  // Suggested floor so a "shortened" cardio block never gets reduced to
+  // something not worth doing at all.
+  static const _kMinCardioMinutes = 5;
+  static const _kCardioStepMinutes = 5;
+
+  late final List<Map<String, dynamic>> _allExercises;
+  late final List<int> _cardioIndices;
+  late final List<int> _accessoryIndices;
+  late final List<int> _primaryIndices;
+
+  // Mutable selection state — starts with every accessory exercise
+  // pre-checked for removal (the "auto-identify candidates" default) and
+  // every cardio block at its original duration.
+  late final Set<int> _selectedForRemoval;
+  late final Map<int, int> _originalCardioMinutes;
+  late final Map<int, int> _cardioMinutes;
+
+  @override
+  void initState() {
+    super.initState();
+    _allExercises = (widget.session['exercises'] as List<dynamic>?)
             ?.map((e) => e as Map<String, dynamic>)
             .toList() ??
         [];
 
-    final primary = exercises.where((e) => e['tag'] != 'Accessory').toList();
-    final accessory = exercises.where((e) => e['tag'] == 'Accessory').toList();
-    final savedMinutes = accessory.length * 4;
+    _cardioIndices = [];
+    _accessoryIndices = [];
+    _primaryIndices = [];
+    for (var i = 0; i < _allExercises.length; i++) {
+      final e = _allExercises[i];
+      if (e['isCardio'] == true) {
+        _cardioIndices.add(i);
+      } else if (e['tag'] == 'Accessory') {
+        _accessoryIndices.add(i);
+      } else {
+        _primaryIndices.add(i);
+      }
+    }
 
+    _selectedForRemoval = _accessoryIndices.toSet();
+    _originalCardioMinutes = {
+      for (final i in _cardioIndices)
+        i: (_allExercises[i]['cardioMinutes'] as num?)?.toInt() ?? 0,
+    };
+    _cardioMinutes = Map.of(_originalCardioMinutes);
+  }
+
+  // 4 min/removed exercise (same flat heuristic the original sheet used)
+  // plus the real cardio minutes actually shaved off — live-updating as
+  // the user toggles checkboxes or adjusts cardio duration, unlike the
+  // original's fixed accessory.length * 4 that never reflected user choice.
+  int get _savedMinutes {
+    final fromRemoved = _selectedForRemoval.length * 4;
+    final fromCardio = _cardioIndices.fold<int>(
+        0, (total, i) => total + (_originalCardioMinutes[i]! - _cardioMinutes[i]!));
+    return fromRemoved + fromCardio;
+  }
+
+  void _adjustCardio(int index, int delta) {
+    setState(() {
+      final original = _originalCardioMinutes[index]!;
+      final current = _cardioMinutes[index]!;
+      _cardioMinutes[index] =
+          (current + delta).clamp(_kMinCardioMinutes, original);
+    });
+  }
+
+  // Same Run/Walk/Cycle icon mapping the original _CompressSheet never had
+  // (it never rendered cardio at all) — matches the convention already
+  // used by _ScheduleDayCard._cardioIcon() elsewhere in this file.
+  IconData _cardioIcon(String activity) {
+    switch (activity) {
+      case 'Walk':
+        return Icons.directions_walk_rounded;
+      case 'Cycle':
+        return Icons.directions_bike_rounded;
+      default:
+        return Icons.directions_run_rounded;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return DraggableScrollableSheet(
       expand: false,
       initialChildSize: 0.65,
@@ -1422,7 +1571,7 @@ class _CompressSheet extends StatelessWidget {
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 20),
             child: Text(
-              "Short on time? We'll remove accessory exercises to shorten your workout while keeping the important stuff.",
+              "Short on time? Uncheck anything you'd rather keep, or shorten your cardio below.",
               style: TextStyle(fontSize: 13, color: WW.textSec, height: 1.4),
             ),
           ),
@@ -1432,7 +1581,75 @@ class _CompressSheet extends StatelessWidget {
               controller: controller,
               padding: const EdgeInsets.symmetric(horizontal: 20),
               children: [
-                if (primary.isNotEmpty) ...[
+                if (_cardioIndices.isNotEmpty) ...[
+                  const Text(
+                    'CARDIO',
+                    style: TextStyle(
+                      fontSize: 10, fontWeight: FontWeight.w700,
+                      color: WW.textSec, letterSpacing: 0.5,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: WW.card,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: WW.border, width: 0.5),
+                    ),
+                    child: Column(
+                      children: List.generate(_cardioIndices.length, (i) {
+                        final index = _cardioIndices[i];
+                        final ex = _allExercises[index];
+                        final activity = ex['cardioActivity'] as String? ?? 'Run';
+                        final minutes = _cardioMinutes[index]!;
+                        final atFloor = minutes <= _kMinCardioMinutes;
+                        final atOriginal = minutes >= _originalCardioMinutes[index]!;
+                        return Container(
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          decoration: BoxDecoration(
+                            border: i < _cardioIndices.length - 1
+                                ? const Border(
+                                    bottom: BorderSide(color: WW.border, width: 0.5))
+                                : null,
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(_cardioIcon(activity), size: 14, color: WW.teal),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(activity,
+                                    style: const TextStyle(fontSize: 13, color: WW.text)),
+                              ),
+                              GestureDetector(
+                                onTap: atFloor
+                                    ? null
+                                    : () => _adjustCardio(index, -_kCardioStepMinutes),
+                                child: Icon(Icons.remove_circle_outline,
+                                    size: 18, color: atFloor ? WW.border : WW.lavender),
+                              ),
+                              SizedBox(
+                                width: 52,
+                                child: Text('$minutes min',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(fontSize: 12, color: WW.textSec)),
+                              ),
+                              GestureDetector(
+                                onTap: atOriginal
+                                    ? null
+                                    : () => _adjustCardio(index, _kCardioStepMinutes),
+                                child: Icon(Icons.add_circle_outline,
+                                    size: 18, color: atOriginal ? WW.border : WW.lavender),
+                              ),
+                            ],
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                ],
+                if (_primaryIndices.isNotEmpty) ...[
                   const Text(
                     'KEEPING',
                     style: TextStyle(
@@ -1449,8 +1666,8 @@ class _CompressSheet extends StatelessWidget {
                       border: Border.all(color: WW.border, width: 0.5),
                     ),
                     child: Column(
-                      children: List.generate(primary.length, (i) {
-                        final ex = primary[i];
+                      children: List.generate(_primaryIndices.length, (i) {
+                        final ex = _allExercises[_primaryIndices[i]];
                         final name = ex['name'] as String? ?? 'Exercise';
                         final sets = (ex['sets'] is List)
                             ? (ex['sets'] as List).length
@@ -1459,7 +1676,7 @@ class _CompressSheet extends StatelessWidget {
                         return Container(
                           padding: const EdgeInsets.symmetric(vertical: 8),
                           decoration: BoxDecoration(
-                            border: i < primary.length - 1
+                            border: i < _primaryIndices.length - 1
                                 ? const Border(
                                     bottom: BorderSide(color: WW.border, width: 0.5))
                                 : null,
@@ -1487,9 +1704,9 @@ class _CompressSheet extends StatelessWidget {
                   ),
                   const SizedBox(height: 14),
                 ],
-                if (accessory.isNotEmpty) ...[
+                if (_accessoryIndices.isNotEmpty) ...[
                   const Text(
-                    'REMOVING',
+                    'ACCESSORY EXERCISES',
                     style: TextStyle(
                       fontSize: 10, fontWeight: FontWeight.w700,
                       color: WW.textSec, letterSpacing: 0.5,
@@ -1504,48 +1721,74 @@ class _CompressSheet extends StatelessWidget {
                       border: Border.all(color: WW.border, width: 0.5),
                     ),
                     child: Column(
-                      children: List.generate(accessory.length, (i) {
-                        final ex = accessory[i];
+                      children: List.generate(_accessoryIndices.length, (i) {
+                        final index = _accessoryIndices[i];
+                        final ex = _allExercises[index];
                         final name = ex['name'] as String? ?? 'Exercise';
-                        return Container(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          decoration: BoxDecoration(
-                            border: i < accessory.length - 1
-                                ? const Border(
-                                    bottom: BorderSide(color: WW.border, width: 0.5))
-                                : null,
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.close_rounded, size: 14,
-                                  color: Color(0xFFEF4444)),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  name,
-                                  style: const TextStyle(
-                                    fontSize: 13,
-                                    color: Color(0xFFEF4444),
-                                    decoration: TextDecoration.lineThrough,
+                        final willRemove = _selectedForRemoval.contains(index);
+                        return GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => setState(() {
+                            if (willRemove) {
+                              _selectedForRemoval.remove(index);
+                            } else {
+                              _selectedForRemoval.add(index);
+                            }
+                          }),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            decoration: BoxDecoration(
+                              border: i < _accessoryIndices.length - 1
+                                  ? const Border(
+                                      bottom: BorderSide(color: WW.border, width: 0.5))
+                                  : null,
+                            ),
+                            child: Row(
+                              children: [
+                                Checkbox(
+                                  value: willRemove,
+                                  onChanged: (v) => setState(() {
+                                    if (v ?? false) {
+                                      _selectedForRemoval.add(index);
+                                    } else {
+                                      _selectedForRemoval.remove(index);
+                                    }
+                                  }),
+                                  activeColor: const Color(0xFFEF4444),
+                                ),
+                                Expanded(
+                                  child: Text(
+                                    name,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: willRemove ? const Color(0xFFEF4444) : WW.text,
+                                      decoration:
+                                          willRemove ? TextDecoration.lineThrough : null,
+                                    ),
                                   ),
                                 ),
-                              ),
-                              Container(
-                                padding:
-                                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFFEE2E2),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: const Text(
-                                  'Accessory',
-                                  style: TextStyle(
-                                    fontSize: 9, fontWeight: FontWeight.w700,
-                                    color: Color(0xFFEF4444),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: willRemove
+                                        ? const Color(0xFFFEE2E2)
+                                        : WW.elevated,
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    'Accessory',
+                                    style: TextStyle(
+                                      fontSize: 9, fontWeight: FontWeight.w700,
+                                      color: willRemove
+                                          ? const Color(0xFFEF4444)
+                                          : WW.textSec,
+                                    ),
                                   ),
                                 ),
-                              ),
-                            ],
+                                const SizedBox(width: 8),
+                              ],
+                            ),
                           ),
                         );
                       }),
@@ -1564,7 +1807,7 @@ class _CompressSheet extends StatelessWidget {
                       const Icon(Icons.timer_outlined, color: Color(0xFF22C55E), size: 14),
                       const SizedBox(width: 8),
                       Text(
-                        'Saves approximately $savedMinutes minutes',
+                        'Saves approximately $_savedMinutes minutes',
                         style: const TextStyle(
                           fontSize: 13, fontWeight: FontWeight.w500,
                           color: Color(0xFF22C55E),
@@ -1599,7 +1842,14 @@ class _CompressSheet extends StatelessWidget {
                     const SizedBox(width: 10),
                     Expanded(
                       child: GestureDetector(
-                        onTap: () => onConfirm(primary),
+                        onTap: () {
+                          final overrides = <int, int>{
+                            for (final i in _cardioIndices)
+                              if (_cardioMinutes[i] != _originalCardioMinutes[i])
+                                i: _cardioMinutes[i]!,
+                          };
+                          widget.onConfirm(_selectedForRemoval, overrides);
+                        },
                         child: Container(
                           height: 46,
                           decoration: BoxDecoration(
@@ -1608,7 +1858,7 @@ class _CompressSheet extends StatelessWidget {
                           ),
                           child: Center(
                             child: Text(
-                              'Compress (save ~${savedMinutes}min)',
+                              'Compress (save ~${_savedMinutes}min)',
                               style: const TextStyle(
                                 fontSize: 12, fontWeight: FontWeight.w700,
                                 color: Colors.white,

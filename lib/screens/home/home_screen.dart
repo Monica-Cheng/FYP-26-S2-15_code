@@ -13,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/compress_utils.dart';
 import '../../core/router.dart';
 import '../../providers/month_activity_provider.dart';
 import '../../services/auth_service.dart';
@@ -69,7 +70,7 @@ class _HomeScreenState extends State<HomeScreen> {
         const PlansScreen(),
         CoachScreen(isVisible: _selectedIndex == 2),
         ClubScreen(initialSubtab: _clubInitialSubtab),
-        const ProgressScreen(),
+        ProgressScreen(isVisible: _selectedIndex == 4),
         const CoachDashboardScreen(embedded: true),
       ];
 
@@ -300,8 +301,12 @@ class _HomeTabState extends State<_HomeTab> {
   Map<String, dynamic>? _todaySession;
   bool _todayIsRestDay = false;
   bool _todayCompleted = false;
-  bool _isSessionCompressed = false;
-  StreamSubscription<DocumentSnapshot>? _userStreamSub;
+  // See core/compress_utils.dart's CompressedDayData — shared with
+  // gym_session_screen.dart/plan_schedule_screen.dart/plan_detail_screen.dart
+  // so this card can apply the real per-exercise removals/cardio overrides
+  // instead of the old blanket tag == 'Primary' filter.
+  CompressedDayData? _compressedDayData;
+  StreamSubscription<Map<String, dynamic>?>? _userStreamSub;
   StreamSubscription<Map<String, dynamic>?>? _progressStreamSub;
   StreamSubscription<List<Map<String, dynamic>>>? _notificationsSub;
   int _unreadNotificationCount = 0;
@@ -333,22 +338,15 @@ class _HomeTabState extends State<_HomeTab> {
   void _startUserStream() {
     final uid = _authService.getCurrentUser()?.uid;
     if (uid == null) return;
-    _userStreamSub = FirebaseFirestore.instance
-        .collection('users')
-        .doc(uid)
-        .snapshots()
-        .listen((doc) {
-      if (doc.exists && mounted) {
-        final newPlanId =
-            doc.data()?['trackedPlanId'] as String? ?? '';
+    _userStreamSub = _firestoreService.getUserProfileStream(uid).listen((data) {
+      if (data != null && mounted) {
+        final newPlanId = data['trackedPlanId'] as String? ?? '';
         final planChanged = newPlanId != _trackedPlanId;
         setState(() {
-          _trackedPlanName =
-              doc.data()?['trackedPlanName'] as String? ?? '';
+          _trackedPlanName = data['trackedPlanName'] as String? ?? '';
           _trackedPlanId = newPlanId;
-          _displayName =
-              doc.data()?['displayName'] as String? ?? _displayName;
-          _photoBase64 = doc.data()?['photoBase64'] as String?;
+          _displayName = data['displayName'] as String? ?? _displayName;
+          _photoBase64 = data['photoBase64'] as String?;
         });
         if (planChanged && newPlanId.isNotEmpty) {
           _startProgressStream(uid, newPlanId);
@@ -362,7 +360,7 @@ class _HomeTabState extends State<_HomeTab> {
     _progressStreamSub?.cancel();
     _progressStreamSub = _firestoreService
         .getPlanProgressStream(uid, planId)
-        .listen((progress) {
+        .listen((progress) async {
       if (progress == null || !mounted) return;
       final newDayIndex =
           (progress['currentDayIndex'] as num?)?.toInt() ?? 1;
@@ -377,18 +375,26 @@ class _HomeTabState extends State<_HomeTab> {
       final completedDayIndices = rawCompletedDayIndices is List
           ? rawCompletedDayIndices.map((d) => (d as num).toInt()).toSet()
           : <int>{};
-      final rawCompressedDays = progress['compressedDays'];
-      bool newIsCompressed = false;
-      if (rawCompressedDays is List) {
-        final compressedSet =
-            rawCompressedDays.map((d) => (d as num).toInt()).toSet();
-        newIsCompressed = compressedSet.contains(newDayIndex);
-      }
+      // Shared with gym_session_screen.dart/plan_schedule_screen.dart/
+      // plan_detail_screen.dart (core/compress_utils.dart). Needs the
+      // plan's full sessions list to resolve compressedDays' legacy
+      // boolean-array format (see parseCompressedDays()'s own doc
+      // comment) — this listener doesn't otherwise have sessions cached,
+      // so it's fetched here rather than threading it through from
+      // wherever the plan was first loaded.
+      final plan = await _firestoreService.getTrackedPlan(uid);
+      final sessions = (plan?['sessions'] as List<dynamic>?)
+              ?.map((s) => s as Map<String, dynamic>)
+              .toList() ??
+          <Map<String, dynamic>>[];
+      final compressedDayData = parseCompressedDays(
+          progress['compressedDays'], sessions)[newDayIndex];
       final dayChanged = newDayIndex != _currentDayIndex;
+      if (!mounted) return;
       setState(() {
         _currentDayIndex = newDayIndex;
         _todayCompleted = completedDayIndices.contains(newDayIndex);
-        _isSessionCompressed = newIsCompressed;
+        _compressedDayData = compressedDayData;
       });
       if (dayChanged && _trackedPlanId.isNotEmpty) {
         _loadTodaySession(uid, newDayIndex);
@@ -455,23 +461,14 @@ class _HomeTabState extends State<_HomeTab> {
           .substring(0, 10);
       final today = DateTime.now().toString().substring(0, 10);
 
-      final userDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .get();
-      final userData = userDoc.data();
+      final userData = await _firestoreService.getUserProfile(uid);
       final trackedPlanId = userData?['trackedPlanId'] as String?;
       final trackedPlanName =
           userData?['trackedPlanName'] as String? ?? '';
       if (trackedPlanId == null || trackedPlanId.isEmpty) return;
 
-      final progressDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .collection('planProgress')
-          .doc(trackedPlanId)
-          .get();
-      final progress = progressDoc.data();
+      final progress =
+          await _firestoreService.getPlanProgressIfExists(uid, trackedPlanId);
       if (progress == null) return;
 
       final lastCompletedDate =
@@ -505,13 +502,9 @@ class _HomeTabState extends State<_HomeTab> {
 
       if (lastCompletedDate == yesterday || lastCompletedDate == today) return;
 
-      final missedDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .collection('missedSessions')
-          .doc(yesterday)
-          .get();
-      if (missedDoc.exists) return;
+      final hasMissedDoc =
+          await _firestoreService.hasMissedSessionForDate(uid, yesterday);
+      if (hasMissedDoc) return;
 
       if (!mounted) return;
       setState(() {
@@ -1342,7 +1335,7 @@ class _HomeTabState extends State<_HomeTab> {
                 todayIsRestDay: _todayIsRestDay,
                 currentDayIndex: _currentDayIndex,
                 todayCompleted: _todayCompleted,
-                isCompressed: _isSessionCompressed,
+                compressedData: _compressedDayData,
                 hasError: _profileError,
               ),
             ),
@@ -2200,7 +2193,9 @@ class _TodayPlanCard extends StatefulWidget {
   final bool todayIsRestDay;
   final int currentDayIndex;
   final bool todayCompleted;
-  final bool isCompressed;
+  // See core/compress_utils.dart's CompressedDayData. Null means today
+  // has no compression entry at all.
+  final CompressedDayData? compressedData;
   final bool hasError;
 
   const _TodayPlanCard({
@@ -2211,7 +2206,7 @@ class _TodayPlanCard extends StatefulWidget {
     this.todayIsRestDay = false,
     this.currentDayIndex = 1,
     this.todayCompleted = false,
-    this.isCompressed = false,
+    this.compressedData,
     this.hasError = false,
   });
 
@@ -2331,16 +2326,22 @@ class _TodayPlanCardState extends State<_TodayPlanCard> {
   Widget _buildPlanCard(BuildContext context) {
     final sessionName =
         widget.todaySession?['name'] as String? ?? '';
-    final estimatedMinutes =
+    final baseEstimatedMinutes =
         (widget.todaySession?['estimatedMinutes'] as num?)?.toInt() ?? 45;
     final allExercises =
         (widget.todaySession?['exercises'] as List<dynamic>?)
             ?.cast<Map<String, dynamic>>() ??
             [];
-    // FIX 3: filter to Primary-only when session is compressed.
-    final exercises = widget.isCompressed
-        ? allExercises.where((e) => e['tag'] == 'Primary').toList()
-        : allExercises;
+    // Applies the real per-exercise removals/cardio overrides — replaces
+    // the old blanket tag == 'Primary' filter, which also disagreed with
+    // gym_session_screen.dart's tag != 'Accessory' and never reflected
+    // the user's actual Compress-sheet choices.
+    final exercises = applyCompression(allExercises, widget.compressedData);
+    final estimatedMinutes = estimatedMinutesAfterCompression(
+        baseEstimatedMinutes, widget.compressedData, allExercises);
+    // Derived from estimatedMinutes, so it goes stale exactly the same way
+    // if left unadjusted after compression — recomputed from the already-
+    // adjusted estimatedMinutes above rather than the static original.
     final estimatedCals = (estimatedMinutes * 6.5).round();
 
     return Container(
@@ -2397,7 +2398,7 @@ class _TodayPlanCardState extends State<_TodayPlanCard> {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
-                      if (widget.isCompressed) ...[
+                      if (widget.compressedData != null) ...[
                         const SizedBox(height: 4),
                         Container(
                           padding: const EdgeInsets.symmetric(

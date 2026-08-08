@@ -627,6 +627,24 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
     } catch (_) {}
   }
 
+  // Mirrors _onCalorieToggle() above — persists the on/off state itself
+  // immediately on every flip, independent of _saveWeightGoal()'s "Save
+  // Weight Goal" button (which only saves goalWeight/goalDate, and is
+  // only rendered while this is on). Previously the switch only updated
+  // local state, with no write path at all for turning it off — the
+  // button that could persist that was itself hidden the instant the
+  // toggle went off, so an OFF state could never actually reach
+  // Firestore and always silently reverted to the last-saved ON value
+  // on the next load.
+  Future<void> _onWeightGoalToggle(bool val) async {
+    setState(() => _weightGoalActive = val);
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      await _firestore.updateHealthData({'weightGoalActive': val});
+    } catch (_) {}
+  }
+
   void _autoCalcFromDaily() {
     final daily = int.tryParse(_dailyCalCtrl.text) ?? 0;
     if (daily > 0) {
@@ -1479,8 +1497,7 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
               ),
               Switch(
                 value: _weightGoalActive,
-                onChanged: (val) =>
-                    setState(() => _weightGoalActive = val),
+                onChanged: _onWeightGoalToggle,
                 activeColor: WW.teal,
               ),
             ],

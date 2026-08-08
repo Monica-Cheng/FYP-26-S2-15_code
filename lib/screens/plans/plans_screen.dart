@@ -40,7 +40,7 @@ class _PlansScreenState extends State<PlansScreen> {
   bool _hasError = false;
   Map<String, dynamic>? _trackedPlan;
   bool _trackedPlanLoading = true;
-  StreamSubscription<DocumentSnapshot>? _userDocSub;
+  StreamSubscription<Map<String, dynamic>?>? _userDocSub;
   // Fetched alongside _trackedPlan (see _loadTrackedPlan()) — same
   // getPlanProgress() data home_screen.dart's own _todayCompleted and the
   // discovery step in session_resume_prompt.dart both need.
@@ -69,12 +69,10 @@ class _PlansScreenState extends State<PlansScreen> {
   void _startUserDocStream() {
     final uid = _authService.getCurrentUser()?.uid;
     if (uid == null) return;
-    _userDocSub = FirebaseFirestore.instance
-        .collection('users')
-        .doc(uid)
-        .snapshots()
+    _userDocSub = _firestoreService
+        .getUserProfileStream(uid)
         .skip(1) // skip initial snapshot — initState already called _loadPlans()
-        .listen((snap) {
+        .listen((data) {
       if (mounted) {
         _loadPlans();
         _loadTrackedPlan();

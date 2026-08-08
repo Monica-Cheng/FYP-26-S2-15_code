@@ -296,14 +296,29 @@ class FirestoreService {
 
   // ---------------------------------------------------------------------------
   // Reads users/{uid} and returns the data map, or null if the document
-  // does not exist. Use for one-off profile reads (not reactive — for
-  // reactive updates use a StreamProvider in lib/providers/).
+  // does not exist. Use for one-off profile reads — for a live/reactive
+  // read of the same document, see getUserProfileStream() right below.
   // ---------------------------------------------------------------------------
   Future<Map<String, dynamic>?> getUserProfile(String uid) async {
     final doc =
         await _db.collection(Collections.users).doc(uid).get();
     if (!doc.exists) return null;
     return doc.data();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Same document as getUserProfile() above, as a live stream instead of a
+  // one-off read — for screens that need to react to users/{uid} changing
+  // (e.g. trackedPlanId, displayName) without a manual re-fetch. Mirrors
+  // getPlanStream()/getPlanProgressStream()'s existing shape: null when the
+  // document doesn't (or no longer does) exist, otherwise its data map.
+  // ---------------------------------------------------------------------------
+  Stream<Map<String, dynamic>?> getUserProfileStream(String uid) {
+    return _db
+        .collection(Collections.users)
+        .doc(uid)
+        .snapshots()
+        .map((doc) => doc.exists ? doc.data() : null);
   }
 
   // ---------------------------------------------------------------------------
@@ -2125,7 +2140,13 @@ class FirestoreService {
       'currentDayIndex': 1,
       'lastCompletedDate': '',
       'lastCompletedDayIndex': 0,
-      'compressedDays': [],
+      // Map of dayIndex (as a string key) -> {removedExercises: [int],
+      // cardioOverrides: {exerciseIndex (string key): minutes}} — see
+      // plan_schedule_screen.dart's _CompressedDayData for the in-memory
+      // shape and _parseCompressedDays() for graceful handling of the
+      // older boolean-array format ([dayIndex, ...]) some existing users'
+      // docs may still have.
+      'compressedDays': {},
       // Lifetime per-day completion ledger — every dayIndex ever marked
       // done via markSessionComplete(), persisting across app sessions
       // until an explicit resetPlanProgress() (or the automatic
@@ -2157,11 +2178,31 @@ class FirestoreService {
       'planId': planId,
       'currentDayIndex': 1,
       'lastCompletedDate': '',
-      'compressedDays': [],
+      'compressedDays': {},
       'completedDayIndices': [],
       'breakModeActive': false,
       'trackingStartDate': null,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Same read as getPlanProgress() above, but never auto-creates a doc or
+  // returns a default map when one doesn't exist — plain null instead, same
+  // as a bare .get(). getPlanProgress()'s auto-init-on-missing behavior is
+  // right for screens actively driving a plan's progress forward, but wrong
+  // for a passive/background check (e.g. home_screen.dart's missed-session
+  // check) where silently creating a fresh progress doc as a side effect of
+  // a read would be incorrect.
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>?> getPlanProgressIfExists(
+      String uid, String planId) async {
+    final doc = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(_planProgress)
+        .doc(planId)
+        .get();
+    return doc.exists ? doc.data() : null;
   }
 
   Stream<Map<String, dynamic>?> getPlanProgressStream(
@@ -2366,7 +2407,7 @@ class FirestoreService {
       'currentDayIndex': 1,
       'lastCompletedDate': '',
       'lastCompletedDayIndex': 0,
-      'compressedDays': [],
+      'compressedDays': {},
       'completedDayIndices': [],
     });
   }
@@ -2550,6 +2591,67 @@ class FirestoreService {
       'date': targetDate,
       'timestamp': FieldValue.serverTimestamp(),
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Whether a users/{uid}/missedSessions doc already exists for [date]
+  // ('yyyy-MM-dd', same convention as the doc id logMissedSession() writes
+  // to). Used by home_screen.dart's missed-workout banner check to avoid
+  // double-flagging a day that's already been recorded.
+  // ---------------------------------------------------------------------------
+  Future<bool> hasMissedSessionForDate(String uid, String date) async {
+    final doc = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection('missedSessions')
+        .doc(date)
+        .get();
+    return doc.exists;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live stream of users/{uid}/missedSessions docs, newest first — powers
+  // progress_screen.dart's check-ins list.
+  // ---------------------------------------------------------------------------
+  Stream<List<Map<String, dynamic>>> getMissedSessionsStream(
+    String uid, {
+    int limit = 50,
+  }) {
+    return _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection('missedSessions')
+        .orderBy('timestamp', descending: true)
+        .limit(limit)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => {'id': doc.id, ...doc.data()})
+            .toList());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Count of users/{uid}/missedSessions docs whose 'date' field falls within
+  // the inclusive [start, end] range — used by coach_screen.dart's Phase 4
+  // referral-nudge trigger (5+ missed sessions in the trailing 7 days).
+  // 'date' is a 'yyyy-MM-dd' string (same value as the doc id), so a
+  // lexicographic range query works directly, same trick getMonthActivity()
+  // already uses for dailyActivityLog doc-id ranges.
+  // ---------------------------------------------------------------------------
+  Future<int> getMissedSessionCountInRange(
+    String uid,
+    DateTime start,
+    DateTime end,
+  ) async {
+    String dateKey(DateTime d) =>
+        '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    final snapshot = await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection('missedSessions')
+        .where('date', isGreaterThanOrEqualTo: dateKey(start))
+        .where('date', isLessThanOrEqualTo: dateKey(end))
+        .get();
+    return snapshot.docs.length;
   }
 
   // ---------------------------------------------------------------------------

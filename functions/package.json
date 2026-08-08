@@ -2,7 +2,7 @@
   "name": "functions",
   "description": "Cloud Functions for WiseWorkout",
   "engines": {
-    "node": "20"
+    "node": "24"
   },
   "main": "index.js",
   "scripts": {

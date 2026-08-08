@@ -9,7 +9,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -17,7 +16,7 @@ import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 
 import '../../core/app_theme.dart';
-import '../../core/constants.dart';
+import '../../core/compress_utils.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
@@ -328,11 +327,7 @@ class _GymSessionState extends State<GymSessionScreen> {
 
       // Check user doc for a one-time plan+day override
       // (set by Start button on any day card in All Plans)
-      final userDoc = await FirebaseFirestore.instance
-          .collection(Collections.users)
-          .doc(uid)
-          .get();
-      final userData = userDoc.data();
+      final userData = await FirestoreService().getUserProfile(uid);
       final overridePlanId = userData?['overridePlanId'] as String?;
       final overrideDay =
           (userData?['overrideDayIndex'] as num?)?.toInt();
@@ -350,15 +345,12 @@ class _GymSessionState extends State<GymSessionScreen> {
         FirestoreService().clearOverrideDayIndex(uid, overridePlanId);
 
         // Fetch the override plan directly
-        final planDoc = await FirebaseFirestore.instance
-            .collection(Collections.plans)
-            .doc(overridePlanId)
-            .get();
-        if (!planDoc.exists) {
+        final overridePlan = await FirestoreService().getPlan(overridePlanId);
+        if (overridePlan == null) {
           if (mounted) setState(() => _isLoadingSession = false);
           return;
         }
-        plan = {'id': planDoc.id, ...planDoc.data()!};
+        plan = overridePlan;
         planId = overridePlanId;
         effectiveDayIndex = overrideDay;
         _planId = planId;
@@ -429,23 +421,24 @@ class _GymSessionState extends State<GymSessionScreen> {
           return;
         }
 
+        // Shared with plan_schedule_screen.dart/home_screen.dart/
+        // plan_detail_screen.dart (core/compress_utils.dart) — applies the
+        // real per-exercise removals/cardio-minute overrides the user
+        // actually chose in the Compress sheet, replacing the old blanket
+        // tag != 'Accessory' filter. That old filter also only ever
+        // recognized compressedDays as a List (the pre-Phase-1 format) —
+        // parseCompressedDays() here handles both that legacy shape and
+        // the current per-exercise map shape.
+        final sessionMaps =
+            sessions.map((s) => s as Map<String, dynamic>).toList();
+        final compressedDayData = parseCompressedDays(
+            progress?['compressedDays'], sessionMaps)[effectiveDayIndex];
+        final isCompressed = compressedDayData != null;
+        final rawExerciseMaps = ((session['exercises'] as List<dynamic>?) ?? [])
+            .map((e) => e as Map<String, dynamic>)
+            .toList();
         List<dynamic> rawExercises =
-            (session['exercises'] as List<dynamic>?) ?? [];
-
-        bool isCompressed = false;
-        final compressedDaysList = progress?['compressedDays'];
-        if (compressedDaysList is List) {
-          final compressedDays =
-              compressedDaysList.map((d) => (d as num).toInt()).toSet();
-          if (compressedDays.contains(effectiveDayIndex)) {
-            rawExercises = rawExercises.where((e) {
-              final tag =
-                  (e as Map<String, dynamic>)['tag'] as String? ?? '';
-              return tag != 'Accessory';
-            }).toList();
-            isCompressed = true;
-          }
-        }
+            applyCompression(rawExerciseMaps, compressedDayData);
 
         final exercises = _parseExercises(rawExercises,
             isListSets: null, debugSource: 'FRESH_START_TRACKED');
@@ -1573,7 +1566,7 @@ class _GymSessionState extends State<GymSessionScreen> {
     };
 
     final sessionRunId = _sessionRunId;
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = AuthService().getCurrentUser()?.uid;
 
     // Plan-linked session ending on a gym exercise rather than a cardio
     // block — previously this fell straight through to the legacy
@@ -1825,7 +1818,7 @@ class _GymSessionState extends State<GymSessionScreen> {
     if (confirmed != true || !mounted) return;
 
     final sessionRunId = _sessionRunId;
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = AuthService().getCurrentUser()?.uid;
     if (sessionRunId != null && uid != null) {
       setState(() => _isSaving = true);
       for (final ex in _exercises) {
@@ -3569,8 +3562,16 @@ class _GymSessionState extends State<GymSessionScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // ex.name is a static string baked in at plan-
+                      // authoring time (admin plans literally save cardio
+                      // blocks as name: "Run 20min") — never touched by
+                      // compression, which only overrides the cardioMinutes
+                      // field. Built dynamically from cardioActivity/
+                      // cardioMinutes instead, the same already-correct
+                      // fields the subtitle below already uses, so a
+                      // compressed duration shows consistently in both.
                       Text(
-                        ex.name,
+                        '${ex.cardioActivity} ${ex.cardioMinutes}min',
                         style: const TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w800,
@@ -3737,8 +3738,12 @@ class _GymSessionState extends State<GymSessionScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // Same fix as _buildCardioPlaceholderCard above —
+                      // ex.name is a static plan-authored string ("Run
+                      // 20min") never touched by compression's cardioMinutes
+                      // override.
                       Text(
-                        ex.name,
+                        '${ex.cardioActivity} ${ex.cardioMinutes}min',
                         style: const TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w800,

@@ -18,7 +18,15 @@ import '../../widgets/common/month_calendar.dart';
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
 class ProgressScreen extends StatefulWidget {
-  const ProgressScreen({super.key});
+  // Defaults to true so this compiles/behaves exactly as before for any
+  // call site that doesn't pass it — the real signal comes from MainShell
+  // (home_screen.dart) passing `_selectedIndex == <progress tab index>`,
+  // which this screen can't observe on its own since it lives inside an
+  // IndexedStack (see didUpdateWidget() below — same mechanism
+  // coach_screen.dart's CoachScreen uses for its own consent banner).
+  const ProgressScreen({super.key, this.isVisible = true});
+
+  final bool isVisible;
 
   @override
   State<ProgressScreen> createState() => _ProgressScreenState();
@@ -91,14 +99,21 @@ class _ProgressScreenState extends State<ProgressScreen> {
   int _weekGymSessions = 0;
   bool _chartsLoading = true;
   bool _checkInsLoading = true;
-  Stream<QuerySnapshot>? _checkInsStream;
+  Stream<List<Map<String, dynamic>>>? _checkInsStream;
 
   List<Map<String, dynamic>> _weightLogs = [];
   bool _weightLoading = true;
   double? _goalWeight;
+  // goalWeight/weightGoalActive both live in the encrypted health-data
+  // blob (this session's encryption migration) — fetched together via
+  // getHealthData() in _loadGoalWeight() below, never via a live
+  // Firestore stream (encrypted data can't be streamed client-side).
+  // Gates whether the chart actually shows the goal line/marker — see
+  // _loadGoalWeight()'s own comment for why _goalWeight != null alone
+  // isn't enough.
+  bool _weightGoalActive = false;
   bool _weightExpanded = true;
   StreamSubscription<List<Map<String, dynamic>>>? _weightSub;
-  StreamSubscription<DocumentSnapshot>? _userDocSub;
 
   // Activity Calendar section — collapsed by default (unlike
   // _weightExpanded above) since it's a new, opt-in addition to an
@@ -178,7 +193,6 @@ class _ProgressScreenState extends State<ProgressScreen> {
     _loadChartData();
     _loadCheckIns();
     _loadGoalWeight();
-    _startUserDocStream();
     _startWeightStream();
     _loadNutritionLogs();
   }
@@ -186,8 +200,27 @@ class _ProgressScreenState extends State<ProgressScreen> {
   @override
   void dispose() {
     _weightSub?.cancel();
-    _userDocSub?.cancel();
     super.dispose();
+  }
+
+  // ProgressScreen lives inside MainShell's IndexedStack (home_screen.dart),
+  // which keeps every tab's State alive and never re-runs initState() on a
+  // tab switch — so _loadGoalWeight()'s one-time initState call goes stale
+  // the moment the user changes goalWeight/weightGoalActive in Settings and
+  // switches back here without a full app restart. MainShell passes
+  // `isVisible: _selectedIndex == <progress tab index>`, which changes on
+  // every tab switch even though this same State instance persists;
+  // didUpdateWidget is what a StatefulWidget uses to notice a new widget
+  // config at the same tree position, so the false→true edge here is the
+  // earliest reliable "this tab just became visible again" signal
+  // available without restructuring the IndexedStack itself. Same
+  // mechanism as CoachScreen's own didUpdateWidget for its consent banner.
+  @override
+  void didUpdateWidget(covariant ProgressScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isVisible && !oldWidget.isVisible) {
+      _loadGoalWeight();
+    }
   }
 
   Future<void> _loadChartData() async {
@@ -255,13 +288,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
       return;
     }
     setState(() {
-      _checkInsStream = FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .collection('missedSessions')
-          .orderBy('timestamp', descending: true)
-          .limit(50)
-          .snapshots();
+      _checkInsStream = FirestoreService().getMissedSessionsStream(uid);
       _checkInsLoading = false;
     });
   }
@@ -414,40 +441,28 @@ class _ProgressScreenState extends State<ProgressScreen> {
     }
   }
 
+  // goalWeight/weightGoalActive both moved off the plaintext user doc into
+  // the encrypted health-data blob (this session's encryption migration) —
+  // getUserProfile() no longer has either field, so this reads
+  // getHealthData() instead, matching the pattern health_profile_screen.dart
+  // and settings_screen.dart already use for calorieGoalActive. Called both
+  // from initState() and from didUpdateWidget() above on every tab-visible
+  // transition, since encrypted data can't be streamed client-side the way
+  // the old (broken) raw Firestore listener assumed.
   Future<void> _loadGoalWeight() async {
     try {
       final uid = AuthService().getCurrentUser()?.uid;
       if (uid == null) return;
-      final profile = await FirestoreService().getUserProfile(uid);
+      final healthData = await FirestoreService().getHealthData(uid);
       if (!mounted) return;
-      final raw = profile?['goalWeight'];
+      final raw = healthData['goalWeight'];
       setState(() {
         _goalWeight = raw is num
             ? raw.toDouble()
             : double.tryParse(raw?.toString() ?? '');
+        _weightGoalActive = healthData['weightGoalActive'] as bool? ?? false;
       });
     } catch (_) {}
-  }
-
-  void _startUserDocStream() {
-    final uid = AuthService().getCurrentUser()?.uid;
-    if (uid == null) return;
-    _userDocSub = FirebaseFirestore.instance
-        .collection('users')
-        .doc(uid)
-        .snapshots()
-        .listen((snap) {
-          if (!mounted) return;
-          final data = snap.data();
-          if (data == null) return;
-          final raw = data['goalWeight'];
-          final newGoal = raw is num
-              ? raw.toDouble()
-              : double.tryParse(raw?.toString() ?? '');
-          if (newGoal != _goalWeight) {
-            setState(() => _goalWeight = newGoal);
-          }
-        });
   }
 
   void _startWeightStream() {
@@ -1259,7 +1274,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
       final weights = spots.map((s) => s.y).toList();
       minY = (weights.reduce((a, b) => a < b ? a : b) - 3).clamp(30, 200);
       maxY = (weights.reduce((a, b) => a > b ? a : b) + 3).clamp(50, 250);
-      if (_goalWeight != null) {
+      if (_goalWeight != null && _weightGoalActive) {
         minY = minY.clamp(0, _goalWeight! - 2);
         maxY = maxY < _goalWeight! + 2 ? _goalWeight! + 2 : maxY;
       }
@@ -1360,7 +1375,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                         'Tap "+ Log" to record your first weight',
                         style: TextStyle(fontSize: 12, color: WW.textSec),
                       ),
-                      if (_goalWeight != null) ...[
+                      if (_goalWeight != null && _weightGoalActive) ...[
                         const SizedBox(height: 12),
                         Container(
                           padding: const EdgeInsets.all(10),
@@ -1444,7 +1459,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                                   color: WW.primary.withOpacity(0.08),
                                 ),
                               ),
-                              if (_goalWeight != null)
+                              if (_goalWeight != null && _weightGoalActive)
                                 LineChartBarData(
                                   spots: spots.isEmpty
                                       ? [
@@ -1546,7 +1561,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                               ),
                             ),
                           const Spacer(),
-                          if (_goalWeight != null)
+                          if (_goalWeight != null && _weightGoalActive)
                             Row(
                               children: [
                                 const Icon(
@@ -2298,7 +2313,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
   };
 
   Widget _buildCheckInsTab() {
-    return StreamBuilder<QuerySnapshot>(
+    return StreamBuilder<List<Map<String, dynamic>>>(
       stream: _checkInsStream,
       builder: (context, snapshot) {
         if (_checkInsLoading ||
@@ -2307,12 +2322,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
             child: CircularProgressIndicator(color: WW.primary),
           );
         }
-        final checkIns =
-            snapshot.data?.docs.map((doc) {
-              final data = doc.data() as Map<String, dynamic>;
-              return {'id': doc.id, ...data};
-            }).toList() ??
-            [];
+        final checkIns = snapshot.data ?? [];
         if (checkIns.isEmpty) {
           return Center(
             child: Column(

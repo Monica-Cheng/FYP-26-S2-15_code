@@ -236,6 +236,12 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           'name': ex['name'] as String? ?? '',
           'muscle': ex['muscle'] as String? ?? '',
           'restTime': (ex['restTime'] as num?)?.toInt() ?? 90,
+          // Preserves whatever this exercise was actually saved with —
+          // without this, re-opening an existing routine for edit would
+          // silently reset every exercise back to the 'Primary' default
+          // the moment it's saved again, discarding any Accessory choice
+          // made in an earlier edit.
+          'tag': ex['tag'] as String? ?? 'Primary',
           'sets': sets,
         };
       }).toList();
@@ -277,6 +283,12 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         'name': name,
         'muscle': muscle,
         'restTime': 90,
+        // Safe default — matches admin-authored plans' own default (see
+        // PlanSessionsEditor.js's emptyExercise()). No equivalent field on
+        // cardio blocks (see _addCardioBlock) — compression handles cardio
+        // via duration override, not removal, so tagging one Accessory
+        // would have no effect.
+        'tag': 'Primary',
         'sets': <Map<String, dynamic>>[
           _newSet(),
         ],
@@ -875,7 +887,12 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
             'name': ex['name'],
             'muscle': ex['muscle'],
             'restTime': ex['restTime'],
-            'tag': 'Primary',
+            // No tag at all for cardio blocks — matches admin-authored
+            // plans' own emptyCardioBlock() default (no tag field),
+            // consistent with compression treating cardio as a duration
+            // override rather than something to remove.
+            if (ex['isCardio'] != true)
+              'tag': ex['tag'] as String? ?? 'Primary',
             'sets': sets,
             if (ex['isCardio'] == true) ...{
               'isCardio': true,
@@ -1531,6 +1548,16 @@ class _ExerciseCardState extends State<_ExerciseCard> {
     widget.onChanged();
   }
 
+  // Toggles this exercise between Primary/Accessory — same tap-to-cycle
+  // pattern as _cycleType() above, just a 2-value cycle instead of 3. No
+  // equivalent exists (or is called) for cardio blocks — see the tag pill's
+  // own `if (!isCardio)` gate in build() below.
+  void _cycleTag() {
+    final current = _ex['tag'] as String? ?? 'Primary';
+    _ex['tag'] = current == 'Accessory' ? 'Primary' : 'Accessory';
+    widget.onChanged();
+  }
+
   void _toggleMenu() {
     if (_menuOpen) {
       _closeMenu();
@@ -1615,6 +1642,8 @@ class _ExerciseCardState extends State<_ExerciseCard> {
     final isCardio = _ex['isCardio'] as bool? ?? false;
     final cardioActivity = _ex['cardioActivity'] as String? ?? '';
     final cardioMinutes = _ex['cardioMinutes'] as int? ?? 30;
+    final tag = _ex['tag'] as String? ?? 'Primary';
+    final isAccessory = tag == 'Accessory';
     final mc = _muscleColor(muscle);
     final mb = _muscleBg(muscle);
     final isOff = restTime == 0;
@@ -1669,9 +1698,17 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                         ),
                       ),
                       if (!isCardio) ...[
-                      const SizedBox(height: 2),
-                      // Rest timer pill
-                      GestureDetector(
+                      const SizedBox(height: 4),
+                      // Rest timer pill + Primary/Accessory tag pill — Wrap
+                      // (not Row) so the two pills fall to a second line
+                      // instead of overflowing on narrow screens (see the
+                      // Small_Phone-profile overflow lessons elsewhere in
+                      // this app).
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: [
+                          GestureDetector(
                         onTap: widget.onShowRest,
                         child: Container(
                           padding: const EdgeInsets.symmetric(
@@ -1708,6 +1745,53 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                             ],
                           ),
                         ),
+                          ),
+                          // Primary/Accessory tag pill — tap to cycle, same
+                          // interaction pattern as a set's type cycling
+                          // (_cycleType). Determines whether Compress can
+                          // ever offer to remove this exercise; defaults to
+                          // Primary (never removed) until the user marks it
+                          // otherwise.
+                          GestureDetector(
+                            onTap: () => setState(() => _cycleTag()),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: isAccessory ? WW.elevated : WW.chipBg,
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: isAccessory
+                                      ? WW.border
+                                      : WW.primary.withValues(alpha: 0.3),
+                                  width: 0.5,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    isAccessory
+                                        ? Icons.low_priority_rounded
+                                        : Icons.push_pin_rounded,
+                                    size: 10,
+                                    color: isAccessory ? WW.textSec : WW.primary,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    tag,
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                      color:
+                                          isAccessory ? WW.textSec : WW.primary,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                     ],

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/compress_utils.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
@@ -51,6 +52,12 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
   // _hasAnyProgress correctly read as "nothing yet" in that window.
   Set<int> _completedDayIndices = {};
   int _currentDayIndex = 1;
+  // See core/compress_utils.dart's CompressedDayData — shared with
+  // plan_schedule_screen.dart/gym_session_screen.dart/home_screen.dart so
+  // this screen's day previews can never disagree with what a tracked
+  // session actually does. Loaded alongside _completedDayIndices from the
+  // same planProgress doc, in _checkCompletionState() below.
+  Map<int, CompressedDayData> _compressedDays = {};
 
   @override
   void initState() {
@@ -108,10 +115,17 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
       final loadedCompletedDayIndices = rawCompletedDayIndices is List
           ? rawCompletedDayIndices.map((d) => (d as num).toInt()).toSet()
           : <int>{};
+      final sessions = (_planData?['sessions'] as List<dynamic>?)
+              ?.map((s) => s as Map<String, dynamic>)
+              .toList() ??
+          <Map<String, dynamic>>[];
+      final loadedCompressedDays =
+          parseCompressedDays(progress?['compressedDays'], sessions);
       setState(() {
         _completedDayIndices = loadedCompletedDayIndices;
         _currentDayIndex =
             (progress?['currentDayIndex'] as num?)?.toInt() ?? 1;
+        _compressedDays = loadedCompressedDays;
       });
     } catch (_) {}
   }
@@ -1039,6 +1053,7 @@ class _PlanDetailScreenState extends State<PlanDetailScreen> {
           return _DayCard(
             sessionData: s,
             isCompleted: isCompleted,
+            compressedData: _compressedDays[dayNumber],
             onPreview: isCompleted ? null : () => _onStartDay(dayNumber),
           );
         }),
@@ -1284,6 +1299,10 @@ class _DayCard extends StatefulWidget {
   // _buildSessionSchedule) — this widget doesn't re-derive that itself,
   // just reflects it visually.
   final bool isCompleted;
+  // See core/compress_utils.dart's CompressedDayData. Null means this day
+  // has no compression entry at all (including the common case of not
+  // being tracked yet, where _compressedDays is empty for every day).
+  final CompressedDayData? compressedData;
 
   const _DayCard({
     required this.sessionData,
@@ -1291,6 +1310,7 @@ class _DayCard extends StatefulWidget {
     this.onStart,
     this.onPreview,
     this.isCompleted = false,
+    this.compressedData,
   });
 
   @override
@@ -1305,10 +1325,19 @@ class _DayCardState extends State<_DayCard> {
     final isRest = widget.sessionData['isRestDay'] == true;
     final dayLabel = widget.sessionData['day'] as String? ?? '';
     final sessionName = widget.sessionData['name'] as String? ?? '';
-    final estimatedMinutes =
+    final baseEstimatedMinutes =
         (widget.sessionData['estimatedMinutes'] as num?)?.toInt() ?? 0;
-    final rawExercises =
-        (widget.sessionData['exercises'] as List<dynamic>?) ?? [];
+    final allExercises = (widget.sessionData['exercises'] as List<dynamic>?)
+            ?.map((e) => e as Map<String, dynamic>)
+            .toList() ??
+        <Map<String, dynamic>>[];
+    // Applies the real per-exercise removals/cardio overrides for this
+    // day, if any — this screen previously never filtered by compression
+    // at all, always showing the full exercise list regardless of a
+    // tracked day's actual compressed state.
+    final rawExercises = applyCompression(allExercises, widget.compressedData);
+    final estimatedMinutes = estimatedMinutesAfterCompression(
+        baseEstimatedMinutes, widget.compressedData, allExercises);
 
     // Badge text: "Day 1" → "D1", anything else → first 3 chars
     final badge = dayLabel.startsWith('Day ')
@@ -1510,8 +1539,7 @@ class _DayCardState extends State<_DayCard> {
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
               child: Column(
                 children: List.generate(rawExercises.length, (i) {
-                  final exMap =
-                      rawExercises[i] as Map<String, dynamic>;
+                  final exMap = rawExercises[i];
                   final exName =
                       exMap['name'] as String? ?? 'Exercise';
                   final setsValue = exMap['sets'];
