@@ -5,6 +5,7 @@ function FilterBar({
   filters,
   onReset,
   resetLabel = 'Reset',
+  resetVariant = 'ghost',
   resetDisabled = false,
   exportAction,
   count,
@@ -18,7 +19,12 @@ function FilterBar({
         {search ? <div className="wwa-filterbar__search">{search}</div> : null}
         {filters ? <div className="wwa-filterbar__filters">{filters}</div> : null}
         {onReset ? (
-          <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-ghost" onClick={onReset} disabled={resetDisabled}>
+          <button
+            type="button"
+            className={`wwa-btn wwa-btn-sm ${resetVariant === 'secondary' ? 'wwa-btn-secondary' : 'wwa-btn-ghost'}`}
+            onClick={onReset}
+            disabled={resetDisabled}
+          >
             {resetLabel}
           </button>
         ) : null}

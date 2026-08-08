@@ -1,73 +1,155 @@
-import React, { useState, useEffect } from 'react';
-import { functions } from '../firebase';
+import React, { useEffect, useState } from 'react';
 import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
+import { Download, Eye, EyeOff, Pencil, Trash2 } from 'lucide-react';
+import { functions } from '../firebase';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import Badge from '../components/ui/Badge';
-import EmptyState from '../components/ui/EmptyState';
-import SkeletonBlock from '../components/ui/SkeletonBlock';
 import PostDetailPanel from '../components/PostDetailPanel';
+import FilterBar from '../components/ui/FilterBar';
+import SearchInput from '../components/ui/SearchInput';
+import SelectField from '../components/ui/SelectField';
+import DataTable from '../components/ui/DataTable';
+import TableActions from '../components/ui/TableActions';
+import LoadingState from '../components/ui/LoadingState';
+import ErrorState from '../components/ui/ErrorState';
 import { toDate, formatDate } from '../utils/dateUtils';
+
+function PostsStyles() {
+  return (
+    <style>{`
+      .wwpo-page {
+        display: flex;
+        flex-direction: column;
+        gap: var(--ww-space-5);
+      }
+      .wwpo-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: var(--ww-space-5);
+      }
+      .wwpo-layout.has-detail {
+        grid-template-columns: minmax(0, 1fr) var(--ww-drawer-width);
+        align-items: start;
+      }
+      .wwpo-table .wwa-table th:last-child,
+      .wwpo-table .wwa-table td:last-child {
+        width: 1%;
+        white-space: nowrap;
+      }
+      .wwpo-title-cell,
+      .wwpo-author-cell {
+        min-width: 0;
+      }
+      .wwpo-title-cell__title,
+      .wwpo-author-cell__name {
+        font-size: var(--ww-type-body-size);
+        font-weight: 600;
+        color: var(--ww-text);
+        line-height: 1.35;
+      }
+      .wwpo-title-cell__meta,
+      .wwpo-author-cell__meta {
+        margin-top: 3px;
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        color: var(--ww-text-sec);
+        line-height: 1.4;
+      }
+      .wwpo-title-cell__meta {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .wwpo-engagement {
+        color: var(--ww-text-sec);
+        white-space: nowrap;
+      }
+      .wwpo-inline-actions {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        white-space: nowrap;
+      }
+      @media (max-width: 1160px) {
+        .wwpo-layout.has-detail {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+    `}</style>
+  );
+}
+
+const typeTone = (type) => {
+  const value = (type || '').toLowerCase();
+  if (value.includes('meal')) return 'brand';
+  if (value.includes('workout')) return 'neutral';
+  return 'neutral';
+};
+
+const statusTone = (isHidden) => (isHidden ? 'warning' : 'success');
+
+const postTitle = (post) => post.foodName || post.caption || 'Untitled post';
 
 function Posts() {
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all');
   const [selectedPostId, setSelectedPostId] = useState(null);
+  const [editNonce, setEditNonce] = useState(0);
+
+  const fetchPosts = async () => {
+    setLoading(true);
+    setLoadError('');
+
+    try {
+      const adminListPostsDashboard = httpsCallable(functions, 'adminListPostsDashboard');
+      const result = await adminListPostsDashboard();
+      const data = result.data || {};
+      setPosts(Array.isArray(data.posts) ? data.posts : []);
+    } catch (err) {
+      console.error('Failed to load posts dashboard:', err);
+      const detail = err?.code ? ` (${err.code})` : '';
+      setLoadError(`Failed to load posts dashboard.${detail}`);
+      window.alert(`Failed to load posts dashboard.${detail}`);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const fetchPosts = async () => {
-      setLoading(true);
-  
-      try {
-        const adminListPostsDashboard = httpsCallable(
-          functions,
-          'adminListPostsDashboard'
-        );
-  
-        const result = await adminListPostsDashboard();
-        const data = result.data || {};
-  
-        setPosts(
-          Array.isArray(data.posts) ? data.posts : []
-        );
-      } catch (err) {
-        console.error('Failed to load posts dashboard:', err);
-  
-        const detail = err?.code ? ` (${err.code})` : '';
-  
-        window.alert(
-          `Failed to load posts dashboard.${detail}`
-        );
-      } finally {
-        setLoading(false);
-      }
-    };
-  
     fetchPosts();
   }, []);
+
+  const openPostDetails = (postId) => {
+    setSelectedPostId(postId);
+  };
+
+  const openPostEditor = (postId) => {
+    setSelectedPostId(postId);
+    setEditNonce((value) => value + 1);
+  };
 
   // Missing isHidden is treated as Active — matches the mobile app's own
   // absence-as-default convention (e.g. onboardingComplete, healthConnected).
   const toggleHidden = async (postId, currentlyHidden) => {
     const isHidden = !currentlyHidden;
-  
-    const adminSetPostHidden = httpsCallable(
-      functions,
-      'adminSetPostHidden'
-    );
-  
+    const adminSetPostHidden = httpsCallable(functions, 'adminSetPostHidden');
+
     await adminSetPostHidden({
       postId,
       isHidden,
     });
-  
-    setPosts(prev =>
-      prev.map(post =>
+
+    setPosts((prev) =>
+      prev.map((post) =>
         post.id === postId
           ? { ...post, isHidden }
           : post
@@ -76,56 +158,41 @@ function Posts() {
   };
 
   const handleDelete = async (postId) => {
-    const post = posts.find(item => item.id === postId);
-  
-    const label =
-      post?.foodName ||
-      post?.caption ||
-      postId;
-  
+    const post = posts.find((item) => item.id === postId);
+    const label = post?.foodName || post?.caption || postId;
+
     const confirmation = window.prompt(
       `Permanently delete this post?\n\n` +
       `"${label}"\n\n` +
       'Its reactions and comments will also be removed.\n\n' +
       'Type DELETE POST exactly to continue:'
     );
-  
+
     if (confirmation !== 'DELETE POST') return;
-  
-    const adminDeletePost = httpsCallable(
-      functions,
-      'adminDeletePost'
-    );
-  
+
+    const adminDeletePost = httpsCallable(functions, 'adminDeletePost');
+
     await adminDeletePost({
       postId,
       confirmation,
     });
-  
-    setPosts(prev =>
-      prev.filter(postItem => postItem.id !== postId)
-    );
-  
-    setSelectedPostId(prev =>
-      prev === postId ? null : prev
-    );
+
+    setPosts((prev) => prev.filter((postItem) => postItem.id !== postId));
+    setSelectedPostId((prev) => (prev === postId ? null : prev));
   };
 
   const handleSavePost = async (postId, changes) => {
-    const adminUpdatePost = httpsCallable(
-      functions,
-      'adminUpdatePost'
-    );
-  
+    const adminUpdatePost = httpsCallable(functions, 'adminUpdatePost');
+
     const result = await adminUpdatePost({
       postId,
       changes,
     });
-  
+
     const savedChanges = result.data?.changes || changes;
-  
-    setPosts(prev =>
-      prev.map(post =>
+
+    setPosts((prev) =>
+      prev.map((post) =>
         post.id === postId
           ? { ...post, ...savedChanges }
           : post
@@ -133,8 +200,7 @@ function Posts() {
     );
   };
 
-  // Distinct post types actually present in the loaded data — no hardcoded list.
-  const types = Array.from(new Set(posts.map(p => p.type).filter(Boolean))).sort();
+  const types = Array.from(new Set(posts.map((post) => post.type).filter(Boolean))).sort();
 
   const hasActiveFilters = Boolean(
     search || typeFilter !== 'all' || statusFilter !== 'all' || dateFilter !== 'all'
@@ -149,10 +215,13 @@ function Posts() {
 
   const matchesDateFilter = (post) => {
     if (dateFilter === 'all') return true;
+
     const created = toDate(post.createdAt);
     if (!created) return false;
+
     const now = new Date();
     const daysAgo = (now - created) / (1000 * 60 * 60 * 24);
+
     if (dateFilter === 'today') {
       return created.toDateString() === now.toDateString();
     }
@@ -161,42 +230,42 @@ function Posts() {
     return true;
   };
 
-  // All filtering happens locally against the posts already fetched above —
-  // no additional Firestore reads are triggered by search or filter changes.
-  const filtered = posts.filter(p => {
-    const q = search.toLowerCase();
-    const matchesSearch = !q ||
-      (p.authorName || '').toLowerCase().includes(q) ||
-      (p.foodName || '').toLowerCase().includes(q) ||
-      (p.caption || '').toLowerCase().includes(q);
-    const matchesType = typeFilter === 'all' || p.type === typeFilter;
-    const isHidden = !!p.isHidden;
-    const matchesStatus = statusFilter === 'all' ||
+  const filtered = posts.filter((post) => {
+    const query = search.toLowerCase();
+    const matchesSearch =
+      !query ||
+      (post.authorName || '').toLowerCase().includes(query) ||
+      (post.foodName || '').toLowerCase().includes(query) ||
+      (post.caption || '').toLowerCase().includes(query);
+    const matchesType = typeFilter === 'all' || post.type === typeFilter;
+    const isHidden = !!post.isHidden;
+    const matchesStatus =
+      statusFilter === 'all' ||
       (statusFilter === 'hidden' ? isHidden : !isHidden);
-    return matchesSearch && matchesType && matchesStatus && matchesDateFilter(p);
+
+    return matchesSearch && matchesType && matchesStatus && matchesDateFilter(post);
   });
 
-  const selectedPost = posts.find(p => p.id === selectedPostId) || null;
+  const selectedPost = posts.find((post) => post.id === selectedPostId) || null;
 
-  // Exports exactly the rows currently matching search + filters. imageBase64
-  // is deliberately excluded — it can be large and would bloat the file.
   const handleExport = () => {
-    const rows = filtered.map(p => ({
-      'Post ID': p.id,
-      Author: p.authorName || '—',
-      'User UID': p.uid || '—',
-      'Food Name': p.foodName || '—',
-      Caption: p.caption || '—',
-      Type: p.type || '—',
-      Calories: p.calories ?? '—',
-      'Protein (g)': p.proteinG ?? '—',
-      'Carbs (g)': p.carbsG ?? '—',
-      'Fat (g)': p.fatG ?? '—',
-      Reactions: p.reactionCount ?? 0,
-      Comments: p.commentCount ?? 0,
-      Status: p.isHidden ? 'Hidden' : 'Active',
-      'Created Date': formatDate(p.createdAt),
+    const rows = filtered.map((post) => ({
+      'Post ID': post.id,
+      Author: post.authorName || '—',
+      'User UID': post.uid || '—',
+      'Food Name': post.foodName || '—',
+      Caption: post.caption || '—',
+      Type: post.type || '—',
+      Calories: post.calories ?? '—',
+      'Protein (g)': post.proteinG ?? '—',
+      'Carbs (g)': post.carbsG ?? '—',
+      'Fat (g)': post.fatG ?? '—',
+      Reactions: post.reactionCount ?? 0,
+      Comments: post.commentCount ?? 0,
+      Status: post.isHidden ? 'Hidden' : 'Active',
+      'Created Date': formatDate(post.createdAt),
     }));
+
     const worksheet = XLSX.utils.json_to_sheet(rows);
     worksheet['!cols'] = [
       { wch: 22 }, { wch: 20 }, { wch: 22 }, { wch: 20 }, { wch: 30 }, { wch: 12 },
@@ -208,158 +277,216 @@ function Posts() {
     XLSX.writeFile(workbook, 'WiseWorkout_Posts.xlsx');
   };
 
+  const columns = [
+    {
+      key: 'post',
+      header: 'Post',
+      render: (post) => {
+        const title = postTitle(post);
+        const secondary =
+          post.foodName && post.caption
+            ? post.caption
+            : null;
+
+        return (
+          <div className="wwpo-title-cell">
+            <div className="wwpo-title-cell__title">{title}</div>
+            {secondary ? <div className="wwpo-title-cell__meta">{secondary}</div> : null}
+          </div>
+        );
+      },
+    },
+    {
+      key: 'author',
+      header: 'Author',
+      render: (post) => (
+        <div className="wwpo-author-cell">
+          <div className="wwpo-author-cell__name">{post.authorName || '—'}</div>
+          {post.uid ? <div className="wwpo-author-cell__meta">{post.uid}</div> : null}
+        </div>
+      ),
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      render: (post) => <Badge tone={typeTone(post.type)}>{post.type || '—'}</Badge>,
+    },
+    {
+      key: 'engagement',
+      header: 'Engagement',
+      render: (post) => (
+        <span className="wwpo-engagement">
+          {post.reactionCount ?? 0} reactions · {post.commentCount ?? 0} comments
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      render: (post) => {
+        const isHidden = !!post.isHidden;
+        return (
+          <Badge tone={statusTone(isHidden)}>
+            {isHidden ? 'Hidden' : 'Active'}
+          </Badge>
+        );
+      },
+    },
+    {
+      key: 'created',
+      header: 'Created',
+      render: (post) => formatDate(post.createdAt),
+    },
+  ];
+
+  const typeOptions = [{ value: 'all', label: 'Type: All' }, ...types.map((value) => ({ value, label: value }))];
+
   return (
-    <div>
+    <div className="wwpo-page">
       <AdminStyles />
+      <PostsStyles />
+
       <PageHeader
         title="Posts"
-        subtitle={loading ? 'Loading posts…' : `${posts.length} posts on the platform`}
+        description="Manage community and nutrition content"
+        count={loading ? undefined : `${posts.length} total posts`}
+        actions={
+          <button
+            type="button"
+            className="wwa-btn wwa-btn-secondary"
+            onClick={handleExport}
+            disabled={loading || filtered.length === 0}
+          >
+            <Download aria-hidden="true" size={16} strokeWidth={2} />
+            Export to Excel
+          </button>
+        }
       />
 
       {loading ? (
-        <SkeletonBlock height={320} />
+        <LoadingState rows={6} />
+      ) : loadError ? (
+        <ErrorState
+          title="Failed to load posts"
+          message={loadError}
+          onRetry={fetchPosts}
+        />
       ) : (
-        <div className={selectedPost ? 'wwa-split-layout' : ''}>
-          <div className={selectedPost ? 'wwa-split-main' : ''}>
-            <div className="wwa-toolbar">
-              <div className="wwa-search">
-                <input
-                  className="wwa-input"
-                  placeholder="Search by author, food name, or caption…"
+        <div className={`wwpo-layout ${selectedPost ? 'has-detail' : ''}`}>
+          <div>
+            <FilterBar
+              search={
+                <SearchInput
                   value={search}
-                  onChange={e => setSearch(e.target.value)}
+                  onChange={(event) => setSearch(event.target.value)}
+                  onClear={() => setSearch('')}
+                  placeholder="Search by author, food name, or caption…"
+                  label="Search posts"
                 />
-              </div>
+              }
+              filters={
+                <>
+                  <SelectField
+                    value={typeFilter}
+                    onChange={(event) => setTypeFilter(event.target.value)}
+                    options={typeOptions}
+                    aria-label="Filter posts by type"
+                  />
+                  <SelectField
+                    value={statusFilter}
+                    onChange={(event) => setStatusFilter(event.target.value)}
+                    options={[
+                      { value: 'all', label: 'Status: All' },
+                      { value: 'active', label: 'Status: Active' },
+                      { value: 'hidden', label: 'Status: Hidden' },
+                    ]}
+                    aria-label="Filter posts by status"
+                  />
+                  <SelectField
+                    value={dateFilter}
+                    onChange={(event) => setDateFilter(event.target.value)}
+                    options={[
+                      { value: 'all', label: 'Date: All Time' },
+                      { value: 'today', label: 'Date: Today' },
+                      { value: '7days', label: 'Date: Last 7 Days' },
+                      { value: '30days', label: 'Date: Last 30 Days' },
+                    ]}
+                    aria-label="Filter posts by date"
+                  />
+                </>
+              }
+              onReset={resetFilters}
+              resetLabel="Reset filters"
+              resetVariant="secondary"
+              resetDisabled={!hasActiveFilters}
+              count={`${filtered.length} of ${posts.length} posts`}
+            />
 
-              <select
-                className="wwa-select wwa-select-inline"
-                value={typeFilter}
-                onChange={e => setTypeFilter(e.target.value)}
-              >
-                <option value="all">All Types</option>
-                {types.map(t => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
+            <DataTable
+              className="wwpo-table"
+              columns={columns}
+              rows={filtered}
+              getRowKey={(post) => post.id}
+              selectedRowKey={selectedPostId}
+              minWidth={920}
+              emptyIcon={null}
+              emptyTitle="No posts found"
+              emptyMessage={hasActiveFilters ? 'Try adjusting your search or filters.' : 'No posts on the platform yet.'}
+              renderRowActions={(post) => {
+                const isHidden = !!post.isHidden;
 
-              <select
-                className="wwa-select wwa-select-inline"
-                value={statusFilter}
-                onChange={e => setStatusFilter(e.target.value)}
-              >
-                <option value="all">Status: All</option>
-                <option value="active">Status: Active</option>
-                <option value="hidden">Status: Hidden</option>
-              </select>
-
-              <select
-                className="wwa-select wwa-select-inline"
-                value={dateFilter}
-                onChange={e => setDateFilter(e.target.value)}
-              >
-                <option value="all">Date: All Time</option>
-                <option value="today">Date: Today</option>
-                <option value="7days">Date: Last 7 Days</option>
-                <option value="30days">Date: Last 30 Days</option>
-              </select>
-
-              <button className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={resetFilters}>
-                Reset Filters
-              </button>
-
-              <button
-                className="wwa-btn wwa-btn-sm wwa-btn-success"
-                onClick={handleExport}
-                disabled={filtered.length === 0}
-              >
-                📤 Export to Excel
-              </button>
-
-              <span className="wwa-toolbar-count">{filtered.length} of {posts.length} posts</span>
-            </div>
-
-            <div className="wwa-table-wrap">
-              <table className="wwa-table">
-                <thead>
-                  <tr>
-                    {['Author', 'Post / Food Name', 'Type', 'Calories', 'Reactions', 'Comments', 'Status', 'Created Date', 'Action'].map(h => (
-                      <th key={h}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map(post => {
-                    const isHidden = !!post.isHidden;
-                    return (
-                      <tr key={post.id} className={selectedPostId === post.id ? 'wwa-row-selected' : ''}>
-                        <td>
-                          <div className="wwa-cell-primary">{post.authorName || '—'}</div>
-                          <div className="wwa-cell-muted">{post.uid || '—'}</div>
-                        </td>
-                        <td>
-                          <div className="wwa-cell-primary">{post.foodName || '—'}</div>
-                          {post.caption && <div className="wwa-cell-muted">{post.caption}</div>}
-                        </td>
-                        <td>
-                          <Badge tone="neutral">{post.type || '—'}</Badge>
-                        </td>
-                        <td>{post.calories ?? '—'}</td>
-                        <td>{post.reactionCount ?? 0}</td>
-                        <td>{post.commentCount ?? 0}</td>
-                        <td>
-                          <Badge tone={isHidden ? 'danger' : 'success'}>
-                            {isHidden ? 'Hidden' : 'Active'}
-                          </Badge>
-                        </td>
-                        <td style={{ color: '#6b7280' }}>{formatDate(post.createdAt)}</td>
-                        <td>
-                          <div className="wwa-cell-actions">
-                            <button
-                              className="wwa-btn wwa-btn-sm wwa-btn-brand-soft"
-                              onClick={() => setSelectedPostId(post.id)}
-                            >
-                              View
-                            </button>
-                            <button
-                              className={`wwa-btn wwa-btn-sm ${isHidden ? 'wwa-btn-success-soft' : 'wwa-btn-secondary'}`}
-                              onClick={() => toggleHidden(post.id, isHidden)}
-                            >
-                              {isHidden ? 'Unhide' : 'Hide'}
-                            </button>
-                            <button
-                              className="wwa-btn wwa-btn-sm wwa-btn-danger"
-                              onClick={() => handleDelete(post.id)}
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              {filtered.length === 0 && (
-                <EmptyState
-                  icon="📝"
-                  title="No posts found"
-                  message={hasActiveFilters ? 'Try adjusting your search or filters.' : 'No posts on the platform yet.'}
-                />
-              )}
-            </div>
+                return (
+                  <div className="wwpo-inline-actions">
+                    <button
+                      type="button"
+                      className="wwa-btn wwa-btn-sm wwa-btn-secondary"
+                      onClick={() => openPostDetails(post.id)}
+                      aria-label={`View ${postTitle(post)}`}
+                    >
+                      <Eye aria-hidden="true" size={14} strokeWidth={2} />
+                      View
+                    </button>
+                    <TableActions
+                      label={`Actions for ${postTitle(post)}`}
+                      items={[
+                        {
+                          key: 'edit',
+                          label: 'Edit',
+                          icon: <Pencil aria-hidden="true" size={14} strokeWidth={2} />,
+                          onSelect: () => openPostEditor(post.id),
+                        },
+                        {
+                          key: 'toggle-hidden',
+                          label: isHidden ? 'Unhide' : 'Hide',
+                          icon: <EyeOff aria-hidden="true" size={14} strokeWidth={2} />,
+                          onSelect: () => toggleHidden(post.id, isHidden),
+                        },
+                        { type: 'divider' },
+                        {
+                          key: 'delete',
+                          label: 'Delete',
+                          tone: 'danger',
+                          icon: <Trash2 aria-hidden="true" size={14} strokeWidth={2} />,
+                          onSelect: () => handleDelete(post.id),
+                        },
+                      ]}
+                    />
+                  </div>
+                );
+              }}
+            />
           </div>
 
-          {selectedPost && (
-            <div className="wwa-split-side">
-              <PostDetailPanel
-                post={selectedPost}
-                onClose={() => setSelectedPostId(null)}
-                onSave={handleSavePost}
-                onToggleHidden={toggleHidden}
-                onDelete={handleDelete}
-              />
-            </div>
-          )}
+          {selectedPost ? (
+            <PostDetailPanel
+              post={selectedPost}
+              editNonce={editNonce}
+              onClose={() => setSelectedPostId(null)}
+              onSave={handleSavePost}
+              onToggleHidden={toggleHidden}
+              onDelete={handleDelete}
+            />
+          ) : null}
         </div>
       )}
     </div>
