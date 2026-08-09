@@ -1,30 +1,142 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { functions } from '../firebase';
 import { httpsCallable } from 'firebase/functions';
+import { Pencil } from 'lucide-react';
 import Badge from './ui/Badge';
 import ToggleSwitch from './ui/ToggleSwitch';
+import DetailDrawer from './ui/DetailDrawer';
+import FormSection from './ui/FormSection';
+import FormField from './ui/FormField';
+import SelectField from './ui/SelectField';
 import { formatEquipment } from '../utils/formatUtils';
 
-// Fields beyond the core identity/status set are only rendered when the
-// selected user's document actually has them — most come from onboarding
-// steps in the mobile app and are not guaranteed to exist for every user.
-function DetailRow({ label, value }) {
+function UserDetailPanelStyles() {
+  return (
+    <style>{`
+      .wwudp-summary {
+        display: flex;
+        align-items: flex-start;
+        gap: 14px;
+      }
+      .wwudp-summary__content {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .wwudp-summary__title {
+        font-size: var(--ww-type-page-title-size);
+        font-weight: var(--ww-type-page-title-weight);
+        color: var(--ww-primary-dark);
+        line-height: 1.1;
+      }
+      .wwudp-summary__meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .wwudp-message-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .wwudp-message-stack .wwa-status-pill,
+      .wwudp-message-stack .wwa-alert-error {
+        margin: 0;
+      }
+      .wwudp-detail-text {
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text);
+        line-height: 1.6;
+        white-space: pre-wrap;
+      }
+      .wwudp-reminder-fields {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .wwudp-reminder-fields .wwa-input {
+        width: 72px;
+      }
+      .wwudp-help-text {
+        font-size: 11px;
+        color: #b5b8c0;
+        margin-top: -10px;
+      }
+      .wwudp-plan-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .wwudp-setting {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 14px;
+        border: 1px solid var(--ww-divider);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--ww-elevated) 50%, var(--ww-card));
+      }
+      .wwudp-setting__top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .wwudp-setting__actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .wwudp-setting__duration {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .wwudp-setting__counter {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .wwudp-setting__counter-value {
+        min-width: 56px;
+        text-align: center;
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--ww-text);
+      }
+      .wwudp-footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      @media (max-width: 720px) {
+        .wwudp-summary {
+          flex-direction: column;
+        }
+      }
+    `}</style>
+  );
+}
+
+function DetailRow({ label, value, multiline = false }) {
   if (value === undefined || value === null || value === '') return null;
+
   return (
     <div className="wwa-detail-row">
       <span className="wwa-detail-label">{label}</span>
-      <span className="wwa-detail-value">{value}</span>
+      {multiline ? <div className="wwudp-detail-text">{value}</div> : <span className="wwa-detail-value">{value}</span>}
     </div>
   );
 }
 
 const monoStyle = { fontFamily: 'Consolas, Menlo, monospace', fontSize: '12px' };
 
-// Real enum values written by the mobile app's plan-matching flow
-// (lib/screens/plans/plan_match_screen.dart's _GoalOption list) — reused as-is
-// so admin edits stay compatible with what the app itself writes to
-// planMatchGoal. This is a different, Title-Case domain from the old
-// onboarding-step "primaryGoal" field this panel previously edited.
 const GOAL_OPTIONS = [
   { value: '', label: 'Not set' },
   { value: 'Build Muscle', label: 'Build Muscle' },
@@ -33,11 +145,7 @@ const GOAL_OPTIONS = [
   { value: 'Build Strength', label: 'Build Strength' },
 ];
 
-
-
 const DEFAULT_BREAK_DAYS = 3;
-// Mirrors the largest preset chip in plan_schedule_screen.dart's break-day
-// picker ([1, 2, 3, 5, 7, 14]) — the app itself never offers more than 14.
 const MIN_BREAK_DAYS = 1;
 const MAX_BREAK_DAYS = 14;
 
@@ -48,9 +156,6 @@ const toDateStr = (date) => {
   return `${y}-${m}-${d}`;
 };
 
-// breakEndDate/breakStartDate are stored as "YYYY-MM-DD" strings (see
-// toDateStr above and plan_schedule_screen.dart's _startBreak) — parsed as
-// local dates here so the day-count math lines up with how they were written.
 const parseDateStr = (dateStr) => {
   if (!dateStr) return null;
   const [y, m, d] = dateStr.split('-').map(Number);
@@ -65,8 +170,6 @@ const remainingDays = (endDateStr) => {
   return Math.max(0, Math.round((end - today) / (1000 * 60 * 60 * 24)));
 };
 
-// reminderHour/reminderMinute default to 7:00am, matching settings_screen.dart's
-// TimeOfDay(hour: 7, minute: 0) default when a user has never saved a reminder time.
 const formatReminderTime = (hour, minute) => {
   if (hour === undefined || hour === null || minute === undefined || minute === null) return undefined;
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
@@ -80,11 +183,6 @@ function UserDetailPanel({ user, onClose, onSave }) {
   const [successMsg, setSuccessMsg] = useState('');
   const userId = user ? user.id : null;
   const trackedPlanId = user ? user.trackedPlanId : null;
-
-  // Break Mode and Compress Control both live on the tracked plan's
-  // planProgress subcollection doc (users/{uid}/planProgress/{planId}) —
-  // the same doc the mobile app itself reads and writes — not on the user
-  // doc directly.
   const [planProgress, setPlanProgress] = useState(null);
   const [planLoading, setPlanLoading] = useState(false);
   const [planActionError, setPlanActionError] = useState('');
@@ -92,8 +190,6 @@ function UserDetailPanel({ user, onClose, onSave }) {
   const [savingCompress, setSavingCompress] = useState(false);
   const [breakDaysInput, setBreakDaysInput] = useState(DEFAULT_BREAK_DAYS);
 
-  // If the admin views a different user (or the panel is reused), drop any
-  // in-progress edit state tied to the previous selection.
   useEffect(() => {
     setIsEditing(false);
     setForm(null);
@@ -104,44 +200,33 @@ function UserDetailPanel({ user, onClose, onSave }) {
 
   useEffect(() => {
     let cancelled = false;
-  
+
     const loadPlanProgress = async () => {
       setPlanActionError('');
-  
+
       if (!userId || !trackedPlanId) {
         setPlanProgress(null);
         setPlanLoading(false);
         return;
       }
-  
+
       setPlanLoading(true);
-  
+
       try {
-        const adminGetUserPlanProgress = httpsCallable(
-          functions,
-          'adminGetUserPlanProgress'
-        );
-  
+        const adminGetUserPlanProgress = httpsCallable(functions, 'adminGetUserPlanProgress');
         const result = await adminGetUserPlanProgress({
           uid: userId,
           planId: trackedPlanId,
         });
-  
+
         if (cancelled) return;
-  
-        setPlanProgress(
-          result.data.exists
-            ? result.data.progress
-            : null
-        );
+
+        setPlanProgress(result.data.exists ? result.data.progress : null);
       } catch (err) {
         console.error(err);
-  
         if (!cancelled) {
           setPlanProgress(null);
-          setPlanActionError(
-            err.message || 'Failed to load the user plan status.'
-          );
+          setPlanActionError(err.message || 'Failed to load the user plan status.');
         }
       } finally {
         if (!cancelled) {
@@ -149,9 +234,9 @@ function UserDetailPanel({ user, onClose, onSave }) {
         }
       }
     };
-  
+
     loadPlanProgress();
-  
+
     return () => {
       cancelled = true;
     };
@@ -163,97 +248,72 @@ function UserDetailPanel({ user, onClose, onSave }) {
   const compressedDays = Array.isArray(planProgress?.compressedDays) ? planProgress.compressedDays : [];
   const isCurrentDayCompressed = compressedDays.includes(currentDayIndex);
 
-  // Mirrors _startBreak/_endBreak in plan_schedule_screen.dart exactly, so
-  // the app reads back a break state it already knows how to interpret.
   const handleToggleBreakMode = async () => {
     if (!userId || !trackedPlanId) return;
-  
+
     const currentlyActive = planProgress?.breakModeActive === true;
     const newActiveState = !currentlyActive;
-  
-    const action = newActiveState
-      ? 'start Break Mode'
-      : 'end Break Mode';
-  
+    const action = newActiveState ? 'start Break Mode' : 'end Break Mode';
+
     if (!window.confirm(`Are you sure you want to ${action}?`)) {
       return;
     }
-  
+
     setSavingBreakMode(true);
     setPlanActionError('');
-  
+
     try {
-      const adminSetUserBreakMode = httpsCallable(
-        functions,
-        'adminSetUserBreakMode'
-      );
-  
-      const days = Math.min(
-        MAX_BREAK_DAYS,
-        Math.max(
-          MIN_BREAK_DAYS,
-          Number(breakDaysInput) || DEFAULT_BREAK_DAYS
-        )
-      );
-  
+      const adminSetUserBreakMode = httpsCallable(functions, 'adminSetUserBreakMode');
+      const days = Math.min(MAX_BREAK_DAYS, Math.max(MIN_BREAK_DAYS, Number(breakDaysInput) || DEFAULT_BREAK_DAYS));
+
       const result = await adminSetUserBreakMode({
         uid: userId,
         planId: trackedPlanId,
         active: newActiveState,
         days: newActiveState ? days : null,
       });
-  
+
       setPlanProgress(result.data.progress);
     } catch (err) {
       console.error(err);
-      setPlanActionError(
-        err.message || 'Failed to update break mode. Please try again.'
-      );
+      setPlanActionError(err.message || 'Failed to update break mode. Please try again.');
     } finally {
       setSavingBreakMode(false);
     }
   };
 
-  // Mirrors _showCompressSheet/_restoreDaySession in plan_schedule_screen.dart —
-  // adds/removes the current day index from compressedDays, the same list the
-  // app reads to decide whether to show the compressed (primary-only) session.
   const handleToggleCompress = async () => {
     if (!userId || !trackedPlanId) return;
-  
+
     const newCompressedState = !isCurrentDayCompressed;
     const action = newCompressedState
       ? `compress Day ${currentDayIndex}`
       : `restore Day ${currentDayIndex} to the full session`;
-  
+
     if (!window.confirm(`Are you sure you want to ${action}?`)) {
       return;
     }
-  
+
     setSavingCompress(true);
     setPlanActionError('');
-  
+
     try {
-      const adminSetUserCompressedDay = httpsCallable(
-        functions,
-        'adminSetUserCompressedDay'
-      );
-  
+      const adminSetUserCompressedDay = httpsCallable(functions, 'adminSetUserCompressedDay');
+
       const result = await adminSetUserCompressedDay({
         uid: userId,
         planId: trackedPlanId,
         compressed: newCompressedState,
       });
-  
-      setPlanProgress(prev => ({
+
+      setPlanProgress((prev) => ({
         ...(prev || {}),
         currentDayIndex: result.data.currentDayIndex,
         compressedDays: result.data.compressedDays,
       }));
     } catch (err) {
       console.error(err);
-      setPlanActionError(
-        err.message || 'Failed to update compress control. Please try again.'
-      );
+      setPlanActionError(err.message || 'Failed to update compress control. Please try again.');
     } finally {
       setSavingCompress(false);
     }
@@ -286,16 +346,13 @@ function UserDetailPanel({ user, onClose, onSave }) {
     setError('');
   };
 
-  // Only fields that actually changed are included in the update, so saving
-  // never overwrites fields this form doesn't manage (savedPlanIds, XP,
-  // trackedPlanId/Name, onboardingComplete, healthConnected, wearableConnected, etc.).
   const handleSave = async () => {
     if (!form.displayName.trim()) {
       setError('Display name cannot be empty.');
       return;
     }
-    const changes = {};
 
+    const changes = {};
     const trimmedName = form.displayName.trim();
     if (trimmedName !== (user.displayName || '')) changes.displayName = trimmedName;
 
@@ -306,7 +363,6 @@ function UserDetailPanel({ user, onClose, onSave }) {
     if (newLevel !== (user.level || 1)) changes.level = newLevel;
 
     if (form.isPremium !== !!user.isPremium) changes.isPremium = form.isPremium;
-
     if (form.planMatchGoal !== (user.planMatchGoal || '')) changes.planMatchGoal = form.planMatchGoal;
 
     const trimmedHometown = form.hometown.trim();
@@ -314,8 +370,6 @@ function UserDetailPanel({ user, onClose, onSave }) {
 
     const trimmedBio = form.bio.trim();
     if (trimmedBio !== (user.bio || '')) changes.bio = trimmedBio;
-
-    
 
     const currentNotif = user.notificationsEnabled !== false;
     if (form.notificationsEnabled !== currentNotif) changes.notificationsEnabled = form.notificationsEnabled;
@@ -360,392 +414,404 @@ function UserDetailPanel({ user, onClose, onSave }) {
 
   const initialSource = isEditing ? form.displayName : (user.displayName || user.username);
   const initial = (initialSource || '?').trim().charAt(0).toUpperCase();
-
   const savedPlansCount = Array.isArray(user.savedPlanIds) ? user.savedPlanIds.length : undefined;
   const equipmentLabel = formatEquipment(user.planMatchEquipment);
 
+  const summary = (
+    <div className="wwudp-summary">
+      <div className="wwa-avatar">{initial}</div>
+      <div className="wwudp-summary__content">
+        <div className="wwudp-summary__title">{user.displayName || user.username || 'Unnamed user'}</div>
+        <div className="wwudp-summary__meta">
+          <Badge tone="neutral">Level {user.level || 1}</Badge>
+          <Badge tone={user.accountStatus === 'suspended' ? 'danger' : 'success'}>
+            {user.accountStatus === 'suspended' ? 'Suspended' : 'Active'}
+          </Badge>
+          {user.isPremium ? <Badge tone="brand">Premium</Badge> : null}
+        </div>
+      </div>
+    </div>
+  );
+
   return (
-    <div className="wwa-panel">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 }}>
-        <div className="wwa-panel-title" style={{ marginBottom: 0 }}>User Detail</div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {!isEditing && (
-            <button className="wwa-btn wwa-btn-sm wwa-btn-brand-soft" onClick={startEdit}>
+    <>
+      <UserDetailPanelStyles />
+      <DetailDrawer
+        title="User"
+        open={Boolean(user)}
+        onClose={onClose}
+        viewportLocked
+        actions={
+          !isEditing ? (
+            <button type="button" className="wwa-btn wwa-btn-secondary" onClick={startEdit}>
+              <Pencil aria-hidden="true" size={16} strokeWidth={2} />
               Edit
             </button>
-          )}
-          <button className="wwa-panel-close" onClick={onClose} aria-label="Close user detail">✕</button>
-        </div>
-      </div>
-
-      {successMsg && (
-        <div className="wwa-status-pill" style={{ marginBottom: 16 }}>
-          <span className="wwa-status-dot" />
-          {successMsg}
-        </div>
-      )}
-      {error && <div className="wwa-alert-error" style={{ marginBottom: 16 }}>{error}</div>}
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 20 }}>
-        <div className="wwa-avatar">{initial}</div>
-        <div style={{ flex: 1 }}>
-          {isEditing ? (
-            <input
-              className="wwa-input"
-              value={form.displayName}
-              onChange={e => setForm(prev => ({ ...prev, displayName: e.target.value }))}
-              placeholder="Display name"
-            />
-          ) : (
-            <div style={{ fontSize: '16px', fontWeight: 700, color: '#111827' }}>
-              {user.displayName || user.username || 'Unnamed user'}
+          ) : null
+        }
+        summary={summary}
+        footer={
+          isEditing ? (
+            <div className="wwudp-footer">
+              <button type="button" className="wwa-btn wwa-btn-secondary" onClick={cancelEdit} disabled={saving}>
+                Cancel
+              </button>
+              <button type="button" className="wwa-btn wwa-btn-primary" onClick={handleSave} disabled={saving}>
+                {saving ? 'Saving...' : 'Save Changes'}
+              </button>
             </div>
-          )}
-          {!isEditing && (
-            <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
-              <Badge tone="neutral">Level {user.level || 1}</Badge>
-              <Badge tone={user.accountStatus === 'suspended' ? 'danger' : 'success'}>
-                {user.accountStatus === 'suspended' ? 'Suspended' : 'Active'}
-              </Badge>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {isEditing && (
-        <div className="wwa-form-grid" style={{ marginBottom: 4 }}>
-          <div>
-            <label className="wwa-field-label">Account Level</label>
-            <input
-              type="number"
-              min="1"
-              className="wwa-input"
-              value={form.level}
-              onChange={e => setForm(prev => ({ ...prev, level: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="wwa-field-label">Account Status</label>
-            <div style={{ paddingTop: 8 }}>
-              <Badge tone={user.accountStatus === 'suspended' ? 'danger' : 'success'}>
-                {user.accountStatus === 'suspended' ? 'Suspended' : 'Active'}
-              </Badge>
-              <div style={{ fontSize: 11, color: '#b5b8c0', marginTop: 6 }}>
-                Managed via Suspend / Reinstate
+          ) : null
+        }
+      >
+        {(successMsg || error) ? (
+          <div className="wwudp-message-stack">
+            {successMsg ? (
+              <div className="wwa-status-pill">
+                <span className="wwa-status-dot" />
+                {successMsg}
               </div>
-            </div>
+            ) : null}
+            {error ? <div className="wwa-alert-error">{error}</div> : null}
           </div>
-        </div>
-      )}
-      {isEditing && (
-        <div style={{ fontSize: 11, color: '#b5b8c0', marginTop: -10, marginBottom: 18 }}>
-          Level is normally recalculated automatically as the user earns XP.
-        </div>
-      )}
+        ) : null}
 
-      <div style={{ marginBottom: 8 }}>
-        <div className="wwa-panel-subtitle" style={{ marginBottom: 4 }}>Basic Profile</div>
-
-        <DetailRow label="User ID" value={<span style={monoStyle}>{user.id}</span>} />
-
-        <div className="wwa-detail-row">
-          <span className="wwa-detail-label">Username</span>
-          {isEditing ? (
-            <input
-              className="wwa-input"
-              style={{ maxWidth: 200 }}
-              value={form.username}
-              onChange={e => setForm(prev => ({ ...prev, username: e.target.value }))}
-              placeholder="username"
-            />
-          ) : (
-            <span className="wwa-detail-value">{user.username || '—'}</span>
-          )}
-        </div>
-
-        <DetailRow label="Email" value={user.email} />
-
-        <DetailRow
-          label="Onboarding"
-          value={<Badge tone={user.onboardingComplete ? 'success' : 'danger'}>
-            {user.onboardingComplete ? 'Complete' : 'Incomplete'}
-          </Badge>}
-        />
-        <DetailRow
-          label="Health Connected"
-          value={<Badge tone={user.healthConnected ? 'success' : 'neutral'}>
-            {user.healthConnected ? 'Connected' : 'Not connected'}
-          </Badge>}
-        />
-        <DetailRow
-          label="Wearable Connected"
-          value={<Badge tone={user.wearableConnected ? 'success' : 'neutral'}>
-            {user.wearableConnected ? 'Connected' : 'Not connected'}
-          </Badge>}
-        />
-
-        <div className="wwa-detail-row">
-          <span className="wwa-detail-label">Subscription</span>
-          {isEditing ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span style={{ fontSize: 13, fontWeight: 600, color: form.isPremium ? '#6c63ff' : '#9ca3af' }}>
-                {form.isPremium ? 'Premium' : 'Free'}
-              </span>
-              <ToggleSwitch
-                checked={form.isPremium}
-                onChange={e => setForm(prev => ({ ...prev, isPremium: e.target.checked }))}
-              />
-            </div>
-          ) : (
-            <Badge tone={user.isPremium ? 'brand' : 'neutral'}>
-              {user.isPremium ? 'Premium' : 'Free'}
-            </Badge>
-          )}
-        </div>
-
-        <div className="wwa-detail-row">
-          <span className="wwa-detail-label">Primary Goal</span>
-          {isEditing ? (
-            <select
-              className="wwa-select"
-              style={{ maxWidth: 180 }}
-              value={form.planMatchGoal}
-              onChange={e => setForm(prev => ({ ...prev, planMatchGoal: e.target.value }))}
-            >
-              {GOAL_OPTIONS.map(opt => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-          ) : (
-            <span className="wwa-detail-value">{user.planMatchGoal || 'Not set'}</span>
-          )}
-        </div>
-
-        <div className="wwa-detail-row">
-          <span className="wwa-detail-label">Hometown</span>
-          {isEditing ? (
-            <input
-              className="wwa-input"
-              style={{ maxWidth: 200 }}
-              value={form.hometown}
-              onChange={e => setForm(prev => ({ ...prev, hometown: e.target.value }))}
-              placeholder="Hometown"
-            />
-          ) : (
-            <span className="wwa-detail-value">{user.hometown || '—'}</span>
-          )}
-        </div>
-
-        <div className="wwa-detail-row">
-          <span className="wwa-detail-label">Bio</span>
-          {isEditing ? (
-            <textarea
-              className="wwa-input"
-              style={{ maxWidth: 260, resize: 'vertical', fontFamily: 'inherit' }}
-              rows={2}
-              value={form.bio}
-              onChange={e => setForm(prev => ({ ...prev, bio: e.target.value }))}
-              placeholder="Bio"
-            />
-          ) : (
-            <span className="wwa-detail-value">{user.bio || '—'}</span>
-          )}
-        </div>
-
-        
-
-        <DetailRow label="Total XP" value={user.totalXp !== undefined ? `${user.totalXp} XP` : undefined} />
-        <DetailRow label="Weekly XP" value={user.weeklyXp !== undefined ? `${user.weeklyXp} XP` : undefined} />
-      </div>
-
-      {!isEditing && (
-        <div style={{ marginBottom: 8 }}>
-          <div className="wwa-panel-subtitle" style={{ marginBottom: 4 }}>Plan Information</div>
-          <DetailRow label="Plan Match Level" value={user.planMatchLevel} />
-          <DetailRow label="Plan Match Sport" value={user.planMatchSport} />
-          <DetailRow label="Plan Match Days" value={user.planMatchDays} />
-          <DetailRow label="Plan Match Equipment" value={equipmentLabel !== '—' ? equipmentLabel : undefined} />
-          <DetailRow label="Tracked Plan" value={user.trackedPlanName} />
-          <DetailRow
-            label="Tracked Plan ID"
-            value={user.trackedPlanId ? <span style={monoStyle}>{user.trackedPlanId}</span> : undefined}
-          />
-          <DetailRow
-            label="Saved Plans"
-            value={savedPlansCount !== undefined ? `${savedPlansCount} plan${savedPlansCount === 1 ? '' : 's'}` : undefined}
-          />
-        </div>
-      )}
-
-      <div style={{ marginBottom: 8 }}>
-        <div className="wwa-panel-subtitle" style={{ marginBottom: 4 }}>Preferences</div>
-
-        {[
-          { key: 'notificationsEnabled', label: 'Notifications Enabled' },
-          { key: 'workoutReminders', label: 'Workout Reminders' },
-          { key: 'streakAlerts', label: 'Streak Alerts' },
-          { key: 'wiseCoachMessages', label: 'Wise Coach Messages' },
-        ].map(({ key, label }) => {
-          const currentValue = user[key] !== false;
-          return (
-            <div className="wwa-detail-row" key={key}>
-              <span className="wwa-detail-label">{label}</span>
-              {isEditing ? (
-                <ToggleSwitch
-                  checked={form[key]}
-                  onChange={e => setForm(prev => ({ ...prev, [key]: e.target.checked }))}
+        {isEditing ? (
+          <>
+            <FormSection title="Account" columns={2}>
+              <FormField label="Display Name" labelFor="user-display-name" required>
+                <input
+                  id="user-display-name"
+                  className="wwa-input"
+                  value={form.displayName}
+                  onChange={(event) => setForm((prev) => ({ ...prev, displayName: event.target.value }))}
                 />
-              ) : (
-                <Badge tone={currentValue ? 'success' : 'neutral'}>
-                  {currentValue ? 'Enabled' : 'Disabled'}
-                </Badge>
-              )}
-            </div>
-          );
-        })}
+              </FormField>
 
-        <div className="wwa-detail-row">
-          <span className="wwa-detail-label">Reminder Time</span>
-          {isEditing ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input
-                type="number"
-                min="0"
-                max="23"
-                className="wwa-input wwa-input-sm"
-                style={{ width: 60 }}
-                value={form.reminderHour}
-                onChange={e => setForm(prev => ({ ...prev, reminderHour: e.target.value }))}
-              />
-              <span>:</span>
-              <input
-                type="number"
-                min="0"
-                max="59"
-                className="wwa-input wwa-input-sm"
-                style={{ width: 60 }}
-                value={form.reminderMinute}
-                onChange={e => setForm(prev => ({ ...prev, reminderMinute: e.target.value }))}
-              />
-            </div>
-          ) : (
-            <span className="wwa-detail-value">
-              {formatReminderTime(user.reminderHour, user.reminderMinute) || '—'}
-            </span>
-          )}
-        </div>
-      </div>
+              <FormField label="Account Level" labelFor="user-level">
+                <input
+                  id="user-level"
+                  type="number"
+                  min="1"
+                  className="wwa-input"
+                  value={form.level}
+                  onChange={(event) => setForm((prev) => ({ ...prev, level: event.target.value }))}
+                />
+              </FormField>
 
-      {isEditing && (
-        <div className="wwa-cell-actions" style={{ marginTop: 8 }}>
-          <button className="wwa-btn wwa-btn-primary" onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving...' : 'Save Changes'}
-          </button>
-          <button className="wwa-btn wwa-btn-secondary" onClick={cancelEdit} disabled={saving}>
-            Cancel
-          </button>
-        </div>
-      )}
-
-      {!isEditing && (
-        <div style={{ marginTop: 20 }}>
-          <div className="wwa-panel-subtitle" style={{ marginBottom: 4 }}>Plan Controls</div>
-
-          {!trackedPlanId ? (
-            <div className="wwa-detail-row">
-              <span className="wwa-detail-value" style={{ color: '#9ca3af' }}>
-                No active plan is being tracked — Break Mode and Compress Control are unavailable.
-              </span>
-            </div>
-          ) : planLoading ? (
-            <div className="wwa-detail-row">
-              <span className="wwa-detail-value" style={{ color: '#9ca3af' }}>Loading plan status…</span>
-            </div>
-          ) : (
-            <>
-              {planActionError && (
-                <div className="wwa-alert-error" style={{ marginBottom: 12 }}>{planActionError}</div>
-              )}
-
-              <div className="wwa-setting-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-                  <div>
-                    <div className="wwa-setting-label">Break Mode</div>
-                    <div className="wwa-setting-sub">
-                      {planProgress?.breakModeActive
-                        ? `Paused until ${planProgress.breakEndDate || '—'}`
-                        : 'Plan is actively progressing'}
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <Badge tone={planProgress?.breakModeActive ? 'brand' : 'neutral'}>
-                      {planProgress?.breakModeActive ? 'Active' : 'Inactive'}
-                    </Badge>
-                    <ToggleSwitch
-                      checked={!!planProgress?.breakModeActive}
-                      onChange={handleToggleBreakMode}
-                      disabled={savingBreakMode}
-                    />
-                  </div>
-                </div>
-
-                {planProgress?.breakModeActive ? (
-                  <div style={{ marginTop: 12 }}>
-                    <DetailRow label="Duration" value={planProgress.breakDays ? `${planProgress.breakDays} days` : '—'} />
-                    <DetailRow label="Start Date" value={planProgress.breakStartDate || '—'} />
-                    <DetailRow label="Resume Date" value={planProgress.breakEndDate || '—'} />
-                    <DetailRow
-                      label="Remaining"
-                      value={planProgress.breakEndDate ? `${remainingDays(planProgress.breakEndDate)} days` : undefined}
-                    />
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
-                    <span className="wwa-field-label" style={{ marginBottom: 0 }}>Duration</span>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <button
-                        className="wwa-btn wwa-btn-sm wwa-btn-secondary"
-                        onClick={() => setBreakDaysInput(d => Math.max(MIN_BREAK_DAYS, d - 1))}
-                        disabled={savingBreakMode || breakDaysInput <= MIN_BREAK_DAYS}
-                      >
-                        −
-                      </button>
-                      <span style={{ fontSize: 14, fontWeight: 700, color: '#111827', minWidth: 56, textAlign: 'center' }}>
-                        {breakDaysInput} {breakDaysInput === 1 ? 'day' : 'days'}
-                      </span>
-                      <button
-                        className="wwa-btn wwa-btn-sm wwa-btn-secondary"
-                        onClick={() => setBreakDaysInput(d => Math.min(MAX_BREAK_DAYS, d + 1))}
-                        disabled={savingBreakMode || breakDaysInput >= MAX_BREAK_DAYS}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="wwa-setting-row">
-                <div>
-                  <div className="wwa-setting-label">Compress Control</div>
-                  <div className="wwa-setting-sub">{`Day ${currentDayIndex} of the tracked plan`}</div>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <Badge tone={isCurrentDayCompressed ? 'brand' : 'neutral'}>
-                    {isCurrentDayCompressed ? 'Compressed' : 'Full session'}
+              <FormField label="Account Status" labelFor="user-status-note" helpText="Managed via Suspend / Reinstate.">
+                <div id="user-status-note">
+                  <Badge tone={user.accountStatus === 'suspended' ? 'danger' : 'success'}>
+                    {user.accountStatus === 'suspended' ? 'Suspended' : 'Active'}
                   </Badge>
+                </div>
+              </FormField>
+            </FormSection>
+
+            <div className="wwudp-help-text">
+              Level is normally recalculated automatically as the user earns XP.
+            </div>
+
+            <FormSection title="Subscription" columns={1}>
+              <FormField label="Premium Status" labelFor="user-premium-toggle">
+                <div id="user-premium-toggle" className="wwa-setting-row">
+                  <div>
+                    <div className="wwa-setting-label">{form.isPremium ? 'Premium' : 'Free'}</div>
+                    <div className="wwa-setting-sub">Preserves the existing premium update behaviour.</div>
+                  </div>
                   <ToggleSwitch
-                    checked={isCurrentDayCompressed}
-                    onChange={handleToggleCompress}
-                    disabled={savingCompress}
+                    checked={form.isPremium}
+                    onChange={(event) => setForm((prev) => ({ ...prev, isPremium: event.target.checked }))}
                   />
                 </div>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
+              </FormField>
+            </FormSection>
+
+            <FormSection title="Fitness Profile" columns={2}>
+              <FormField label="Username" labelFor="user-username">
+                <input
+                  id="user-username"
+                  className="wwa-input"
+                  value={form.username}
+                  onChange={(event) => setForm((prev) => ({ ...prev, username: event.target.value }))}
+                  placeholder="username"
+                />
+              </FormField>
+
+              <SelectField
+                id="user-goal"
+                label="Primary Goal"
+                value={form.planMatchGoal}
+                onChange={(event) => setForm((prev) => ({ ...prev, planMatchGoal: event.target.value }))}
+                options={GOAL_OPTIONS}
+              />
+
+              <FormField label="Hometown" labelFor="user-hometown">
+                <input
+                  id="user-hometown"
+                  className="wwa-input"
+                  value={form.hometown}
+                  onChange={(event) => setForm((prev) => ({ ...prev, hometown: event.target.value }))}
+                  placeholder="Hometown"
+                />
+              </FormField>
+
+              <FormField label="Bio" labelFor="user-bio" fullWidth>
+                <textarea
+                  id="user-bio"
+                  className="wwa-input"
+                  style={{ resize: 'vertical', fontFamily: 'inherit' }}
+                  rows={3}
+                  value={form.bio}
+                  onChange={(event) => setForm((prev) => ({ ...prev, bio: event.target.value }))}
+                  placeholder="Bio"
+                />
+              </FormField>
+            </FormSection>
+
+            <FormSection title="Preferences" columns={1}>
+              {[
+                { key: 'notificationsEnabled', label: 'Notifications Enabled' },
+                { key: 'workoutReminders', label: 'Workout Reminders' },
+                { key: 'streakAlerts', label: 'Streak Alerts' },
+                { key: 'wiseCoachMessages', label: 'Wise Coach Messages' },
+              ].map(({ key, label }) => (
+                <FormField key={key} label={label} labelFor={`pref-${key}`}>
+                  <div id={`pref-${key}`} className="wwa-setting-row">
+                    <div className="wwa-setting-sub">{form[key] ? 'Enabled' : 'Disabled'}</div>
+                    <ToggleSwitch
+                      checked={form[key]}
+                      onChange={(event) => setForm((prev) => ({ ...prev, [key]: event.target.checked }))}
+                    />
+                  </div>
+                </FormField>
+              ))}
+
+              <FormField label="Reminder Time" labelFor="reminder-hour">
+                <div className="wwudp-reminder-fields">
+                  <input
+                    id="reminder-hour"
+                    type="number"
+                    min="0"
+                    max="23"
+                    className="wwa-input wwa-input-sm"
+                    value={form.reminderHour}
+                    onChange={(event) => setForm((prev) => ({ ...prev, reminderHour: event.target.value }))}
+                  />
+                  <span>:</span>
+                  <input
+                    id="reminder-minute"
+                    type="number"
+                    min="0"
+                    max="59"
+                    className="wwa-input wwa-input-sm"
+                    value={form.reminderMinute}
+                    onChange={(event) => setForm((prev) => ({ ...prev, reminderMinute: event.target.value }))}
+                  />
+                </div>
+              </FormField>
+            </FormSection>
+          </>
+        ) : (
+          <>
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Account</div>
+              <DetailRow label="User ID" value={<span style={monoStyle}>{user.id}</span>} />
+              <DetailRow label="Username" value={user.username || '—'} />
+              <DetailRow label="Email" value={user.email} />
+              <DetailRow
+                label="Onboarding Status"
+                value={
+                  <Badge tone={user.onboardingComplete ? 'success' : 'danger'}>
+                    {user.onboardingComplete ? 'Complete' : 'Incomplete'}
+                  </Badge>
+                }
+              />
+              <DetailRow
+                label="Account Status"
+                value={
+                  <Badge tone={user.accountStatus === 'suspended' ? 'danger' : 'success'}>
+                    {user.accountStatus === 'suspended' ? 'Suspended' : 'Active'}
+                  </Badge>
+                }
+              />
+            </section>
+
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Health & Subscription</div>
+              <DetailRow
+                label="Health Connected"
+                value={
+                  <Badge tone={user.healthConnected ? 'success' : 'neutral'}>
+                    {user.healthConnected ? 'Connected' : 'Not connected'}
+                  </Badge>
+                }
+              />
+              <DetailRow
+                label="Wearable Connected"
+                value={
+                  <Badge tone={user.wearableConnected ? 'success' : 'neutral'}>
+                    {user.wearableConnected ? 'Connected' : 'Not connected'}
+                  </Badge>
+                }
+              />
+              <DetailRow
+                label="Subscription"
+                value={
+                  <Badge tone={user.isPremium ? 'brand' : 'neutral'}>
+                    {user.isPremium ? 'Premium' : 'Free'}
+                  </Badge>
+                }
+              />
+            </section>
+
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Fitness Profile</div>
+              <DetailRow label="Primary Goal" value={user.planMatchGoal || 'Not set'} />
+              <DetailRow label="Hometown" value={user.hometown || '—'} />
+              <DetailRow label="Bio" value={user.bio || undefined} multiline />
+            </section>
+
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Plan Information</div>
+              <DetailRow label="Plan Match Level" value={user.planMatchLevel} />
+              <DetailRow label="Plan Match Sport" value={user.planMatchSport} />
+              <DetailRow label="Plan Match Days" value={user.planMatchDays} />
+              <DetailRow label="Plan Match Equipment" value={equipmentLabel !== '—' ? equipmentLabel : undefined} />
+              <DetailRow label="Tracked Plan" value={user.trackedPlanName} />
+              <DetailRow label="Tracked Plan ID" value={user.trackedPlanId ? <span style={monoStyle}>{user.trackedPlanId}</span> : undefined} />
+              <DetailRow
+                label="Saved Plans"
+                value={savedPlansCount !== undefined ? `${savedPlansCount} plan${savedPlansCount === 1 ? '' : 's'}` : undefined}
+              />
+            </section>
+
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">XP / Activity</div>
+              <DetailRow label="Total XP" value={user.totalXp !== undefined ? `${user.totalXp} XP` : undefined} />
+              <DetailRow label="Weekly XP" value={user.weeklyXp !== undefined ? `${user.weeklyXp} XP` : undefined} />
+            </section>
+
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Preferences</div>
+              {[
+                { key: 'notificationsEnabled', label: 'Notifications Enabled' },
+                { key: 'workoutReminders', label: 'Workout Reminders' },
+                { key: 'streakAlerts', label: 'Streak Alerts' },
+                { key: 'wiseCoachMessages', label: 'Wise Coach Messages' },
+              ].map(({ key, label }) => {
+                const currentValue = user[key] !== false;
+                return (
+                  <DetailRow
+                    key={key}
+                    label={label}
+                    value={
+                      <Badge tone={currentValue ? 'success' : 'neutral'}>
+                        {currentValue ? 'Enabled' : 'Disabled'}
+                      </Badge>
+                    }
+                  />
+                );
+              })}
+              <DetailRow label="Reminder Time" value={formatReminderTime(user.reminderHour, user.reminderMinute) || '—'} />
+            </section>
+
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Plan Controls</div>
+              {!trackedPlanId ? (
+                <div className="wwa-help-text">
+                  No active plan is being tracked — Break Mode and Compress Control are unavailable.
+                </div>
+              ) : planLoading ? (
+                <div className="wwa-help-text">Loading plan status…</div>
+              ) : (
+                <div className="wwudp-plan-controls">
+                  {planActionError ? <div className="wwa-alert-error">{planActionError}</div> : null}
+
+                  <div className="wwudp-setting">
+                    <div className="wwudp-setting__top">
+                      <div>
+                        <div className="wwa-setting-label">Break Mode</div>
+                        <div className="wwa-setting-sub">
+                          {planProgress?.breakModeActive
+                            ? `Paused until ${planProgress.breakEndDate || '—'}`
+                            : 'Plan is actively progressing'}
+                        </div>
+                      </div>
+                      <div className="wwudp-setting__actions">
+                        <Badge tone={planProgress?.breakModeActive ? 'brand' : 'neutral'}>
+                          {planProgress?.breakModeActive ? 'Active' : 'Inactive'}
+                        </Badge>
+                        <ToggleSwitch
+                          checked={!!planProgress?.breakModeActive}
+                          onChange={handleToggleBreakMode}
+                          disabled={savingBreakMode}
+                        />
+                      </div>
+                    </div>
+
+                    {planProgress?.breakModeActive ? (
+                      <>
+                        <DetailRow label="Duration" value={planProgress.breakDays ? `${planProgress.breakDays} days` : '—'} />
+                        <DetailRow label="Start Date" value={planProgress.breakStartDate || '—'} />
+                        <DetailRow label="Resume Date" value={planProgress.breakEndDate || '—'} />
+                        <DetailRow
+                          label="Remaining"
+                          value={planProgress.breakEndDate ? `${remainingDays(planProgress.breakEndDate)} days` : undefined}
+                        />
+                      </>
+                    ) : (
+                      <div className="wwudp-setting__duration">
+                        <span className="wwa-field-label" style={{ marginBottom: 0 }}>Duration</span>
+                        <div className="wwudp-setting__counter">
+                          <button
+                            type="button"
+                            className="wwa-btn wwa-btn-sm wwa-btn-secondary"
+                            onClick={() => setBreakDaysInput((days) => Math.max(MIN_BREAK_DAYS, days - 1))}
+                            disabled={savingBreakMode || breakDaysInput <= MIN_BREAK_DAYS}
+                          >
+                            −
+                          </button>
+                          <span className="wwudp-setting__counter-value">
+                            {breakDaysInput} {breakDaysInput === 1 ? 'day' : 'days'}
+                          </span>
+                          <button
+                            type="button"
+                            className="wwa-btn wwa-btn-sm wwa-btn-secondary"
+                            onClick={() => setBreakDaysInput((days) => Math.min(MAX_BREAK_DAYS, days + 1))}
+                            disabled={savingBreakMode || breakDaysInput >= MAX_BREAK_DAYS}
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="wwudp-setting">
+                    <div className="wwudp-setting__top">
+                      <div>
+                        <div className="wwa-setting-label">Compress Control</div>
+                        <div className="wwa-setting-sub">{`Day ${currentDayIndex} of the tracked plan`}</div>
+                      </div>
+                      <div className="wwudp-setting__actions">
+                        <Badge tone={isCurrentDayCompressed ? 'brand' : 'neutral'}>
+                          {isCurrentDayCompressed ? 'Compressed' : 'Full session'}
+                        </Badge>
+                        <ToggleSwitch
+                          checked={isCurrentDayCompressed}
+                          onChange={handleToggleCompress}
+                          disabled={savingCompress}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </section>
+          </>
+        )}
+      </DetailDrawer>
+    </>
   );
 }
 

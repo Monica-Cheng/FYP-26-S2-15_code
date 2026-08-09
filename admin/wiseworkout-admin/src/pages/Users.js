@@ -1,13 +1,72 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { functions } from '../firebase';
 import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
+import { Download } from 'lucide-react';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import Badge from '../components/ui/Badge';
-import EmptyState from '../components/ui/EmptyState';
-import SkeletonBlock from '../components/ui/SkeletonBlock';
 import UserDetailPanel from '../components/UserDetailPanel';
+import LoadingState from '../components/ui/LoadingState';
+import ErrorState from '../components/ui/ErrorState';
+import FilterBar from '../components/ui/FilterBar';
+import SearchInput from '../components/ui/SearchInput';
+import SelectField from '../components/ui/SelectField';
+import DataTable from '../components/ui/DataTable';
+
+function UsersStyles() {
+  return (
+    <style>{`
+      .wwus-page {
+        display: flex;
+        flex-direction: column;
+        gap: var(--ww-space-5);
+      }
+      .wwus-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: var(--ww-space-5);
+      }
+      .wwus-layout.has-detail {
+        grid-template-columns: minmax(0, 1fr) minmax(360px, var(--ww-drawer-width));
+        align-items: start;
+      }
+      .wwus-user-cell {
+        min-width: 0;
+      }
+      .wwus-user-cell__name {
+        font-size: var(--ww-type-body-size);
+        font-weight: 600;
+        color: var(--ww-text);
+        line-height: 1.35;
+      }
+      .wwus-user-cell__meta {
+        margin-top: 3px;
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        color: var(--ww-text-sec);
+        line-height: 1.45;
+      }
+      .wwus-actions {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        white-space: nowrap;
+      }
+      .wwus-table .wwa-table th:last-child,
+      .wwus-table .wwa-table td:last-child {
+        width: 1%;
+        white-space: nowrap;
+      }
+      @media (max-width: 1240px) {
+        .wwus-layout.has-detail {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+    `}</style>
+  );
+}
 
 function Users() {
   const [users, setUsers] = useState([]);
@@ -19,49 +78,48 @@ function Users() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [premiumFilter, setPremiumFilter] = useState('all');
   const [selectedUserId, setSelectedUserId] = useState(null);
-
   const [loadError, setLoadError] = useState('');
 
-  useEffect(() => {
-    const fetchUsers = async () => {
-      setLoadError('');
-      try {
-        const adminListUsers = httpsCallable(functions, "adminListUsers");
-        const result = await adminListUsers();
-        setUsers(result.data.users);
-      } catch (err) {
-        console.error(err);
-        const detail = err && err.code ? ` (${err.code})` : '';
-        setLoadError(`Failed to load users.${detail}`);
-      }
+  const fetchUsers = async () => {
+    setLoading(true);
+    setLoadError('');
+
+    try {
+      const adminListUsers = httpsCallable(functions, 'adminListUsers');
+      const result = await adminListUsers();
+      setUsers(Array.isArray(result.data.users) ? result.data.users : []);
+    } catch (err) {
+      console.error(err);
+      const detail = err && err.code ? ` (${err.code})` : '';
+      setLoadError(`Failed to load users.${detail}`);
+    } finally {
       setLoading(false);
-    };
+    }
+  };
+
+  useEffect(() => {
     fetchUsers();
   }, []);
 
   const toggleSuspend = async (userId, currentStatus) => {
     const suspended = currentStatus !== 'suspended';
     const action = suspended ? 'suspend' : 'reinstate';
-  
+
     if (!window.confirm(`Are you sure you want to ${action} this user?`)) {
       return;
     }
-  
+
     try {
-      const adminSetUserSuspended = httpsCallable(
-        functions,
-        'adminSetUserSuspended'
-      );
-  
+      const adminSetUserSuspended = httpsCallable(functions, 'adminSetUserSuspended');
       const result = await adminSetUserSuspended({
         uid: userId,
         suspended,
       });
-  
+
       const newStatus = result.data.accountStatus;
-  
-      setUsers(prev =>
-        prev.map(user =>
+
+      setUsers((prev) =>
+        prev.map((user) =>
           user.id === userId
             ? { ...user, accountStatus: newStatus }
             : user
@@ -69,91 +127,64 @@ function Users() {
       );
     } catch (err) {
       console.error(err);
-  
-      window.alert(
-        err.message || 'Failed to update the user account status.'
-      );
+      window.alert(err.message || 'Failed to update the user account status.');
     }
   };
+
   const handleDelete = async (user) => {
-    const userLabel =
-      user.displayName ||
-      user.username ||
-      user.email ||
-      user.id;
-  
+    const userLabel = user.displayName || user.username || user.email || user.id;
+
     const confirmation = window.prompt(
       `Permanently delete "${userLabel}"?\n\n` +
-      `This will remove the Firebase Authentication account and related ` +
-      `WiseWorkout data. This cannot be undone.\n\n` +
-      `Type DELETE to continue:`
+      'This will remove the Firebase Authentication account and related ' +
+      'WiseWorkout data. This cannot be undone.\n\n' +
+      'Type DELETE to continue:'
     );
-  
+
     if (confirmation !== 'DELETE') {
       return;
     }
-  
+
     const uidConfirmation = window.prompt(
-      `Final confirmation.\n\n` +
+      'Final confirmation.\n\n' +
       `Copy and paste this user UID exactly:\n${user.id}`
     );
-  
+
     if (uidConfirmation !== user.id) {
       window.alert('The UID did not match. Deletion cancelled.');
       return;
     }
-  
+
     try {
-      const adminDeleteUser = httpsCallable(
-        functions,
-        'adminDeleteUser'
-      );
-  
+      const adminDeleteUser = httpsCallable(functions, 'adminDeleteUser');
+
       await adminDeleteUser({
         uid: user.id,
         confirmUid: uidConfirmation,
       });
-  
-      setUsers(prev =>
-        prev.filter(existingUser => existingUser.id !== user.id)
-      );
-  
-      setSelectedUserId(prev =>
-        prev === user.id ? null : prev
-      );
-  
-      window.alert(
-        `"${userLabel}" was permanently deleted successfully.`
-      );
+
+      setUsers((prev) => prev.filter((existingUser) => existingUser.id !== user.id));
+      setSelectedUserId((prev) => (prev === user.id ? null : prev));
+
+      window.alert(`"${userLabel}" was permanently deleted successfully.`);
     } catch (err) {
       console.error(err);
-  
-      window.alert(
-        err.message ||
-        'The user could not be permanently deleted.'
-      );
+      window.alert(err.message || 'The user could not be permanently deleted.');
     }
   };
 
-  // Writes only the changed fields (partial update — Firestore leaves every
-  // other field on the document untouched) and mirrors the change into local
-  // state so the table and detail panel reflect it immediately.
   const handleSaveUser = async (userId, changes) => {
     try {
-      const adminUpdateUser = httpsCallable(
-        functions,
-        'adminUpdateUser'
-      );
-  
+      const adminUpdateUser = httpsCallable(functions, 'adminUpdateUser');
       const result = await adminUpdateUser({
         uid: userId,
         changes,
       });
-  
+
       const savedChanges = result.data.changes || changes;
-  
-      setUsers(prev =>
-        prev.map(user =>
+
+      setUsers((prev) =>
+        prev.map((user) =>
           user.id === userId
             ? { ...user, ...savedChanges }
             : user
@@ -165,12 +196,15 @@ function Users() {
     }
   };
 
-  // Distinct levels actually present in the loaded data — no hardcoded list.
-  const levels = Array.from(new Set(users.map(u => u.level || 1))).sort((a, b) => a - b);
+  const levels = Array.from(new Set(users.map((user) => user.level || 1))).sort((a, b) => a - b);
 
   const hasActiveFilters = Boolean(
-    search || levelFilter !== 'all' || onboardedFilter !== 'all' ||
-    healthFilter !== 'all' || statusFilter !== 'all' || premiumFilter !== 'all'
+    search ||
+    levelFilter !== 'all' ||
+    onboardedFilter !== 'all' ||
+    healthFilter !== 'all' ||
+    statusFilter !== 'all' ||
+    premiumFilter !== 'all'
   );
 
   const resetFilters = () => {
@@ -182,50 +216,51 @@ function Users() {
     setPremiumFilter('all');
   };
 
-  // All filtering happens locally against the users already fetched above —
-  // no additional Firestore reads are triggered by search or filter changes.
-  const filtered = users.filter(u => {
+  const filtered = users.filter((user) => {
     const q = search.toLowerCase();
     const matchesSearch =
-      (u.displayName || '').toLowerCase().includes(q) ||
-      (u.username || '').toLowerCase().includes(q) ||
-      (u.email || '').toLowerCase().includes(q) ||
-      (u.id || '').toLowerCase().includes(q);
-    const matchesLevel = levelFilter === 'all' || (u.level || 1) === Number(levelFilter);
-    const matchesOnboarded = onboardedFilter === 'all' ||
-      (onboardedFilter === 'yes' ? !!u.onboardingComplete : !u.onboardingComplete);
-    const matchesHealth = healthFilter === 'all' ||
-      (healthFilter === 'connected' ? !!u.healthConnected : !u.healthConnected);
-    const matchesStatus = statusFilter === 'all' ||
-      (statusFilter === 'suspended' ? u.accountStatus === 'suspended' : u.accountStatus !== 'suspended');
-    const matchesPremium = premiumFilter === 'all' ||
-      (premiumFilter === 'premium' ? !!u.isPremium : !u.isPremium);
+      (user.displayName || '').toLowerCase().includes(q) ||
+      (user.username || '').toLowerCase().includes(q) ||
+      (user.email || '').toLowerCase().includes(q) ||
+      (user.id || '').toLowerCase().includes(q);
+    const matchesLevel = levelFilter === 'all' || (user.level || 1) === Number(levelFilter);
+    const matchesOnboarded =
+      onboardedFilter === 'all' ||
+      (onboardedFilter === 'yes' ? !!user.onboardingComplete : !user.onboardingComplete);
+    const matchesHealth =
+      healthFilter === 'all' ||
+      (healthFilter === 'connected' ? !!user.healthConnected : !user.healthConnected);
+    const matchesStatus =
+      statusFilter === 'all' ||
+      (statusFilter === 'suspended' ? user.accountStatus === 'suspended' : user.accountStatus !== 'suspended');
+    const matchesPremium =
+      premiumFilter === 'all' ||
+      (premiumFilter === 'premium' ? !!user.isPremium : !user.isPremium);
+
     return matchesSearch && matchesLevel && matchesOnboarded && matchesHealth && matchesStatus && matchesPremium;
   });
 
-  const selectedUser = users.find(u => u.id === selectedUserId) || null;
+  const selectedUser = users.find((user) => user.id === selectedUserId) || null;
 
-  // Exports exactly the table's visible columns, for exactly the rows
-  // currently matching search + filters — no hidden fields (id/email/XP/
-  // subscription/goal) are included.
   const handleExport = () => {
-    const rows = filtered.map(u => ({
-      'Display Name': u.displayName || '—',
-      Username: u.username || '—',
-      'User ID': u.id,
-      Level: `Level ${u.level || 1}`,
-      Onboarded: u.onboardingComplete ? 'Yes' : 'No',
-      'Health Connected': u.healthConnected ? 'Connected' : 'Not Connected',
-      'Wearable Connected': u.wearableConnected ? 'Connected' : 'Not Connected',
-      'Premium Status': u.isPremium ? 'Premium' : 'Free',
-      Status: u.accountStatus === 'suspended' ? 'Suspended' : 'Active',
-      'Primary Goal': u.planMatchGoal || '—',
-      Hometown: u.hometown || '—',
-      'Total XP': u.totalXp ?? 0,
-      'Weekly XP': u.weeklyXp ?? 0,
-      'Tracked Plan': u.trackedPlanName || '—',
-      'Saved Plans Count': Array.isArray(u.savedPlanIds) ? u.savedPlanIds.length : 0,
+    const rows = filtered.map((user) => ({
+      'Display Name': user.displayName || '—',
+      Username: user.username || '—',
+      'User ID': user.id,
+      Level: `Level ${user.level || 1}`,
+      Onboarded: user.onboardingComplete ? 'Yes' : 'No',
+      'Health Connected': user.healthConnected ? 'Connected' : 'Not Connected',
+      'Wearable Connected': user.wearableConnected ? 'Connected' : 'Not Connected',
+      'Premium Status': user.isPremium ? 'Premium' : 'Free',
+      Status: user.accountStatus === 'suspended' ? 'Suspended' : 'Active',
+      'Primary Goal': user.planMatchGoal || '—',
+      Hometown: user.hometown || '—',
+      'Total XP': user.totalXp ?? 0,
+      'Weekly XP': user.weeklyXp ?? 0,
+      'Tracked Plan': user.trackedPlanName || '—',
+      'Saved Plans Count': Array.isArray(user.savedPlanIds) ? user.savedPlanIds.length : 0,
     }));
+
     const worksheet = XLSX.utils.json_to_sheet(rows);
     worksheet['!cols'] = [
       { wch: 22 }, { wch: 18 }, { wch: 24 }, { wch: 9 }, { wch: 10 },
@@ -240,185 +275,193 @@ function Users() {
     XLSX.writeFile(workbook, `WiseWorkout_Users_${dateStr}.xlsx`);
   };
 
+  const columns = [
+    {
+      key: 'user',
+      header: 'User',
+      render: (user) => (
+        <div className="wwus-user-cell">
+          <div className="wwus-user-cell__name">{user.displayName || user.username || 'Unnamed User'}</div>
+          <div className="wwus-user-cell__meta">{user.id}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'level',
+      header: 'Level',
+      render: (user) => <Badge tone="neutral">Level {user.level || 1}</Badge>,
+    },
+    {
+      key: 'health',
+      header: 'Health',
+      render: (user) => (
+        <Badge tone={user.healthConnected ? 'success' : 'neutral'}>
+          {user.healthConnected ? 'Connected' : 'Not connected'}
+        </Badge>
+      ),
+    },
+    {
+      key: 'subscription',
+      header: 'Subscription',
+      render: (user) => (
+        <Badge tone={user.isPremium ? 'brand' : 'neutral'}>
+          {user.isPremium ? 'Premium' : 'Free'}
+        </Badge>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      render: (user) => (
+        <Badge tone={user.accountStatus === 'suspended' ? 'danger' : 'success'}>
+          {user.accountStatus === 'suspended' ? 'Suspended' : 'Active'}
+        </Badge>
+      ),
+    },
+  ];
+
   return (
-    <div>
+    <div className="wwus-page">
       <AdminStyles />
+      <UsersStyles />
+
       <PageHeader
         title="Users"
         subtitle={loading ? 'Loading users…' : `${users.length} registered accounts`}
+        actions={
+          !loading ? (
+            <button
+              type="button"
+              className="wwa-btn wwa-btn-secondary"
+              onClick={handleExport}
+              disabled={filtered.length === 0}
+            >
+              <Download aria-hidden="true" size={16} strokeWidth={2} />
+              Export to Excel
+            </button>
+          ) : null
+        }
       />
 
-      {!loading && loadError && (
-        <div className="wwa-alert-error" style={{ marginBottom: 16 }}>{loadError}</div>
-      )}
-
       {loading ? (
-        <SkeletonBlock height={320} />
+        <LoadingState rows={8} />
+      ) : loadError ? (
+        <ErrorState title="Failed to load users" message={loadError} onRetry={fetchUsers} />
       ) : (
-        <div className={selectedUser ? 'wwa-split-layout' : ''}>
-          <div className={selectedUser ? 'wwa-split-main' : ''}>
-            <div className="wwa-toolbar">
-              <div className="wwa-search">
-                <input
-                  className="wwa-input"
-                  placeholder="Search by name, username, or ID…"
+        <div className={`wwus-layout ${selectedUser ? 'has-detail' : ''}`}>
+          <div>
+            <FilterBar
+              search={
+                <SearchInput
                   value={search}
-                  onChange={e => setSearch(e.target.value)}
+                  onChange={(event) => setSearch(event.target.value)}
+                  onClear={() => setSearch('')}
+                  placeholder="Search by name, username, or ID…"
+                  label="Search users"
                 />
-              </div>
+              }
+              filters={
+                <>
+                  <SelectField
+                    value={levelFilter}
+                    onChange={(event) => setLevelFilter(event.target.value)}
+                    options={[{ value: 'all', label: 'Level: All' }, ...levels.map((level) => ({ value: String(level), label: `Level ${level}` }))]}
+                    aria-label="Filter users by level"
+                  />
+                  <SelectField
+                    value={onboardedFilter}
+                    onChange={(event) => setOnboardedFilter(event.target.value)}
+                    options={[
+                      { value: 'all', label: 'Onboarded: All' },
+                      { value: 'yes', label: 'Onboarded: Yes' },
+                      { value: 'no', label: 'Onboarded: No' },
+                    ]}
+                    aria-label="Filter users by onboarding status"
+                  />
+                  <SelectField
+                    value={healthFilter}
+                    onChange={(event) => setHealthFilter(event.target.value)}
+                    options={[
+                      { value: 'all', label: 'Health: All' },
+                      { value: 'connected', label: 'Health: Connected' },
+                      { value: 'not', label: 'Health: Not Connected' },
+                    ]}
+                    aria-label="Filter users by health connection"
+                  />
+                  <SelectField
+                    value={statusFilter}
+                    onChange={(event) => setStatusFilter(event.target.value)}
+                    options={[
+                      { value: 'all', label: 'Status: All' },
+                      { value: 'active', label: 'Status: Active' },
+                      { value: 'suspended', label: 'Status: Suspended' },
+                    ]}
+                    aria-label="Filter users by account status"
+                  />
+                  <SelectField
+                    value={premiumFilter}
+                    onChange={(event) => setPremiumFilter(event.target.value)}
+                    options={[
+                      { value: 'all', label: 'Premium: All' },
+                      { value: 'premium', label: 'Premium: Premium' },
+                      { value: 'free', label: 'Premium: Free' },
+                    ]}
+                    aria-label="Filter users by premium status"
+                  />
+                </>
+              }
+              onReset={resetFilters}
+              resetLabel="Reset filters"
+              resetVariant="secondary"
+              resetDisabled={!hasActiveFilters}
+              count={`${filtered.length} of ${users.length} users`}
+            />
 
-              <select
-                className="wwa-select wwa-select-inline"
-                value={levelFilter}
-                onChange={e => setLevelFilter(e.target.value)}
-              >
-                <option value="all">All Levels</option>
-                {levels.map(l => (
-                  <option key={l} value={l}>Level {l}</option>
-                ))}
-              </select>
-
-              <select
-                className="wwa-select wwa-select-inline"
-                value={onboardedFilter}
-                onChange={e => setOnboardedFilter(e.target.value)}
-              >
-                <option value="all">Onboarded: All</option>
-                <option value="yes">Onboarded: Yes</option>
-                <option value="no">Onboarded: No</option>
-              </select>
-
-              <select
-                className="wwa-select wwa-select-inline"
-                value={healthFilter}
-                onChange={e => setHealthFilter(e.target.value)}
-              >
-                <option value="all">Health: All</option>
-                <option value="connected">Health: Connected</option>
-                <option value="not">Health: Not Connected</option>
-              </select>
-
-              <select
-                className="wwa-select wwa-select-inline"
-                value={statusFilter}
-                onChange={e => setStatusFilter(e.target.value)}
-              >
-                <option value="all">Status: All</option>
-                <option value="active">Status: Active</option>
-                <option value="suspended">Status: Suspended</option>
-              </select>
-
-              <select
-                className="wwa-select wwa-select-inline"
-                value={premiumFilter}
-                onChange={e => setPremiumFilter(e.target.value)}
-              >
-                <option value="all">Premium Status: All</option>
-                <option value="premium">Premium Status: Premium</option>
-                <option value="free">Premium Status: Free</option>
-              </select>
-
-              <button className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={resetFilters}>
-                Reset Filters
-              </button>
-
-              <button
-                className="wwa-btn wwa-btn-sm wwa-btn-success"
-                onClick={handleExport}
-                disabled={filtered.length === 0}
-              >
-                📤 Export to Excel
-              </button>
-
-              <span className="wwa-toolbar-count">{filtered.length} of {users.length} users</span>
-            </div>
-
-            <div className="wwa-table-wrap">
-              <table className="wwa-table">
-                <thead>
-                  <tr>
-                    {['Name', 'Level', 'Onboarded', 'Health Connected', 'Premium Status', 'Status', 'Action'].map(h => (
-                      <th key={h}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map(user => (
-                    <tr key={user.id} className={selectedUserId === user.id ? 'wwa-row-selected' : ''}>
-                      <td>
-                        <div className="wwa-cell-primary">
-                          {user.displayName || user.username || 'Unnamed User'}
-                        </div>
-                        <div className="wwa-cell-muted">{user.id}</div>
-                      </td>
-                      <td>
-                        <Badge tone="neutral">Level {user.level || 1}</Badge>
-                      </td>
-                      <td>
-                        <Badge tone={user.onboardingComplete ? 'success' : 'danger'}>
-                          {user.onboardingComplete ? 'Yes' : 'No'}
-                        </Badge>
-                      </td>
-                      <td>
-                        <Badge tone={user.healthConnected ? 'success' : 'neutral'}>
-                          {user.healthConnected ? 'Connected' : 'Not connected'}
-                        </Badge>
-                      </td>
-                      <td>
-                        <Badge tone={user.isPremium ? 'brand' : 'neutral'}>
-                          {user.isPremium ? 'Premium' : 'Free'}
-                        </Badge>
-                      </td>
-                      <td>
-                        <Badge tone={user.accountStatus === 'suspended' ? 'danger' : 'success'}>
-                          {user.accountStatus === 'suspended' ? 'Suspended' : 'Active'}
-                        </Badge>
-                      </td>
-                      <td>
-                        <div className="wwa-cell-actions">
-                          <button
-                            className="wwa-btn wwa-btn-sm wwa-btn-brand-soft"
-                            onClick={() => setSelectedUserId(user.id)}
-                          >
-                            View
-                          </button>
-                          <button
-                            className={`wwa-btn wwa-btn-sm ${user.accountStatus === 'suspended' ? 'wwa-btn-success-soft' : 'wwa-btn-danger'}`}
-                            onClick={() => toggleSuspend(user.id, user.accountStatus)}
-                          >
-                            {user.accountStatus === 'suspended' ? 'Reinstate' : 'Suspend'}
-                          </button>
-                          <button
-                            className="wwa-btn wwa-btn-sm wwa-btn-danger"
-                            onClick={() => handleDelete(user)}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {filtered.length === 0 && (
-                <EmptyState
-                  icon="👥"
-                  title="No users found"
-                  message={hasActiveFilters ? 'Try adjusting your search or filters.' : 'No registered accounts yet.'}
-                />
+            <DataTable
+              className="wwus-table"
+              columns={columns}
+              rows={filtered}
+              getRowKey={(user) => user.id}
+              selectedRowKey={selectedUserId}
+              minWidth={920}
+              emptyTitle="No users found"
+              emptyMessage={hasActiveFilters ? 'Try adjusting your search or filters.' : 'No registered accounts yet.'}
+              emptyIcon={null}
+              renderRowActions={(user) => (
+                <div className="wwus-actions">
+                  <button
+                    type="button"
+                    className="wwa-btn wwa-btn-sm wwa-btn-brand-soft"
+                    onClick={() => setSelectedUserId(user.id)}
+                  >
+                    View
+                  </button>
+                  <button
+                    type="button"
+                    className={`wwa-btn wwa-btn-sm ${user.accountStatus === 'suspended' ? 'wwa-btn-success-soft' : 'wwa-btn-danger'}`}
+                    onClick={() => toggleSuspend(user.id, user.accountStatus)}
+                  >
+                    {user.accountStatus === 'suspended' ? 'Reinstate' : 'Suspend'}
+                  </button>
+                  <button
+                    type="button"
+                    className="wwa-btn wwa-btn-sm wwa-btn-danger"
+                    onClick={() => handleDelete(user)}
+                  >
+                    Delete
+                  </button>
+                </div>
               )}
-            </div>
+            />
           </div>
 
-          {selectedUser && (
-            <div className="wwa-split-side">
-              <UserDetailPanel
-                user={selectedUser}
-                onClose={() => setSelectedUserId(null)}
-                onSave={handleSaveUser}
-              />
-            </div>
-          )}
+          {selectedUser ? (
+            <UserDetailPanel
+              user={selectedUser}
+              onClose={() => setSelectedUserId(null)}
+              onSave={handleSaveUser}
+            />
+          ) : null}
         </div>
       )}
     </div>
