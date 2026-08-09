@@ -116,7 +116,7 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
   // (see this task's scope: threading only); both stay null when this
   // screen is reached standalone.
   String? _sessionRunId;
-  int? _blockIndex;
+  String? _blockId;
   int _elapsedSeconds = 0;
   bool _isRunning = false;
   bool _isPaused = false;
@@ -179,7 +179,7 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
         _goalMinutes = extra?['goalMinutes'] as int? ??
             extra?['plannedMinutes'] as int? ?? 0;
         _sessionRunId = extra?['sessionRunId'] as String?;
-        _blockIndex = extra?['blockIndex'] as int?;
+        _blockId = extra?['blockId'] as String?;
       });
       _loadUserWeight();
       _loadInjuryWarning();
@@ -850,7 +850,7 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
 
   // Branches on whether this session was launched from a plan's cardio
   // block (see cardio_setup_screen.dart's _handleStart(), which forwards
-  // sessionRunId/blockIndex through from gym_session_screen.dart). If not
+  // sessionRunId/blockId through from gym_session_screen.dart). If not
   // (both null), everything below the branch is byte-for-byte the original
   // standalone behavior — untouched. If launched from a plan, this block's
   // result is persisted through the in-progress-session flow instead of
@@ -861,9 +861,9 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
     _timer?.cancel();
     final uid = _uid;
     final sessionRunId = _sessionRunId;
-    final blockIndex = _blockIndex;
+    final blockId = _blockId;
 
-    if (uid != null && sessionRunId != null && blockIndex != null) {
+    if (uid != null && sessionRunId != null && blockId != null) {
       double? avgHR;
       double? maxHR;
       try {
@@ -900,50 +900,25 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
       };
       // TEMPORARY DEBUG — remove once the second-cardio-block bug is
       // confirmed fixed.
-      print('DEBUG_BLOCKINDEX: cardio_session_screen finish uid=$uid '
-          'sessionRunId=$sessionRunId blockIndex=$blockIndex');
+      print('DEBUG_BLOCKID: cardio_session_screen finish uid=$uid '
+          'sessionRunId=$sessionRunId blockId=$blockId');
       await FirestoreService()
-          .updateInProgressSessionBlock(uid, sessionRunId, blockIndex, blockData);
-
-      final fullyDone = await FirestoreService()
-          .isInProgressSessionFullyDone(uid, sessionRunId);
+          .updateInProgressSessionBlock(uid, sessionRunId, blockId, blockData);
 
       if (!mounted) return;
 
-      if (!fullyDone) {
-        context.pushReplacement(Routes.midPlanCardioComplete, extra: {
-          'sessionRunId': sessionRunId,
-          'blockIndex': blockIndex,
-          'blockData': blockData,
-        });
-        return;
-      }
-
-      String? finalSessionId;
-      List<Map<String, dynamic>> newlyEarnedBadges = [];
-      try {
-        final finalizeResult = await FirestoreService()
-            .finalizeInProgressSession(uid, sessionRunId);
-        finalSessionId = finalizeResult.sessionId;
-        newlyEarnedBadges = finalizeResult.newlyEarnedBadges;
-      } catch (_) {}
-
-      if (!mounted) return;
-      context.pushReplacement(Routes.postSessionSummary, extra: {
-        'planId': null,
-        'sessionName': '$_activity · Indoor',
-        // _activeSeconds (gated) — mirrors outdoor's own postSessionSummary
-        // payload, which uses _activeSeconds for this same field.
-        'elapsedSeconds': _activeSeconds,
-        'date': DateTime.now(),
-        'exercises': <dynamic>[],
-        'isCardio': true,
-        'cardioActivity': _activity,
-        'cardioCalories': _calories.round(),
-        'goalMinutes': _goalMinutes,
-        'sessionId': finalSessionId,
-        if (newlyEarnedBadges.isNotEmpty)
-          'newlyEarnedBadges': newlyEarnedBadges,
+      // Always shows the block-completion summary, even when this happens
+      // to be the last remaining incomplete block in the session —
+      // isInProgressSessionFullyDone() must NOT be used here to skip
+      // straight to finalizing/postSessionSummary. The session should only
+      // ever end via an explicit Finish/End Session tap on the main
+      // gym_session_screen.dart (see that screen's own Finish Session flow
+      // for the real finalizeInProgressSession() call), never auto-detected
+      // just because every planned block happens to be done.
+      context.pushReplacement(Routes.midPlanCardioComplete, extra: {
+        'sessionRunId': sessionRunId,
+        'blockId': blockId,
+        'blockData': blockData,
       });
       return;
     }
@@ -1250,9 +1225,17 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
 
     return Scaffold(
       backgroundColor: WW.primaryDark,
-      body: Column(
+      // Stack instead of a plain Column so the injury banner (below) can
+      // overlay near the top rather than sit inline as a Column child —
+      // an inline banner pushed the top section/middle calorie display/
+      // fixed-height bottom controls down by its own rendered height,
+      // which grows with the injury-name list length, causing a bottom
+      // overflow once the list was long enough. Overlaying removes that
+      // failure mode entirely regardless of how many injuries are listed.
+      body: Stack(
         children: [
-          _buildInjuryWarningBanner(),
+          Column(
+            children: [
           // ── Top section ───────────────────────────────────────────────────
           Container(
             color: WW.primaryDark,
@@ -1579,6 +1562,20 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
                 ),
               ],
             ),
+          ),
+            ],
+          ),
+          // Overlaid, not a Column child — see the body: Stack(...) comment
+          // above for why. Positioned flush at the very top; the banner's
+          // own padding already adds MediaQuery.of(context).padding.top
+          // itself (it was already written to self-manage the safe-area
+          // inset, not wrapped in a SafeArea), so no extra top offset is
+          // needed here.
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: _buildInjuryWarningBanner(),
           ),
         ],
       ),

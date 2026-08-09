@@ -65,7 +65,7 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
   // re-forwarded into whichever cardio screen _handleStart() launches next
   // (see below). Both null when reached standalone (not from a plan).
   String? _sessionRunId;
-  int? _blockIndex;
+  String? _blockId;
   String _goalType = 'time';
   int _goalMinutes = 30;
   late FixedExtentScrollController _durationController;
@@ -93,7 +93,7 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
       _planActivity = extra['planActivity'] as String?;
       _planMinutes = extra['planMinutes'] as int?;
       _sessionRunId = extra['sessionRunId'] as String?;
-      _blockIndex = extra['blockIndex'] as int?;
+      _blockId = extra['blockId'] as String?;
       if (_planActivity != null) _selectedActivity = _planActivity!;
     });
   }
@@ -113,7 +113,7 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
           'planActivity': _planActivity,
           'planMinutes': _planMinutes,
           'sessionRunId': _sessionRunId,
-          'blockIndex': _blockIndex,
+          'blockId': _blockId,
         },
       );
       return;
@@ -132,7 +132,7 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
         'fromPlan': _fromPlan,
         'goalMinutes': effectiveGoalMinutes,
         'sessionRunId': _sessionRunId,
-        'blockIndex': _blockIndex,
+        'blockId': _blockId,
       },
     );
   }

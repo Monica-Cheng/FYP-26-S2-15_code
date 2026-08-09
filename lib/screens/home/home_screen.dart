@@ -2326,8 +2326,13 @@ class _TodayPlanCardState extends State<_TodayPlanCard> {
   Widget _buildPlanCard(BuildContext context) {
     final sessionName =
         widget.todaySession?['name'] as String? ?? '';
+    // estimatedMinutes is now always computed and stored at save time (both
+    // admin and custom/coach plans) — 0 here is a defensive floor only, not
+    // a guessed placeholder. Kept consistent with the same fallback used in
+    // plan_schedule_screen.dart/plan_detail_screen.dart, rather than the
+    // three different guessed values (0/0/45) this used to be.
     final baseEstimatedMinutes =
-        (widget.todaySession?['estimatedMinutes'] as num?)?.toInt() ?? 45;
+        (widget.todaySession?['estimatedMinutes'] as num?)?.toInt() ?? 0;
     final allExercises =
         (widget.todaySession?['exercises'] as List<dynamic>?)
             ?.cast<Map<String, dynamic>>() ??

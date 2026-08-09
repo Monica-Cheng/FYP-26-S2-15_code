@@ -214,6 +214,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
     'Custom',
   ];
 
+  // Fallback only now, matching firestore_service.dart's own
+  // _kFallbackLevelThresholds convention — see _xpThresholds below and
+  // _loadXpThresholds() for the live-config read that's now the actual
+  // source. Previously this was the primary, only source (never synced
+  // with whatever an admin actually configured), which meant an admin
+  // editing an existing threshold value never showed up here — a real
+  // correctness gap independent of adding new levels.
   static const _kXpThresholds = [
     0,
     500,
@@ -228,29 +235,16 @@ class _ProgressScreenState extends State<ProgressScreen> {
     32000,
   ];
 
-  static String _levelName(int level) {
-    const names = [
-      '',
-      'Rookie',
-      'Beginner',
-      'Apprentice',
-      'Contender',
-      'Challenger',
-      'Warrior',
-      'Iron Athlete',
-      'Steel Athlete',
-      'Elite Athlete',
-      'Champion',
-      'Legend',
-    ];
-    if (level < 1 || level >= names.length) return 'Level $level';
-    return names[level];
-  }
+  // Starts at the fallback so this card renders correctly-looking data
+  // immediately (no spinner/placeholder needed — the fallback matches
+  // whatever's actually configured in the common case), then updates via
+  // _loadXpThresholds() once the live fetch resolves.
+  List<num> _xpThresholds = _kXpThresholds;
 
   double _xpProgress() {
-    if (_level >= _kXpThresholds.length) return 1.0;
-    final start = _kXpThresholds[_level - 1];
-    final end = _kXpThresholds[_level];
+    if (_level >= _xpThresholds.length) return 1.0;
+    final start = _xpThresholds[_level - 1];
+    final end = _xpThresholds[_level];
     return ((_totalXp - start) / (end - start)).clamp(0.0, 1.0);
   }
 
@@ -260,11 +254,21 @@ class _ProgressScreenState extends State<ProgressScreen> {
     _loadSessionsPage(reset: true);
     _loadXpData();
     _loadXpEvents();
+    _loadXpThresholds();
     _loadChartData();
     _loadCheckIns();
     _loadGoalWeight();
     _startWeightStream();
     _loadNutritionLogs();
+  }
+
+  // Global config, not per-user data — independent of _loadXpData()
+  // above, so it loads in parallel rather than waiting on it.
+  Future<void> _loadXpThresholds() async {
+    final thresholds =
+        await FirestoreService().getLevelThresholds(_kXpThresholds);
+    if (!mounted) return;
+    setState(() => _xpThresholds = thresholds);
   }
 
   @override
@@ -3151,8 +3155,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
 
   Widget _buildLevelCard() {
     final progress = _xpProgress();
-    final isMaxLevel = _level >= _kXpThresholds.length;
-    final nextLevelXp = isMaxLevel ? 0 : _kXpThresholds[_level];
+    final isMaxLevel = _level >= _xpThresholds.length;
+    final nextLevelXp = isMaxLevel ? 0 : _xpThresholds[_level];
     final xpToNext = isMaxLevel ? 0 : nextLevelXp - _totalXp;
 
     return Container(
@@ -3174,15 +3178,6 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   fontSize: 28,
                   fontWeight: FontWeight.w700,
                   color: WW.primaryDark,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                _levelName(_level),
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                  color: WW.textSec,
                 ),
               ),
             ],

@@ -1325,6 +1325,10 @@ class _DayCardState extends State<_DayCard> {
     final isRest = widget.sessionData['isRestDay'] == true;
     final dayLabel = widget.sessionData['day'] as String? ?? '';
     final sessionName = widget.sessionData['name'] as String? ?? '';
+    // estimatedMinutes is now always computed and stored at save time (both
+    // admin and custom/coach plans) — 0 here is a defensive floor only, not
+    // a guessed placeholder. Kept consistent with the same fallback used in
+    // plan_schedule_screen.dart/home_screen.dart.
     final baseEstimatedMinutes =
         (widget.sessionData['estimatedMinutes'] as num?)?.toInt() ?? 0;
     final allExercises = (widget.sessionData['exercises'] as List<dynamic>?)

@@ -141,19 +141,38 @@ List<Map<String, dynamic>> applyCompression(
   return result;
 }
 
-/// Rough updated time estimate after compression: subtracts the same flat
-/// 4 min/removed-exercise heuristic the Compress sheet itself shows, plus
-/// the real cardio minutes actually shaved off each overridden cardio
-/// block (original cardioMinutes, looked up from [rawExercises] since
-/// cardioOverrides only ever stores the new value, minus the override).
-/// Never returns a negative number, and never exceeds [baseMinutes].
+/// Updated time estimate after compression — a real calculation on both
+/// sides now, not an approximation. For each removed (non-cardio) exercise,
+/// looks up its actual sets_count × (estTimePerSet + restTime) from
+/// [rawExercises] (sets_count resolves the same dual shape
+/// _computeEstimatedMinutes() in build_routine_screen.dart does: the admin
+/// scalar `sets` count, or a custom/coach plan's `sets` array length) and
+/// subtracts that real value — replacing the old flat "4 min per removed
+/// exercise" heuristic. The cardio portion is unchanged: the real cardio
+/// minutes actually shaved off each overridden cardio block (original
+/// cardioMinutes, looked up from [rawExercises] since cardioOverrides only
+/// ever stores the new value, minus the override). Never returns a
+/// negative number, and never exceeds [baseMinutes].
 int estimatedMinutesAfterCompression(
   int baseMinutes,
   CompressedDayData? dayData,
   List<Map<String, dynamic>> rawExercises,
 ) {
   if (dayData == null || dayData.isEmpty) return baseMinutes;
-  final fromRemoved = dayData.removedExercises.length * 4;
+
+  var fromRemovedSeconds = 0;
+  for (final index in dayData.removedExercises) {
+    if (index < 0 || index >= rawExercises.length) continue;
+    final ex = rawExercises[index];
+    final rawSets = ex['sets'];
+    final setsCount =
+        rawSets is List ? rawSets.length : (rawSets as num?)?.toInt() ?? 0;
+    final estTimePerSet = (ex['estTimePerSet'] as num?)?.toInt() ?? 0;
+    final restTime = (ex['restTime'] as num?)?.toInt() ?? 0;
+    fromRemovedSeconds += setsCount * (estTimePerSet + restTime);
+  }
+  final fromRemoved = (fromRemovedSeconds / 60).round();
+
   var fromCardio = 0;
   dayData.cardioOverrides.forEach((index, newMinutes) {
     if (index < 0 || index >= rawExercises.length) return;
@@ -161,5 +180,6 @@ int estimatedMinutesAfterCompression(
         (rawExercises[index]['cardioMinutes'] as num?)?.toInt() ?? newMinutes;
     fromCardio += (original - newMinutes).clamp(0, original);
   });
+
   return (baseMinutes - fromRemoved - fromCardio).clamp(0, baseMinutes);
 }

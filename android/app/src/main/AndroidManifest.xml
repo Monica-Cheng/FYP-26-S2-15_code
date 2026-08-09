@@ -8,6 +8,21 @@
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <!-- Health Connect (see package:health README, "Google Health Connect
+         (Android)" setup section) — READ-only, one uses-permission per
+         HealthDataType HealthService._readTypes actually requests
+         (STEPS -> READ_STEPS, HEART_RATE -> READ_HEART_RATE,
+         ACTIVE_ENERGY_BURNED -> READ_ACTIVE_CALORIES_BURNED per the health
+         plugin's Android type mapping). No WRITE_* entries — this app only
+         reads. -->
+    <uses-permission android:name="android.permission.health.READ_STEPS"/>
+    <uses-permission android:name="android.permission.health.READ_HEART_RATE"/>
+    <uses-permission android:name="android.permission.health.READ_ACTIVE_CALORIES_BURNED"/>
+    <!-- Required by Health Connect for STEPS access specifically (README:
+         "Accessing fitness data (e.g. Steps) requires permission to access
+         the Activity Recognition API"). Dangerous protection level on
+         API 29+, so it also needs a runtime request — see report. -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
     <application
         android:label="wise_workout"
         android:name="${applicationName}"
@@ -33,7 +48,26 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- Health Connect launches this to show its permissions
+                 rationale screen (package:health README). -->
+            <intent-filter>
+                <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
+            </intent-filter>
         </activity>
+        <!-- Health Connect's "why does this app want this data" screen links
+             back here (package:health README) — required to pass Play Store
+             review when requesting sensitive permissions; routes to
+             MainActivity since there's no dedicated privacy-policy screen. -->
+        <activity-alias
+            android:name="ViewPermissionUsageActivity"
+            android:exported="true"
+            android:targetActivity=".MainActivity"
+            android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
@@ -57,6 +91,13 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Health Connect package-visibility (package:health README,
+             "Check whether Health Connect is installed or not") — lets the
+             plugin detect/launch the Health Connect app on Android 11+. -->
+        <package android:name="com.google.android.apps.healthdata" />
+        <intent>
+            <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
         </intent>
     </queries>
 </manifest>
