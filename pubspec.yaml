@@ -16,6 +16,11 @@ dependencies:
   cloud_firestore: ^5.4.4
   firebase_messaging: ^15.1.3
   cloud_functions: ^5.1.3
+  # Coach registration credential documents (see storage_service.dart) —
+  # full-resolution uploads, deliberately NOT base64-in-Firestore like
+  # this app's other images, since a certificate's fine print needs to
+  # stay readable for admin review, unlike a decorative photo.
+  firebase_storage: ^12.3.7
   # Navigation
   go_router: ^14.2.7
   # State management

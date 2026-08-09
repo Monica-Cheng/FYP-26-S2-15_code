@@ -3754,6 +3754,16 @@ class FirestoreService {
     required String bio,
     required String experience,
     String? email,
+    // Firebase Storage download URLs for credential documents (see
+    // storage_service.dart) — full-resolution, not base64, so admin
+    // review can actually read fine print on a certificate. Optional:
+    // an applicant can submit without one, though the UI encourages it.
+    // The just-merged admin dashboard's adminListBusinessPartners
+    // function spreads the whole businessPartners doc generically, so
+    // this field reaches it with no Cloud Function changes needed — the
+    // React UI itself doesn't render it yet (out of this app's scope,
+    // that's admin UI).
+    List<String>? credentialUrls,
   }) async {
     final batch = _db.batch();
 
@@ -3764,6 +3774,8 @@ class FirestoreService {
       'bio': bio,
       'experience': experience,
       if (email != null && email.isNotEmpty) 'email': email,
+      if (credentialUrls != null && credentialUrls.isNotEmpty)
+        'credentialUrls': credentialUrls,
       'isApproved': false,
       'isVisible': false,
       'createdAt': FieldValue.serverTimestamp(),
