@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import DetailDrawer from './ui/DetailDrawer';
 import { formatDate } from '../utils/dateUtils';
 import { resolveCategoryDisplay, formatGoal, computeChallengeStatus, computeInviteEligibility } from '../utils/challengeUtils';
 
@@ -28,12 +29,28 @@ function ChallengeDetailPanel({ challenge, categories, users, onClose, onDelete 
   const eligibility = computeInviteEligibility(challenge, users || []);
 
   return (
-    <div className="wwa-panel">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 }}>
-        <div className="wwa-panel-title" style={{ marginBottom: 0 }}>Challenge Detail</div>
-        <button className="wwa-panel-close" onClick={onClose} aria-label="Close challenge detail">✕</button>
-      </div>
-
+    <DetailDrawer
+      title="Challenge Detail"
+      open={Boolean(challenge)}
+      onClose={onClose}
+      viewportLocked
+      footer={
+        <div className="wwa-cell-actions" style={{ width: '100%', marginTop: 0 }}>
+          {challenge.isGlobal === true ? (
+            <button
+              className="wwa-btn wwa-btn-sm wwa-btn-danger"
+              onClick={() => onDelete(challenge)}
+            >
+              Delete
+            </button>
+          ) : (
+            <div style={{ fontSize: 12.5, color: '#9ca3af' }}>
+              Private challenges are managed by their creator.
+            </div>
+          )}
+        </div>
+      }
+    >
       <div style={{ marginBottom: 8 }}>
         <DetailRow label="Challenge ID" value={<span style={monoStyle}>{challenge.id}</span>} />
         <DetailRow label="Name" value={challenge.name || challenge.title || '—'} />
@@ -100,22 +117,7 @@ function ChallengeDetailPanel({ challenge, categories, users, onClose, onDelete 
           )}
         </div>
       )}
-
-      <div className="wwa-cell-actions" style={{ marginTop: 8 }}>
-        {challenge.isGlobal === true ? (
-          <button
-            className="wwa-btn wwa-btn-sm wwa-btn-danger"
-            onClick={() => onDelete(challenge)}
-          >
-            Delete
-          </button>
-        ) : (
-          <div style={{ fontSize: 12.5, color: '#9ca3af' }}>
-            Private challenges are managed by their creator.
-          </div>
-        )}
-      </div>
-    </div>
+    </DetailDrawer>
   );
 }
 

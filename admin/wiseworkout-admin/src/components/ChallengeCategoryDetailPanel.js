@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import DetailDrawer from './ui/DetailDrawer';
 import { METRIC_TYPES, validateCategoryForm } from '../utils/challengeUtils';
 
 const monoStyle = { fontFamily: 'Consolas, Menlo, monospace', fontSize: '12px' };
@@ -87,19 +88,37 @@ function ChallengeCategoryDetailPanel({ category, startInEdit, usageCount, onClo
   };
 
   return (
-    <div className="wwa-panel">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 }}>
-        <div className="wwa-panel-title" style={{ marginBottom: 0 }}>Category Detail</div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {!isEditing && (
-            <button className="wwa-btn wwa-btn-sm wwa-btn-brand-soft" onClick={startEdit}>
-              Edit
+    <DetailDrawer
+      title="Category Detail"
+      open={Boolean(category)}
+      onClose={onClose}
+      viewportLocked
+      actions={
+        !isEditing ? (
+          <button className="wwa-btn wwa-btn-sm wwa-btn-brand-soft" onClick={startEdit}>
+            Edit
+          </button>
+        ) : null
+      }
+      footer={
+        isEditing ? (
+          <div className="wwa-cell-actions" style={{ width: '100%', justifyContent: 'space-between' }}>
+            <button className="wwa-btn wwa-btn-primary" onClick={handleSave} disabled={saving}>
+              {saving ? 'Saving...' : 'Save Changes'}
             </button>
-          )}
-          <button className="wwa-panel-close" onClick={onClose} aria-label="Close category detail">✕</button>
-        </div>
-      </div>
-
+            <button className="wwa-btn wwa-btn-secondary" onClick={cancelEdit} disabled={saving}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <div className="wwa-cell-actions" style={{ width: '100%' }}>
+            <button className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => onDelete(category.id)}>
+              Delete
+            </button>
+          </div>
+        )
+      }
+    >
       {successMsg && (
         <div className="wwa-status-pill" style={{ marginBottom: 16 }}>
           <span className="wwa-status-dot" />
@@ -169,24 +188,7 @@ function ChallengeCategoryDetailPanel({ category, startInEdit, usageCount, onClo
           <DetailRow label="Used By" value={`${usageCount} challenge${usageCount === 1 ? '' : 's'}`} />
         </div>
       )}
-
-      {isEditing ? (
-        <div className="wwa-cell-actions" style={{ marginTop: 8 }}>
-          <button className="wwa-btn wwa-btn-primary" onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving...' : 'Save Changes'}
-          </button>
-          <button className="wwa-btn wwa-btn-secondary" onClick={cancelEdit} disabled={saving}>
-            Cancel
-          </button>
-        </div>
-      ) : (
-        <div className="wwa-cell-actions" style={{ marginTop: 8 }}>
-          <button className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => onDelete(category.id)}>
-            Delete
-          </button>
-        </div>
-      )}
-    </div>
+    </DetailDrawer>
   );
 }
 
