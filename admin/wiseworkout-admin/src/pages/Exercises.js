@@ -19,6 +19,8 @@ import DataTable from '../components/ui/DataTable';
 import TableActions from '../components/ui/TableActions';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
+import ModalDialog from '../components/ui/ModalDialog';
+import { getCallableErrorMessage } from '../utils/planUtils';
 import {
   formatRepRange,
   validateRepRange,
@@ -46,6 +48,10 @@ const emptyForm = {
 
 const difficultyTone = (difficulty) =>
   difficulty === 'Advanced' ? 'danger' : difficulty === 'Intermediate' ? 'warning' : 'success';
+
+const DELETE_CONFIRMATION = 'DELETE';
+
+const normalizeExerciseName = (value) => (value || '').trim().toLowerCase();
 
 function ExercisesStyles() {
   return (
@@ -125,9 +131,91 @@ function ExercisesStyles() {
       .wwex-risk-empty {
         padding: 14px 0;
       }
+      .wwex-modal-copy {
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text);
+        line-height: 1.6;
+      }
+      .wwex-modal-note {
+        margin-top: 10px;
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-text-sec);
+        line-height: 1.55;
+      }
+      .wwex-media-note {
+        padding: 12px 14px;
+        border-radius: 12px;
+        border: 1px solid var(--ww-divider);
+        background: var(--ww-elevated);
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-text-sec);
+        line-height: 1.55;
+      }
+      .wwa-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1200;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(15, 23, 42, 0.58);
+        backdrop-filter: blur(2px);
+      }
+      .wwa-modal__panel {
+        width: min(100%, 560px);
+        max-height: calc(100vh - 48px);
+        overflow: auto;
+        background: var(--ww-card);
+        border: 1px solid var(--ww-divider);
+        border-radius: 20px;
+        box-shadow: var(--ww-shadow-lg);
+      }
+      .wwa-modal__header,
+      .wwa-modal__footer {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--ww-divider);
+      }
+      .wwa-modal__footer {
+        align-items: center;
+        justify-content: flex-end;
+        border-top: 1px solid var(--ww-divider);
+        border-bottom: 0;
+        flex-wrap: wrap;
+      }
+      .wwa-modal__header-main {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .wwa-modal__title {
+        margin: 0;
+        font-size: var(--ww-type-card-title-size);
+        font-weight: var(--ww-type-card-title-weight);
+        color: var(--ww-primary-dark);
+      }
+      .wwa-modal__description {
+        margin: 0;
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text-sec);
+        line-height: 1.55;
+      }
+      .wwa-modal__body {
+        padding: 20px;
+      }
       @media (max-width: 1100px) {
         .wwex-layout.has-detail {
           grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      @media (max-width: 720px) {
+        .wwa-modal {
+          padding: 12px;
         }
       }
     `}</style>
@@ -141,6 +229,7 @@ function Exercises() {
   const [loadError, setLoadError] = useState('');
   const [search, setSearch] = useState('');
   const [difficultyFilter, setDifficultyFilter] = useState('all');
+  const [muscleFilter, setMuscleFilter] = useState('all');
   const [equipmentFilter, setEquipmentFilter] = useState('all');
   const [muscleGroupFilter, setMuscleGroupFilter] = useState('all');
 
@@ -152,6 +241,9 @@ function Exercises() {
   const [successMsg, setSuccessMsg] = useState('');
 
   const [selectedExerciseId, setSelectedExerciseId] = useState(null);
+  const [deleteExerciseId, setDeleteExerciseId] = useState(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [deleteError, setDeleteError] = useState('');
 
   useEffect(() => {
     const fetchData = async () => {
@@ -195,17 +287,52 @@ function Exercises() {
     setFormError('');
   };
 
+  const closeDeleteDialog = () => {
+    if (saving) return;
+    setDeleteExerciseId(null);
+    setDeleteConfirmation('');
+    setDeleteError('');
+  };
+
+  const openExerciseView = (exercise) => {
+    setSelectedExerciseId(exercise.id);
+    setFormError('');
+    setDeleteError('');
+  };
+
+  const openExerciseDelete = (exercise) => {
+    setDeleteExerciseId(exercise.id);
+    setDeleteConfirmation('');
+    setFormError('');
+    setDeleteError('');
+  };
+
   const openAddForm = () => {
     setShowForm(true);
     setEditingId(null);
     setForm(emptyForm);
     setFormError('');
+    setDeleteError('');
     setSelectedExerciseId(null);
   };
 
   const handleAdd = async () => {
     if (!form.name.trim()) {
       setFormError('Exercise Name is required.');
+      return;
+    }
+    if (!form.muscle.trim()) {
+      setFormError('Primary muscle is required.');
+      return;
+    }
+
+    const duplicateExists = exercises.some(
+      (exercise) =>
+        exercise.id !== editingId &&
+        normalizeExerciseName(exercise.name) === normalizeExerciseName(form.name)
+    );
+    if (duplicateExists) {
+      setFormError('An exercise with this name already exists.');
       return;
     }
 
@@ -295,8 +422,7 @@ function Exercises() {
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error(err);
-      const detail = err && err.code ? ` (${err.code})` : '';
-      setFormError(`Failed to save exercise. Please try again.${detail}`);
+      setFormError(getCallableErrorMessage(err, 'Failed to save exercise. Please try again.'));
     }
 
     setSaving(false);
@@ -323,22 +449,16 @@ function Exercises() {
     });
     setEditingId(exercise.id);
     setFormError('');
+    setDeleteError('');
     setShowForm(true);
     setSelectedExerciseId(exercise.id);
   };
 
-  const handleDelete = async (exercise) => {
-    const exerciseName = exercise.name || exercise.id;
-
-    const confirmation = window.prompt(
-      `Permanently delete "${exerciseName}"?\n\n` +
-        'Existing plans keep their embedded copy, but this exercise will ' +
-        'be removed from the shared exercise library.\n\n' +
-        'Type DELETE to continue:'
-    );
-
-    if (confirmation !== 'DELETE') return;
-
+  const handleDelete = async () => {
+    const exercise = exercises.find((item) => item.id === deleteExerciseId);
+    if (!exercise) return;
+    setSaving(true);
+    setDeleteError('');
     try {
       const adminDeleteExercise = httpsCallable(functions, 'adminDeleteExercise');
 
@@ -348,31 +468,44 @@ function Exercises() {
 
       setExercises((prev) => prev.filter((existing) => existing.id !== exercise.id));
       setSelectedExerciseId((prev) => (prev === exercise.id ? null : prev));
-      window.alert(`"${exerciseName}" was deleted successfully.`);
+      if (editingId === exercise.id) {
+        closeForm();
+        setForm(emptyForm);
+      }
+      closeDeleteDialog();
+      setSuccessMsg(`"${exercise.name || 'Exercise'}" was deleted successfully.`);
+      setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error(err);
-      const detail = err && err.code ? ` (${err.code})` : '';
-      window.alert(`Failed to delete exercise.${detail}`);
+      setDeleteError(getCallableErrorMessage(err, 'Failed to delete exercise. Please try again.'));
+    } finally {
+      setSaving(false);
     }
   };
 
   const difficultyOptions = Array.from(new Set(exercises.map((exercise) => exercise.difficulty).filter(Boolean))).sort();
   const equipmentOptions = Array.from(new Set(exercises.map((exercise) => exercise.equipment).filter(Boolean))).sort();
+  const muscleOptions = Array.from(new Set(exercises.map((exercise) => exercise.muscle).filter(Boolean))).sort();
   const muscleGroupOptions = Array.from(new Set(exercises.map((exercise) => exercise.muscleGroup).filter(Boolean))).sort();
 
   const filtered = exercises.filter((exercise) => {
     const query = search.toLowerCase();
     const matchesSearch =
       (exercise.name || '').toLowerCase().includes(query) ||
+      (exercise.muscle || '').toLowerCase().includes(query) ||
+      (exercise.equipment || '').toLowerCase().includes(query) ||
       (exercise.muscleGroup || '').toLowerCase().includes(query);
     const matchesDifficulty = difficultyFilter === 'all' || exercise.difficulty === difficultyFilter;
     const matchesEquipment = equipmentFilter === 'all' || exercise.equipment === equipmentFilter;
+    const matchesMuscle = muscleFilter === 'all' || exercise.muscle === muscleFilter;
     const matchesMuscleGroup = muscleGroupFilter === 'all' || exercise.muscleGroup === muscleGroupFilter;
 
-    return matchesSearch && matchesDifficulty && matchesEquipment && matchesMuscleGroup;
+    return matchesSearch && matchesDifficulty && matchesEquipment && matchesMuscle && matchesMuscleGroup;
   });
 
   const selectedExercise = exercises.find((exercise) => exercise.id === selectedExerciseId) || null;
+  const deleteExercise = exercises.find((exercise) => exercise.id === deleteExerciseId) || null;
+  const editingExercise = exercises.find((exercise) => exercise.id === editingId) || null;
 
   const handleExport = () => {
     const rows = filtered.map((exercise) => ({
@@ -419,8 +552,9 @@ function Exercises() {
   };
 
   const difficultyFilterOptions = [{ value: 'all', label: 'Difficulty: All' }, ...difficultyOptions.map((value) => ({ value, label: value }))];
+  const muscleFilterOptions = [{ value: 'all', label: 'Primary Muscle: All' }, ...muscleOptions.map((value) => ({ value, label: value }))];
   const equipmentFilterOptions = [{ value: 'all', label: 'Equipment: All' }, ...equipmentOptions.map((value) => ({ value, label: value }))];
-  const muscleFilterOptions = [{ value: 'all', label: 'Muscle Group: All' }, ...muscleGroupOptions.map((value) => ({ value, label: value }))];
+  const muscleGroupFilterOptions = [{ value: 'all', label: 'Muscle Group: All' }, ...muscleGroupOptions.map((value) => ({ value, label: value }))];
 
   const riskSummary = (exercise) => {
     const count = Array.isArray(exercise.injuryRisk) ? exercise.injuryRisk.filter(Boolean).length : 0;
@@ -436,28 +570,24 @@ function Exercises() {
       render: (exercise) => (
         <div className="wwex-name-cell">
           <div className="wwex-name-cell__title">{exercise.name || '—'}</div>
+          {exercise.equipment ? <div className="wwex-name-cell__meta">{exercise.equipment}</div> : null}
         </div>
       ),
+    },
+    {
+      key: 'muscle',
+      header: 'Primary Muscle',
+      render: (exercise) => exercise.muscle || '—',
+    },
+    {
+      key: 'muscleGroup',
+      header: 'Muscle Group',
+      render: (exercise) => exercise.muscleGroup || '—',
     },
     {
       key: 'difficulty',
       header: 'Difficulty',
       render: (exercise) => <Badge tone={difficultyTone(exercise.difficulty)}>{exercise.difficulty || 'Beginner'}</Badge>,
-    },
-    {
-      key: 'equipment',
-      header: 'Equipment',
-      render: (exercise) => exercise.equipment || '—',
-    },
-    {
-      key: 'target',
-      header: 'Target',
-      render: (exercise) => (
-        <div className="wwex-target-cell">
-          <div className="wwex-target-cell__primary">{exercise.muscle || '—'}</div>
-          {exercise.muscleGroup ? <div className="wwex-target-cell__secondary">{exercise.muscleGroup}</div> : null}
-        </div>
-      ),
     },
     {
       key: 'injuryRisk',
@@ -468,6 +598,11 @@ function Exercises() {
       key: 'repRange',
       header: 'Rep Range',
       render: (exercise) => formatRepRange(exercise.minReps, exercise.maxReps),
+    },
+    {
+      key: 'weightRange',
+      header: 'Weight Range',
+      render: (exercise) => `${exercise.minKg ?? '—'}–${exercise.maxKg ?? '—'} kg`,
     },
   ];
 
@@ -554,10 +689,21 @@ function Exercises() {
                 placeholder="https://…"
               />
             </FormField>
+
+            {editingExercise?.imageUrl ? (
+              <FormField
+                label="Legacy Image URL"
+                labelFor="exercise-image-url"
+                fullWidth
+                helpText="This legacy mobile fallback media is preserved automatically. GIF URL remains the admin-controlled media field."
+              >
+                <input id="exercise-image-url" className="wwa-input" value={editingExercise.imageUrl} readOnly />
+              </FormField>
+            ) : null}
           </FormSection>
 
           <FormSection title="Classification" description="Primary and secondary muscle targeting.">
-            <FormField label="Primary Muscle" labelFor="exercise-muscle" helpText="The main muscle targeted by this exercise.">
+            <FormField label="Primary Muscle" labelFor="exercise-muscle" required helpText="The main muscle targeted by this exercise.">
               <input
                 id="exercise-muscle"
                 className="wwa-input"
@@ -733,9 +879,15 @@ function Exercises() {
                     aria-label="Filter by equipment"
                   />
                   <SelectField
+                    value={muscleFilter}
+                    onChange={(event) => setMuscleFilter(event.target.value)}
+                    options={muscleFilterOptions}
+                    aria-label="Filter by primary muscle"
+                  />
+                  <SelectField
                     value={muscleGroupFilter}
                     onChange={(event) => setMuscleGroupFilter(event.target.value)}
-                    options={muscleFilterOptions}
+                    options={muscleGroupFilterOptions}
                     aria-label="Filter by muscle group"
                   />
                 </>
@@ -749,7 +901,8 @@ function Exercises() {
               rows={filtered}
               selectedRowKey={selectedExerciseId}
               getRowKey={(exercise) => exercise.id}
-              minWidth={900}
+              onRowClick={(exercise) => openExerciseView(exercise)}
+              minWidth={1040}
               emptyIcon={null}
               emptyTitle="No exercises found"
               emptyMessage={search ? 'Try a different search term or clear one of the filters.' : 'No exercises in the library yet.'}
@@ -758,7 +911,10 @@ function Exercises() {
                   <button
                     type="button"
                     className="wwa-btn wwa-btn-sm wwa-btn-secondary"
-                    onClick={() => setSelectedExerciseId(exercise.id)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openExerciseView(exercise);
+                    }}
                     aria-label={`View ${exercise.name || 'exercise'}`}
                   >
                     <Eye aria-hidden="true" size={14} strokeWidth={2} />
@@ -779,7 +935,7 @@ function Exercises() {
                         label: 'Delete',
                         tone: 'danger',
                         icon: <Trash2 aria-hidden="true" size={14} strokeWidth={2} />,
-                        onSelect: () => handleDelete(exercise),
+                        onSelect: () => openExerciseDelete(exercise),
                       },
                     ]}
                   />
@@ -793,10 +949,51 @@ function Exercises() {
               exercise={selectedExercise}
               injuryCategories={injuryCategories}
               onClose={() => setSelectedExerciseId(null)}
+              onEdit={handleEdit}
+              onDelete={openExerciseDelete}
             />
           ) : null}
         </div>
       )}
+
+      <ModalDialog
+        open={Boolean(deleteExercise)}
+        title="Delete Exercise"
+        description="This permanently deletes the exercise from the exercise catalog. Existing plans keep their embedded exercise data, but the exercise will no longer be available for new plan selection."
+        onClose={closeDeleteDialog}
+        footer={
+          <>
+            <button type="button" className="wwa-btn wwa-btn-ghost" onClick={closeDeleteDialog} disabled={saving}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="wwa-btn wwa-btn-danger"
+              onClick={handleDelete}
+              disabled={saving || deleteConfirmation !== DELETE_CONFIRMATION}
+            >
+              {saving ? 'Deleting...' : 'Delete Exercise'}
+            </button>
+          </>
+        }
+      >
+        <div className="wwex-modal-copy">
+          Delete <strong>"{deleteExercise?.name || 'this exercise'}"</strong>?
+        </div>
+        <FormSection columns={1}>
+          <FormField label="Confirmation" labelFor="exercise-delete-confirmation" required fullWidth>
+            <input
+              id="exercise-delete-confirmation"
+              type="text"
+              className="wwa-input"
+              value={deleteConfirmation}
+              onChange={(event) => setDeleteConfirmation(event.target.value)}
+              placeholder={DELETE_CONFIRMATION}
+            />
+          </FormField>
+        </FormSection>
+        {deleteError ? <div className="wwa-alert-error">{deleteError}</div> : null}
+      </ModalDialog>
     </div>
   );
 }
