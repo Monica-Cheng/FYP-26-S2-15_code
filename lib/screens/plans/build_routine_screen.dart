@@ -12,7 +12,7 @@ import '../../services/firestore_service.dart';
 // ── Exercise library ───────────────────────────────────────────────────────────
 
 const _kMuscleFilters = [
-  'All', 'Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Glutes', 'Cardio',
+  'All', 'Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Glutes',
 ];
 
 // ── Muscle color helpers ───────────────────────────────────────────────────────
@@ -217,7 +217,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         final rawSets = ex['sets'];
         final List<Map<String, dynamic>> sets;
         if (rawSets is List && rawSets.isNotEmpty) {
-          sets = (rawSets as List<dynamic>).map((s) {
+          sets = rawSets.map((s) {
             final sm = s as Map<String, dynamic>;
             final sid = _nextId();
             return <String, dynamic>{
@@ -242,6 +242,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           // the moment it's saved again, discarding any Accessory choice
           // made in an earlier edit.
           'tag': ex['tag'] as String? ?? 'Primary',
+          'estTimePerSet': (ex['estTimePerSet'] as num?)?.toString() ?? '45',
           'sets': sets,
         };
       }).toList();
@@ -289,6 +290,13 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         // via duration override, not removal, so tagging one Accessory
         // would have no effect.
         'tag': 'Primary',
+        // Realistic full time per set in seconds, including transition/
+        // setup — feeds _computeEstimatedMinutes() below. String-typed to
+        // match how kg/reps are already edited as free-text TextFields in
+        // this builder (see _buildSetRow), not int-typed like restTime,
+        // which uses a picker instead of free text. No equivalent field on
+        // cardio blocks — their time is cardioMinutes directly, unchanged.
+        'estTimePerSet': '45',
         'sets': <Map<String, dynamic>>[
           _newSet(),
         ],
@@ -833,6 +841,30 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
 
   // ── Save ───────────────────────────────────────────────────────────────────
 
+  // Computes a session's estimatedMinutes from its already-finalized
+  // exercises list (the same shape about to be written to Firestore, with
+  // sets/restTime/estTimePerSet/cardioMinutes all resolved) — cardio blocks
+  // contribute their real cardioMinutes directly, unchanged; every other
+  // exercise contributes sets.length × (estTimePerSet + restTime) seconds.
+  // Mirrors compress_utils.dart's estimatedMinutesAfterCompression(), which
+  // uses this exact same formula to compute a real (not flat/assumed) time
+  // saving when an exercise like this is removed via Compress Workout.
+  int _computeEstimatedMinutes(List<Map<String, dynamic>> exercises) {
+    var totalSeconds = 0;
+    for (final ex in exercises) {
+      if (ex['isCardio'] == true) {
+        final cardioMinutes = (ex['cardioMinutes'] as num?)?.toInt() ?? 0;
+        totalSeconds += cardioMinutes * 60;
+      } else {
+        final sets = ex['sets'] as List<dynamic>? ?? [];
+        final estTimePerSet = (ex['estTimePerSet'] as num?)?.toInt() ?? 0;
+        final restTime = (ex['restTime'] as num?)?.toInt() ?? 0;
+        totalSeconds += sets.length * (estTimePerSet + restTime);
+      }
+    }
+    return (totalSeconds / 60).round();
+  }
+
   Future<void> _saveRoutine() async {
     if (_routineName.trim().isEmpty) {
       _snack('Please enter a routine name');
@@ -883,6 +915,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
             };
           }).toList();
 
+          final exId = ex['id'] as String;
           return {
             'name': ex['name'],
             'muscle': ex['muscle'],
@@ -891,8 +924,14 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
             // plans' own emptyCardioBlock() default (no tag field),
             // consistent with compression treating cardio as a duration
             // override rather than something to remove.
-            if (ex['isCardio'] != true)
+            if (ex['isCardio'] != true) ...{
               'tag': ex['tag'] as String? ?? 'Primary',
+              'estTimePerSet': int.tryParse(
+                      _controllers['${exId}_estTimePerSet']?.text ??
+                          ex['estTimePerSet'] as String? ??
+                          '') ??
+                  0,
+            },
             'sets': sets,
             if (ex['isCardio'] == true) ...{
               'isCardio': true,
@@ -908,6 +947,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           'type': 'gym',
           'isRestDay': false,
           'exercises': exercises,
+          'estimatedMinutes': _computeEstimatedMinutes(exercises),
         };
       }).toList();
 
@@ -1636,6 +1676,7 @@ class _ExerciseCardState extends State<_ExerciseCard> {
 
   @override
   Widget build(BuildContext context) {
+    final exId = _ex['id'] as String;
     final name = _ex['name'] as String? ?? '';
     final muscle = _ex['muscle'] as String? ?? '';
     final restTime = _ex['restTime'] as int? ?? 90;
@@ -1647,6 +1688,8 @@ class _ExerciseCardState extends State<_ExerciseCard> {
     final mc = _muscleColor(muscle);
     final mb = _muscleBg(muscle);
     final isOff = restTime == 0;
+    final estTimeCtrl = widget.getCtrl(
+        '${exId}_estTimePerSet', _ex['estTimePerSet'] as String? ?? '45');
 
     return Stack(
       children: [
@@ -1874,6 +1917,66 @@ class _ExerciseCardState extends State<_ExerciseCard> {
               ),
             ),
           ] else ...[
+            // ── Est. time per set ────────────────────────────────────────────
+            // Feeds _computeEstimatedMinutes()'s sets_count × (estTimePerSet
+            // + restTime) formula — a plain free-typed field (matching
+            // kg/reps' TextField style below) rather than a picker like
+            // restTime's, since this is a new field with no existing bottom-
+            // sheet component to reuse and a picker felt like more machinery
+            // than a rarely-fussed-over seconds value warrants.
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 4, 14, 6),
+              child: Row(
+                children: [
+                  const Text(
+                    'Est. time/set',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: WW.textSec,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    width: 56,
+                    height: 30,
+                    child: TextField(
+                      controller: estTimeCtrl,
+                      keyboardType: TextInputType.number,
+                      textAlign: TextAlign.center,
+                      onChanged: (v) {
+                        _ex['estTimePerSet'] = v;
+                        widget.onChanged();
+                      },
+                      decoration: InputDecoration(
+                        isDense: true,
+                        contentPadding: EdgeInsets.zero,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(7),
+                          borderSide: const BorderSide(color: WW.border, width: 1),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(7),
+                          borderSide: const BorderSide(color: WW.border, width: 1),
+                        ),
+                        filled: true,
+                        fillColor: WW.bg,
+                      ),
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: WW.text,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  const Text(
+                    'sec',
+                    style: TextStyle(fontSize: 11, color: WW.textSec),
+                  ),
+                ],
+              ),
+            ),
             // ── Set table header ─────────────────────────────────────────────
             const Padding(
               padding: EdgeInsets.fromLTRB(14, 4, 14, 2),
@@ -2191,6 +2294,7 @@ class _ExerciseSearchSheetState extends State<_ExerciseSearchSheet> {
     return _allExercises.where((e) {
       final name = (e['name'] as String?) ?? '';
       final muscle = (e['muscle'] as String?) ?? 'Other';
+      if (muscle == 'Cardio') return false;
       final nameMatch = _query.isEmpty ||
           name.toLowerCase().contains(_query.toLowerCase());
       final muscleMatch = _muscleFilter == 'All' || muscle == _muscleFilter;

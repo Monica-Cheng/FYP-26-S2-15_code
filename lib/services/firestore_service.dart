@@ -218,6 +218,29 @@ class FirestoreService {
     return result;
   }
 
+  // ---------------------------------------------------------------------------
+  // Public wrapper around getGamificationConfig() + _configNumList() for
+  // callers that need the actual levelThresholds VALUES (not just a level
+  // number already resolved server-side by _calculateLevel()) — a
+  // progress-toward-next-level bar needs the real threshold XP values.
+  // xp_levels.dart/progress_screen.dart/profile_screen.dart each used to
+  // keep their own hardcoded copy of this array, never reading the live
+  // Firestore config the way _calculateLevel()/addXpToUser() already do —
+  // this is the shared read path all three now go through instead, so an
+  // admin-edited threshold value reflects everywhere the first fetch
+  // after it changes, not just in the stored level number. Uses
+  // getGamificationConfig()'s own existing static-cache — repeat calls
+  // from any of the three screens cost nothing beyond the first real
+  // fetch anywhere in the app session; no separate cache needed here.
+  // [fallback] is the caller's own existing local array, used only if the
+  // live config doc is missing/malformed/unreachable — same fail-soft
+  // convention as every other _config* read in this file.
+  // ---------------------------------------------------------------------------
+  Future<List<num>> getLevelThresholds(List<num> fallback) async {
+    final config = await getGamificationConfig();
+    return _configNumList(config, ['levelThresholds'], fallback);
+  }
+
   // Shared by saveGymSession() and finalizeInProgressSession() — the one
   // place gym XP is now actually computed, collapsing what used to be two
   // separately-hardcoded `totalSets * 15` copies into a single source read
@@ -2881,10 +2904,35 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
 
   // ---------------------------------------------------------------------------
+  // Generates a stable identity for an inProgressSessions blocks[] entry —
+  // the fix for the confirmed root cause of the block-corruption bugs this
+  // whole system had: array POSITION was previously the only identity a
+  // block ever had, but the array's real shape changes after creation
+  // (dismissInjuryReview()'s removeAt() shifts every later position;
+  // appendInProgressSessionBlock() grows it) while every already-in-memory
+  // reference to a block's old position was never refreshed — causing
+  // out-of-range writes, wrong-slot overwrites (a full block replaced with
+  // a DIFFERENT exercise's data), and the resulting apparent duplication.
+  // Microsecond timestamp + `salt` (the block's own position AT
+  // GENERATION TIME, used only as a same-instant tiebreaker, never as an
+  // identity itself afterward) — not a uuid package (none is a dependency
+  // of this app); mirrors the timestamp-based id patterns already
+  // established elsewhere in this codebase (build_routine_screen.dart's
+  // counter-based _nextId(), this file's own existing set-id generation,
+  // router.dart's ValueKey microsecond suffixes). `static` so it's callable
+  // without an instance — gym_session_screen.dart's hydration path also
+  // calls this directly for the backward-compatibility backfill (see
+  // _hydrateFromInProgressSession's own doc comment there).
+  // ---------------------------------------------------------------------------
+  static String generateBlockId(int salt) =>
+      'block-${DateTime.now().microsecondsSinceEpoch}-$salt';
+
+  // ---------------------------------------------------------------------------
   // Creates a new in-progress session at
   // users/{uid}/inProgressSessions/{auto-id}. `blocks` is the day's raw
   // exercises array (as already stored in customRoutines/plans); each entry
-  // is written with `done: false` seeded on regardless of block type — for
+  // is written with `done: false` seeded on regardless of block type, plus
+  // a fresh, stable `blockId` (see generateBlockId's own doc comment) — for
   // isCardio entries no other change is made yet (per this task's scope).
   // Returns the new document's id (the sessionRunId used by the other three
   // methods below).
@@ -2895,8 +2943,20 @@ class FirestoreService {
     int dayIndex,
     List<Map<String, dynamic>> blocks,
   ) async {
-    final seededBlocks =
-        blocks.map((b) => {...b, 'done': false}).toList();
+    // Preserves an already-present blockId rather than always generating a
+    // fresh one — gym_session_screen.dart's _assignBlockIds() pre-assigns
+    // ids to a fresh-start plan template's raw exercises BEFORE calling
+    // both this method and _parseExercises() with the same list, so its
+    // in-memory _exercises and this seed write agree on identical ids
+    // from the start. Only actually generates a new one for a block that
+    // somehow still lacks one (defensive — every real call site today
+    // already pre-assigns).
+    final seededBlocks = blocks.asMap().entries.map((entry) {
+      final i = entry.key;
+      final b = entry.value;
+      final blockId = b['blockId'] as String? ?? generateBlockId(i);
+      return {...b, 'done': false, 'blockId': blockId};
+    }).toList();
     // TEMPORARY DEBUG — remove once the second-cardio-block bug is
     // confirmed fixed.
     print('DEBUG_BLOCKINDEX: createInProgressSession planId=$planId '
@@ -2904,7 +2964,7 @@ class FirestoreService {
     for (var i = 0; i < seededBlocks.length; i++) {
       final b = seededBlocks[i];
       print('DEBUG_BLOCKINDEX:   [$i] name=${b['name']} '
-          'isCardio=${b['isCardio']}');
+          'isCardio=${b['isCardio']} blockId=${b['blockId']}');
     }
     final ref = await _db
         .collection(Collections.users)
@@ -2924,11 +2984,66 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
-  // Marks a single block within an in-progress session done or not-done.
+  // Backward-compatibility helper: persists blockIds freshly assigned by
+  // gym_session_screen.dart's _hydrateFromInProgressSession() for a
+  // session that predates the stable-blockId migration (see
+  // generateBlockId's own doc comment). Fire-and-forget, deliberately not
+  // wrapped in a transaction — this only ever runs once per session
+  // (every block gets an id the first time it's touched post-migration,
+  // and every write from then on already includes it), so the narrow race
+  // window against a genuinely concurrent write is an acceptable,
+  // low-stakes tradeoff for keeping this one-time backfill simple.
+  // ---------------------------------------------------------------------------
+  Future<void> backfillInProgressSessionBlocks(
+    String uid,
+    String sessionRunId,
+    List<Map<String, dynamic>> blocks,
+  ) async {
+    try {
+      await _db
+          .collection(Collections.users)
+          .doc(uid)
+          .collection(_inProgressSessions)
+          .doc(sessionRunId)
+          .update({'blocks': blocks});
+    } catch (e) {
+      print('backfillInProgressSessionBlocks error: $e');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Marks a single block within an in-progress session done or not-done —
+  // looked up by its stable blockId (see generateBlockId's own doc
+  // comment for the full root-cause history), NOT by array position. This
+  // used to take a raw blockIndex and trust it directly
+  // (blocks[blockIndex] = ...), which broke the moment the array's real
+  // shape changed after that index was captured (dismissInjuryReview()
+  // removing an earlier block shifts every later block's true position,
+  // but nothing ever refreshed an already-in-memory reference to the old
+  // one) — causing rejected out-of-range writes and, worse, silent
+  // wrong-slot overwrites where a stale-but-still-in-range index landed
+  // this write on a completely different exercise's slot. Looking the
+  // block up by blockId instead is immune to this by construction: a
+  // block's id never changes no matter how many times the array around it
+  // shrinks, grows, or reorders.
+  //
   // Firestore has no in-place array-element update, so the whole `blocks`
-  // array is read, blocks[blockIndex] is replaced with blockData, and the
-  // full array is written back. Fails soft (logs, doesn't throw) if the doc
-  // is missing or blockIndex is out of range — a stray/late update after
+  // array is still read, the matched entry is replaced with blockData,
+  // and the full array is written back — inside a runTransaction(), not a
+  // bare get()+update(). This read-modify-write used to run outside any
+  // transaction, which meant two overlapping calls (this is called
+  // un-awaited from gym_session_screen.dart's _syncBlockDone() every time
+  // an exercise's sets complete — two exercises finishing close together
+  // in real time is enough to overlap two calls) could each read a
+  // same/stale snapshot and each write back a full array reflecting only
+  // its own single-index change, silently losing whichever one committed
+  // first. A transaction closes this: if two transactions' reads
+  // overlap, Firestore fails whichever one's write attempts to commit
+  // second against the now-stale read version and automatically retries
+  // it — that retry re-reads the doc (now including the first
+  // transaction's committed change) and reapplies its own mutation on top
+  // of it, rather than clobbering it. Fails soft (logs, doesn't throw) if
+  // the doc is missing or blockId isn't found — a stray/late update after
   // the session was already finalized or abandoned (see
   // finalizeInProgressSession/deleteInProgressSession) shouldn't crash the
   // caller.
@@ -2945,7 +3060,7 @@ class FirestoreService {
   Future<void> updateInProgressSessionBlock(
     String uid,
     String sessionRunId,
-    int blockIndex,
+    String blockId,
     Map<String, dynamic> blockData,
   ) async {
     final docRef = _db
@@ -2956,39 +3071,57 @@ class FirestoreService {
     // TEMPORARY DEBUG — remove once the second-cardio-block bug is
     // confirmed fixed.
     print('DEBUG_BLOCKINDEX: updateInProgressSessionBlock called '
-        'sessionRunId=$sessionRunId blockIndex=$blockIndex');
+        'sessionRunId=$sessionRunId blockId=$blockId');
     try {
-      final doc = await docRef.get();
-      if (!doc.exists) {
-        print('updateInProgressSessionBlock: no such session $sessionRunId');
-        return;
-      }
-      final rawBlocks = doc.data()?['blocks'];
-      if (rawBlocks is! List ||
-          blockIndex < 0 ||
-          blockIndex >= rawBlocks.length) {
-        print('updateInProgressSessionBlock: blockIndex $blockIndex out of '
-            'range for session $sessionRunId');
-        return;
-      }
-      final blocks = rawBlocks
-          .map((b) => Map<String, dynamic>.from(b as Map))
-          .toList();
-      final rawSets = blockData['sets'];
-      final done = rawSets is List
-          ? rawSets.every((s) => s is Map && s['done'] == true)
-          : true;
-      blocks[blockIndex] = {...blockData, 'done': done};
-      // TEMPORARY DEBUG — remove once the second-cardio-block bug is
-      // confirmed fixed.
-      print('DEBUG_BLOCKINDEX: updateInProgressSessionBlock about to write '
-          'sessionRunId=$sessionRunId blocks.length=${blocks.length}');
-      for (var i = 0; i < blocks.length; i++) {
-        final b = blocks[i];
-        print('DEBUG_BLOCKINDEX:   [$i] name=${b['name']} '
-            'isCardio=${b['isCardio']} done=${b['done']}');
-      }
-      await docRef.update({'blocks': blocks});
+      await _db.runTransaction((transaction) async {
+        // transaction.get()/transaction.update(), not docRef.get()/
+        // docRef.update() — required for this read and this write to be
+        // the ones Firestore actually tracks for conflict detection/retry;
+        // a bare docRef.get() inside a transaction callback would silently
+        // opt that read out of the transaction's isolation guarantee.
+        final doc = await transaction.get(docRef);
+        if (!doc.exists) {
+          print('updateInProgressSessionBlock: no such session $sessionRunId');
+          return;
+        }
+        final rawBlocks = doc.data()?['blocks'];
+        if (rawBlocks is! List) {
+          print('updateInProgressSessionBlock: no blocks[] for session '
+              '$sessionRunId');
+          return;
+        }
+        final blocks = rawBlocks
+            .map((b) => Map<String, dynamic>.from(b as Map))
+            .toList();
+        final index = blocks.indexWhere((b) => b['blockId'] == blockId);
+        if (index < 0) {
+          print('updateInProgressSessionBlock: blockId $blockId not found '
+              'for session $sessionRunId');
+          return;
+        }
+        final rawSets = blockData['sets'];
+        final done = rawSets is List
+            ? rawSets.every((s) => s is Map && s['done'] == true)
+            : true;
+        // blockId explicitly re-included — blockData (built by callers
+        // from their own in-memory exercise state) never carries it, and
+        // this is a full slot replacement, not a merge, so leaving it out
+        // would silently drop the block's own identity on every write.
+        blocks[index] = {...blockData, 'done': done, 'blockId': blockId};
+        // TEMPORARY DEBUG — remove once the second-cardio-block bug is
+        // confirmed fixed. Note this whole callback (including these
+        // prints) can legitimately run more than once for a single call
+        // to this function if Firestore retries the transaction after a
+        // conflicting write — that's expected, not a bug in the logging.
+        print('DEBUG_BLOCKINDEX: updateInProgressSessionBlock about to write '
+            'sessionRunId=$sessionRunId blocks.length=${blocks.length}');
+        for (var i = 0; i < blocks.length; i++) {
+          final b = blocks[i];
+          print('DEBUG_BLOCKINDEX:   [$i] blockId=${b['blockId']} '
+              'name=${b['name']} isCardio=${b['isCardio']} done=${b['done']}');
+        }
+        transaction.update(docRef, {'blocks': blocks});
+      });
     } catch (e) {
       print('updateInProgressSessionBlock error: $e');
     }
@@ -2996,19 +3129,24 @@ class FirestoreService {
 
   // ---------------------------------------------------------------------------
   // Appends a brand-new block to an in-progress session's blocks[] array and
-  // returns its new index (the array's new length - 1) — for a block added
-  // mid-session (gym_session_screen.dart's "+ Add" sheets) that never had a
-  // slot from createInProgressSession()'s original seeding at all, unlike
-  // updateInProgressSessionBlock(), which only ever replaces an EXISTING
-  // slot and fails soft on an out-of-range index rather than growing the
-  // array. done:false is always seeded on, same as createInProgressSession()
-  // does for every block it originally seeds. Fails soft (logs, returns
-  // null) on a missing doc or any error — an add should never be able to
-  // block the user from continuing their workout; the caller falls back to
-  // originalIndex: -1 (no sync) exactly as it already does today when this
+  // returns its new blockId (see generateBlockId's own doc comment) — for
+  // a block added mid-session (gym_session_screen.dart's "+ Add" sheets)
+  // that never had a slot from createInProgressSession()'s original
+  // seeding at all, unlike updateInProgressSessionBlock(), which only ever
+  // replaces an EXISTING slot (looked up by id) and fails soft if that id
+  // isn't found rather than growing the array. Previously returned the
+  // new array index instead of an id — changed alongside every other
+  // identity-bearing call in this system, since a raw index captured here
+  // would go stale the moment anything later shifts the array (see
+  // updateInProgressSessionBlock's own doc comment for the full history).
+  // done:false is always seeded on, same as createInProgressSession() does
+  // for every block it originally seeds. Fails soft (logs, returns null)
+  // on a missing doc or any error — an add should never be able to block
+  // the user from continuing their workout; the caller falls back to
+  // blockId: null (no sync) exactly as it already does today when this
   // returns null.
   // ---------------------------------------------------------------------------
-  Future<int?> appendInProgressSessionBlock(
+  Future<String?> appendInProgressSessionBlock(
     String uid,
     String sessionRunId,
     Map<String, dynamic> blockData,
@@ -3028,10 +3166,10 @@ class FirestoreService {
       final blocks = rawBlocks is List
           ? rawBlocks.map((b) => Map<String, dynamic>.from(b as Map)).toList()
           : <Map<String, dynamic>>[];
-      blocks.add({...blockData, 'done': false});
-      final newIndex = blocks.length - 1;
+      final blockId = generateBlockId(blocks.length);
+      blocks.add({...blockData, 'done': false, 'blockId': blockId});
       await docRef.update({'blocks': blocks});
-      return newIndex;
+      return blockId;
     } catch (e) {
       print('appendInProgressSessionBlock error: $e');
       return null;
@@ -3048,22 +3186,31 @@ class FirestoreService {
   // remove during that review — same read-the-whole-array,
   // replace-write-it-back approach as updateInProgressSessionBlock(), since
   // Firestore has no in-place array-element removal either.
-  // removedOriginalIndices are each block's stable originalIndex (not a
-  // transient in-memory _exercises array position — see
-  // gym_session_screen.dart's _ExerciseData.originalIndex), removed
-  // highest-index-first so removing one never shifts the position of
-  // another index still queued for removal in the same pass. Returns
-  // whether the write actually succeeded (still fails soft — logs, doesn't
-  // throw, matching updateInProgressSessionBlock()'s convention that a
-  // stray/late call after the session was already finalized/abandoned
-  // shouldn't crash the caller) so gym_session_screen.dart's caller can
-  // retry on a transient failure instead of silently treating a dropped
-  // write as a successful dismissal.
+  //
+  // removedBlockIds are each block's stable blockId, matched and removed
+  // via removeWhere() — NOT removeAt(index), which this used to do
+  // (highest-index-first, specifically so removing one wouldn't shift the
+  // position of another index still queued in the same pass). That
+  // safeguard only ever protected against collisions WITHIN one call to
+  // this function; it did nothing about every OTHER already-in-memory
+  // reference to a surviving block's now-shifted real position — which is
+  // exactly what caused the out-of-range-write/wrong-slot-overwrite bugs
+  // this whole system had. Removing by id sidesteps the position-shift
+  // problem entirely: a block's id is meaningless as a position, so
+  // nothing about removal can ever invalidate another block's identity.
+  //
+  // Returns whether the write actually succeeded (still fails soft — logs,
+  // doesn't throw, matching updateInProgressSessionBlock()'s convention
+  // that a stray/late call after the session was already
+  // finalized/abandoned shouldn't crash the caller) so
+  // gym_session_screen.dart's caller can retry on a transient failure
+  // instead of silently treating a dropped write as a successful
+  // dismissal.
   // ---------------------------------------------------------------------------
   Future<bool> dismissInjuryReview(
     String uid,
     String sessionRunId,
-    List<int> removedOriginalIndices,
+    List<String> removedBlockIds,
   ) async {
     final docRef = _db
         .collection(Collections.users)
@@ -3080,13 +3227,7 @@ class FirestoreService {
       final blocks = rawBlocks is List
           ? rawBlocks.map((b) => Map<String, dynamic>.from(b as Map)).toList()
           : <Map<String, dynamic>>[];
-      final sortedIndices = [...removedOriginalIndices]
-        ..sort((a, b) => b.compareTo(a));
-      for (final index in sortedIndices) {
-        if (index >= 0 && index < blocks.length) {
-          blocks.removeAt(index);
-        }
-      }
+      blocks.removeWhere((b) => removedBlockIds.contains(b['blockId']));
       await docRef.update({
         'blocks': blocks,
         'injuryReviewDismissed': true,

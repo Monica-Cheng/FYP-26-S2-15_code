@@ -105,22 +105,28 @@ class _ExerciseData {
   // template's static placeholder text. Empty for exercises added via the
   // "Add Exercise" sheet, which don't originate from a parsed block.
   final Map<String, dynamic> rawBlock;
-  // This exercise's true, permanent position in the Firestore blocks[]
-  // array (the same indexing createInProgressSession() used when it first
-  // wrote blocks[] from the raw exercises array) — set exactly once, at
-  // parse time (see _parseExercises), and never recalculated afterward.
-  // Any write back to that array (see _syncBlockDone,
-  // _buildCardioPlaceholderCard's onTap) must use this, not this
-  // exercise's current position in whatever in-memory list it happens to
-  // sit in right now — _applyInjuryFilter can remove earlier exercises
-  // from _exercises, which shifts every later exercise's array position
-  // without touching Firestore's blocks[] array at all, so array position
-  // and true blocks[] position can silently diverge after that. Defaults
-  // to -1 (never a parsed block — e.g. one added via the "Add Exercise"
-  // sheet, which has no corresponding blocks[] slot to write to);
-  // updateInProgressSessionBlock's own `blockIndex < 0` guard already
-  // fails soft on that sentinel, so no extra handling is needed here.
-  final int originalIndex;
+  // This exercise's true, stable identity in the Firestore blocks[] array
+  // — the block's own `blockId` field, read verbatim from storage at
+  // parse time (see _parseExercises), NEVER recomputed from array
+  // position. This replaces a previous `originalIndex` (int) field that
+  // stored the block's position in whatever list was most recently parsed
+  // — that was the confirmed root cause of a real corruption bug: array
+  // POSITION is not stable (dismissInjuryReview() removing an earlier
+  // block shifts every later block's true Firestore position via
+  // removeAt(), but nothing ever refreshed an already-in-memory
+  // _ExerciseData's stale old position), so a write using a stale
+  // position could land out of range or — worse — silently overwrite a
+  // completely different exercise's slot. A blockId never changes no
+  // matter how the array around it shrinks, grows, or reorders, so every
+  // write/lookup/navigation-identity use (see _syncBlockDone,
+  // _buildCardioPlaceholderCard's onTap) is immune to that class of bug
+  // by construction. Null only for an exercise that was added via the
+  // "Add Exercise"/"Add Cardio" sheet and whose append write to Firestore
+  // failed (see _appendBlockIfMidSession's own doc comment) — every write
+  // site guarded on a non-null blockId already no-ops safely for null
+  // (matching updateInProgressSessionBlock's own fail-soft "id not found"
+  // handling), so no extra sentinel handling is needed here.
+  final String? blockId;
 
   _ExerciseData({
     required this.name,
@@ -133,7 +139,7 @@ class _ExerciseData {
     this.done = false,
     List<String>? injuryRisk,
     Map<String, dynamic>? rawBlock,
-    this.originalIndex = -1,
+    this.blockId,
   })  : injuryRisk = injuryRisk ?? [],
         rawBlock = rawBlock ?? const {};
 }
@@ -226,6 +232,34 @@ class _GymSessionState extends State<GymSessionScreen> {
   // _loadPlanSession has resolved) doesn't race and push a cardio screen
   // with sessionRunId still null.
   Future<void>? _sessionInitFuture;
+  // The Future returned by the MOST RECENT _syncBlockDone() call — updated
+  // every time that fires, and awaited (alongside _sessionInitFuture) by
+  // _buildCardioPlaceholderCard's tap handler before navigating into the
+  // cardio flow. Without this, that fire-and-forget write from completing
+  // a gym exercise right before tapping into cardio could still be
+  // in-flight when the user later returns and _hydrateFromInProgressSession()
+  // re-reads the doc — reading stale (pre-completion) data and appearing
+  // to "lose" the just-finished exercise. Only ever tracks the LATEST
+  // sync, not a queue of every sync ever fired — sufficient here since
+  // each new _syncBlockDone() call already reads/writes whatever the
+  // in-memory _exercises state is at that later moment, so awaiting just
+  // the newest one is enough to guarantee the tap handler waits until
+  // everything completed up to that point has at least been attempted.
+  Future<void>? _pendingSyncFuture;
+  // Set true for the duration of _buildCardioPlaceholderCard's tap
+  // handler (from the moment a tap is accepted until the cardio flow is
+  // popped back to this screen), and checked at the very top of that
+  // handler before anything else — a second tap arriving while the first
+  // is still being processed (the classic "double-tap before the first
+  // push visually covers the button" window) returns immediately instead
+  // of attempting a second context.push(), which used to be able to
+  // collide with the first push on an identical page key and crash with
+  // '!keyReservation.contains(key)'. Defense in depth alongside (not
+  // instead of) router.dart's own cardioSetup identity-keyed pageBuilder
+  // fix — either one alone would have closed the crash, but this one also
+  // avoids the secondary UX bug of genuinely pushing two stacked cardio-
+  // setup screens for the same block.
+  bool _isNavigatingToCardio = false;
 
   bool _injuryFilteringEnabled = false;
   List<Map<String, dynamic>> _userInjuries = [];
@@ -438,7 +472,7 @@ class _GymSessionState extends State<GymSessionScreen> {
             .map((e) => e as Map<String, dynamic>)
             .toList();
         List<dynamic> rawExercises =
-            applyCompression(rawExerciseMaps, compressedDayData);
+            _assignBlockIds(applyCompression(rawExerciseMaps, compressedDayData));
 
         final exercises = _parseExercises(rawExercises,
             isListSets: null, debugSource: 'FRESH_START_TRACKED');
@@ -495,7 +529,7 @@ class _GymSessionState extends State<GymSessionScreen> {
       }
 
       final rawExercises =
-          (session['exercises'] as List<dynamic>?) ?? [];
+          _assignBlockIds((session['exercises'] as List<dynamic>?) ?? []);
       final exercises = _parseExercises(rawExercises,
           isListSets: null, debugSource: 'FRESH_START_FREE_SESSION');
       final designedBy = plan['designedBy'] as Map<String, dynamic>?;
@@ -678,6 +712,31 @@ class _GymSessionState extends State<GymSessionScreen> {
 
     final blocks =
         rawBlocks.map((b) => Map<String, dynamic>.from(b as Map)).toList();
+    // Backward compatibility: a session created before the stable-blockId
+    // migration (see FirestoreService.generateBlockId's own doc comment)
+    // won't have this field on its blocks yet — assign one now, the same
+    // generation pattern createInProgressSession()/
+    // appendInProgressSessionBlock() use, and persist it back,
+    // fire-and-forget, so this session is fully healed from this point on
+    // rather than silently regenerating a DIFFERENT id on every future
+    // hydration — which would just reintroduce the exact same
+    // position-drift-style bug this migration exists to fix. Chosen over
+    // the alternative (accept these specific old sessions as lost/reset)
+    // since it's low-risk — a plain non-transactional update, firing only
+    // once per session the first time it's touched post-migration — and
+    // gives real self-healing instead of leaving already-live sessions
+    // broken across this deploy.
+    var neededBlockIdBackfill = false;
+    for (var i = 0; i < blocks.length; i++) {
+      if (blocks[i]['blockId'] == null) {
+        blocks[i]['blockId'] = FirestoreService.generateBlockId(i);
+        neededBlockIdBackfill = true;
+      }
+    }
+    if (neededBlockIdBackfill) {
+      FirestoreService()
+          .backfillInProgressSessionBlocks(uid, sessionRunId, blocks);
+    }
     final exercises =
         _parseExercises(blocks, isListSets: null, debugSource: 'HYDRATE');
 
@@ -884,19 +943,24 @@ class _GymSessionState extends State<GymSessionScreen> {
         .where((f) => f['remove'] == true)
         .map((f) => f['index'] as int)
         .toSet();
-    // Stable Firestore-bound slots for whichever exercises are actually
-    // being removed — ex.originalIndex, not their transient _exercises
-    // array position, matching how every other Firestore-bound write in
-    // this file (_syncBlockDone, _buildCardioPlaceholderCard) already
-    // distinguishes the two. Collected regardless of which branch below
-    // runs, since the "keep everything" case still needs to report an
-    // empty removal list to dismissInjuryReview() below.
-    final removedOriginalIndices = <int>[];
+    // Stable Firestore-bound identities for whichever exercises are
+    // actually being removed — ex.blockId, not their transient
+    // _exercises array position, matching how every other Firestore-bound
+    // write in this file (_syncBlockDone, _buildCardioPlaceholderCard)
+    // already distinguishes the two. Collected regardless of which branch
+    // below runs, since the "keep everything" case still needs to report
+    // an empty removal list to dismissInjuryReview() below. A flagged
+    // exercise with a null blockId (only possible if it was added
+    // mid-session and its append write itself failed — see
+    // _ExerciseData.blockId's own field doc) is skipped here: there's no
+    // Firestore slot to remove for it in the first place.
+    final removedBlockIds = <String>[];
     if (toRemove.isNotEmpty) {
       final newExercises = <_ExerciseData>[];
       for (int i = 0; i < _exercises.length; i++) {
         if (toRemove.contains(i)) {
-          removedOriginalIndices.add(_exercises[i].originalIndex);
+          final id = _exercises[i].blockId;
+          if (id != null) removedBlockIds.add(id);
         } else {
           newExercises.add(_exercises[i]);
         }
@@ -939,7 +1003,7 @@ class _GymSessionState extends State<GymSessionScreen> {
     }
 
     // Persists the dismissal — and whichever exercises were actually
-    // removed, by stable originalIndex — so a later resume of this same
+    // removed, by stable blockId — so a later resume of this same
     // sessionRunId (the mid-plan-cardio return trip, or a full
     // app-kill-and-reopen) doesn't re-prompt for the same exercises and
     // doesn't silently reintroduce ones the user already chose to remove.
@@ -951,7 +1015,7 @@ class _GymSessionState extends State<GymSessionScreen> {
     var persisted = false;
     for (var attempt = 1; attempt <= maxAttempts && !persisted; attempt++) {
       persisted = await FirestoreService()
-          .dismissInjuryReview(uid, sessionRunId, removedOriginalIndices);
+          .dismissInjuryReview(uid, sessionRunId, removedBlockIds);
       if (!persisted && attempt < maxAttempts) {
         await Future.delayed(const Duration(milliseconds: 600));
       }
@@ -1279,6 +1343,30 @@ class _GymSessionState extends State<GymSessionScreen> {
     );
   }
 
+  // Called on a FRESH-START plan template's raw exercises — which never
+  // carry a blockId, since that field only ever gets written by
+  // createInProgressSession()/appendInProgressSessionBlock() — BEFORE
+  // both _parseExercises() (building the in-memory _exercises list) and
+  // _createInProgressSession() (seeding Firestore) each separately
+  // consume the list, so the two agree on identical ids from the very
+  // first frame instead of the local list starting with blockId: null on
+  // every exercise until Firestore's fire-and-forget seed write resolves
+  // (which never actually communicates the ids it assigned back to this
+  // screen at all — see createInProgressSession()'s own doc comment: it
+  // now preserves an already-present blockId rather than generating a
+  // fresh one, specifically so this pre-assignment step is honored
+  // instead of silently overwritten). Never called on the HYDRATE path —
+  // that reads real, already-assigned ids straight from Firestore (with
+  // its own separate backward-compatibility backfill for pre-migration
+  // sessions — see _hydrateFromInProgressSession).
+  List<Map<String, dynamic>> _assignBlockIds(List<dynamic> rawExercises) {
+    return rawExercises.asMap().entries.map((entry) {
+      final e = Map<String, dynamic>.from(entry.value as Map);
+      e['blockId'] ??= FirestoreService.generateBlockId(entry.key);
+      return e;
+    }).toList();
+  }
+
   // Shared by both the fresh-start path (plan template exercises — never
   // carry a `done` field, so the `?? false` fallback below is a no-op for
   // that case) and the hydrate-from-Firestore resume path (blocks[] from
@@ -1296,7 +1384,6 @@ class _GymSessionState extends State<GymSessionScreen> {
       List<dynamic> rawExercises,
       {required bool? isListSets, String debugSource = ''}) {
     return rawExercises.asMap().entries.map((exEntry) {
-      final blockPosition = exEntry.key;
       final e = exEntry.value;
       final exMap = e as Map<String, dynamic>;
       final restTime = (exMap['restTime'] as num?)?.toInt() ?? 90;
@@ -1350,7 +1437,15 @@ class _GymSessionState extends State<GymSessionScreen> {
         cardioMinutes: cardioMinutes,
         done: exMap['done'] as bool? ?? false,
         rawBlock: exMap,
-        originalIndex: blockPosition,
+        // Read verbatim from storage — never recomputed from array
+        // position (see _ExerciseData.blockId's own field doc for why).
+        // Only genuinely null for a plan-template exercise whose raw plan
+        // data predates being seeded into an in-progress session at all
+        // (the FRESH_START paths always run this through
+        // _assignBlockIds() first, so that case doesn't occur in
+        // practice today — this is a defensive fallback, not an expected
+        // path).
+        blockId: exMap['blockId'] as String?,
         injuryRisk: (exMap['injuryRisk'] as List<dynamic>?)
                 ?.map((e) => e.toString())
                 .toList() ??
@@ -1360,7 +1455,7 @@ class _GymSessionState extends State<GymSessionScreen> {
       // confirmed fixed.
       print('DEBUG_BLOCKINDEX: _parseExercises[$debugSource] '
           'name=${parsedEx.name} isCardio=${parsedEx.isCardio} '
-          'originalIndex=${parsedEx.originalIndex} done=${parsedEx.done}');
+          'blockId=${parsedEx.blockId} done=${parsedEx.done}');
       return parsedEx;
     }).toList();
   }
@@ -1445,15 +1540,19 @@ class _GymSessionState extends State<GymSessionScreen> {
         }
       });
       if (restTime > 0) _startRestTimer();
-      // Block-level granularity, not per-set: the in-progress session's
-      // blocks[] entries mirror the plan's exercises array 1:1 (one entry
-      // per exercise, each with its own nested sets[]), so "this block is
-      // done" only becomes true once every one of its sets is — writing on
-      // every single set tick would just mean this always fires last with
-      // the same final data, one write short of every set completing.
-      if (_exercises[exIndex].sets.every((s) => s.done)) {
-        _syncBlockDone(exIndex);
-      }
+      // Synced on every single set completion, not only once the whole
+      // exercise is done — a fire-and-forget write here previously only
+      // happened once every set in the exercise was done, which meant
+      // partial progress (e.g. 3 of 5 sets ticked) was never persisted at
+      // all and was lost if the user navigated away (e.g. into a cardio
+      // block) before finishing the exercise. _syncBlockDone() already
+      // writes the CURRENT real per-set state (see its own doc comment/
+      // blockData['sets'] below) — done:true on the block itself is
+      // derived server-side from every set being done
+      // (updateInProgressSessionBlock in firestore_service.dart), so a
+      // partial-completion write here correctly lands as an
+      // still-in-progress block, not a falsely-completed one.
+      _syncBlockDone(exIndex);
     } else {
       setState(() {
         set.done = false;
@@ -1484,10 +1583,15 @@ class _GymSessionState extends State<GymSessionScreen> {
   // for how `done` is derived from the sets rather than forced. Guarded on
   // _sessionRunId being set (null if createInProgressSession hasn't
   // resolved yet, or failed outright — in either case there's nothing to
-  // write to). Not awaited: fire it off and move on —
-  // updateInProgressSessionBlock() already logs its own failures internally
-  // (added in the prior phase), so there's nothing more to add here without
-  // duplicating that logging.
+  // write to). Still fire-and-forget from THIS call site's own
+  // perspective — every set-toggle call site here keeps not awaiting it,
+  // updateInProgressSessionBlock() still logs its own failures internally
+  // — but the Future is now also cached in _pendingSyncFuture so
+  // _buildCardioPlaceholderCard's tap handler can await the most recent
+  // one before navigating into the cardio flow, closing the gap where
+  // that write could still be in-flight when the user taps into cardio
+  // right after completing an exercise (see _pendingSyncFuture's own
+  // field doc).
   void _syncBlockDone(int exIndex) {
     final sessionRunId = _sessionRunId;
     final uid = AuthService().getCurrentUser()?.uid;
@@ -1495,10 +1599,15 @@ class _GymSessionState extends State<GymSessionScreen> {
     // exIndex is only used to look up the exercise in the current
     // in-memory _exercises list — a real array position, as it must be
     // for local list access. The Firestore-bound write below uses
-    // ex.originalIndex instead, since exIndex itself is not a reliable
+    // ex.blockId instead, since exIndex itself is not a reliable
     // Firestore blocks[] position once injury filtering has removed any
-    // earlier exercise (see ex.originalIndex's own field doc).
+    // earlier exercise (see ex.blockId's own field doc). Null only for an
+    // exercise whose mid-session append write itself failed — nothing to
+    // sync to in that case, so this no-ops exactly like the old
+    // originalIndex: -1 sentinel used to.
     final ex = _exercises[exIndex];
+    final blockId = ex.blockId;
+    if (blockId == null) return;
     final blockData = {
       'name': ex.name,
       'muscle': ex.muscle,
@@ -1521,8 +1630,8 @@ class _GymSessionState extends State<GymSessionScreen> {
               })
           .toList(),
     };
-    FirestoreService().updateInProgressSessionBlock(
-        uid, sessionRunId, ex.originalIndex, blockData);
+    _pendingSyncFuture = FirestoreService().updateInProgressSessionBlock(
+        uid, sessionRunId, blockId, blockData);
   }
 
   void _addSet(int exIndex) {
@@ -1590,6 +1699,8 @@ class _GymSessionState extends State<GymSessionScreen> {
         // state rather than racing a pending write.
         for (final ex in _exercises) {
           if (ex.isCardio) continue;
+          final blockId = ex.blockId;
+          if (blockId == null) continue;
           final blockData = {
             'name': ex.name,
             'muscle': ex.muscle,
@@ -1606,17 +1717,22 @@ class _GymSessionState extends State<GymSessionScreen> {
                 .toList(),
           };
           await FirestoreService().updateInProgressSessionBlock(
-              uid, sessionRunId, ex.originalIndex, blockData);
+              uid, sessionRunId, blockId, blockData);
         }
 
         // finalizeInProgressSession() now finalizes whatever's actually
         // done regardless of whether every planned block was completed —
         // tapping Finish Session before finishing every block is the
         // common case, not a rare edge case, so there's no
-        // isInProgressSessionFullyDone() gate here anymore. That check
-        // remains unchanged and still correct for the cardio finish
-        // handlers' own, different use: deciding whether to return to the
-        // plan for more blocks vs. show the real summary.
+        // isInProgressSessionFullyDone() gate here anymore. The cardio
+        // finish handlers (cardio_session_screen.dart/
+        // outdoor_cardio_screen.dart) no longer use that check either —
+        // they used to auto-finalize and skip midPlanCardioComplete
+        // whenever isInProgressSessionFullyDone() came back true for the
+        // block just completed, which incorrectly ended the session
+        // without the user ever tapping Finish. Every cardio block
+        // completion now unconditionally shows midPlanCardioComplete; the
+        // session only ends here, from an explicit Finish Session tap.
         final finalizeResult = await FirestoreService()
             .finalizeInProgressSession(uid, sessionRunId);
         sessionData['sessionId'] = finalizeResult.sessionId;
@@ -1823,6 +1939,8 @@ class _GymSessionState extends State<GymSessionScreen> {
       setState(() => _isSaving = true);
       for (final ex in _exercises) {
         if (ex.isCardio) continue;
+        final blockId = ex.blockId;
+        if (blockId == null) continue;
         final blockData = {
           'name': ex.name,
           'muscle': ex.muscle,
@@ -1839,7 +1957,7 @@ class _GymSessionState extends State<GymSessionScreen> {
               .toList(),
         };
         await FirestoreService().updateInProgressSessionBlock(
-            uid, sessionRunId, ex.originalIndex, blockData);
+            uid, sessionRunId, blockId, blockData);
       }
       if (!mounted) return;
       setState(() => _isSaving = false);
@@ -2333,20 +2451,26 @@ class _GymSessionState extends State<GymSessionScreen> {
   }
 
   // ── "+ Add" button routing ─────────────────────────────────────────────────
-  // Replaces the old always-_showAddExerciseSheet() onTap. Branches on plan
-  // type (see _isCustomPlan/_planSport's own field docs):
-  //  - Custom-built routine: either block type is plausible, so show a
-  //    small chooser first.
-  //  - A plan categorized 'Running' (not custom): only cardio makes sense,
-  //    so skip the chooser and go straight to Add Cardio.
-  //  - Everything else (coach-authored gym plans, or anything not
-  //    identified as custom or running): unchanged from today — straight
-  //    to the existing gym exercise search sheet.
+  // Branches on plan type (see _isCustomPlan/_planSport's own field docs).
+  // Plan sport values are 'gym'/'cardio'/'combine' (the old 'running' check
+  // here was stale post-rename and meant admin Cardio plans could never
+  // reach Add Cardio at all — always fell through to the gym-only sheet).
+  //  - Custom-built routine, or an admin plan categorized 'combine' or
+  //    'cardio': either block type is plausible mid-session, so show the
+  //    chooser (_showAddChoiceSheet()) — 'cardio' is included here (rather
+  //    than skipping straight to _showAddCardioSheet()) so a Cardio plan
+  //    still gets a real choice, matching Combine's existing behavior,
+  //    per explicit design direction rather than adding another special
+  //    case.
+  //  - A pure admin 'gym' plan (the only remaining case): only a gym
+  //    exercise is plausible, so go straight to the existing gym exercise
+  //    search sheet, unchanged from today.
+  static const _kAddChoiceSportValues = {'combine', 'cardio'};
+
   void _handleAddTap() {
-    if (_isCustomPlan) {
+    final normalizedSport = (_planSport ?? '').toLowerCase();
+    if (_isCustomPlan || _kAddChoiceSportValues.contains(normalizedSport)) {
       _showAddChoiceSheet();
-    } else if ((_planSport ?? '').toLowerCase() == 'running') {
-      _showAddCardioSheet();
     } else {
       _showAddExerciseSheet();
     }
@@ -2605,30 +2729,33 @@ class _GymSessionState extends State<GymSessionScreen> {
   }
 
   // Gives a mid-session-added block (gym or cardio, via either "+ Add"
-  // sheet) a REAL Firestore blocks[] slot instead of the originalIndex: -1
-  // sentinel every such block got before this fix (which meant
-  // _syncBlockDone()/_buildCardioPlaceholderCard's onTap always silently
-  // no-op'd via updateInProgressSessionBlock's own out-of-range guard —
-  // for a cardio block specifically, this meant tapping "Start <Activity>"
-  // did nothing visibly wrong, just never synced). Only relevant for a
-  // plan-linked session (_sessionRunId != null) — a standalone session has
-  // no in-progress doc to append to at all, so this returns -1 immediately
-  // with no Firestore call, leaving that case completely unchanged from
-  // today. Also fails soft to -1 if the append call itself fails
-  // (appendInProgressSessionBlock's own fail-soft return of null) — an add
-  // should never block the user from continuing their workout, just accept
-  // that this one block won't sync, same degraded fallback as today.
+  // sheet) a REAL Firestore blocks[] slot with a real blockId, instead of
+  // the originalIndex: -1 sentinel every such block got before this fix
+  // (which meant _syncBlockDone()/_buildCardioPlaceholderCard's onTap
+  // always silently no-op'd via updateInProgressSessionBlock's own
+  // out-of-range guard — for a cardio block specifically, this meant
+  // tapping "Start <Activity>" did nothing visibly wrong, just never
+  // synced). Only relevant for a plan-linked session (_sessionRunId !=
+  // null) — a standalone session has no in-progress doc to append to at
+  // all, so this returns null immediately with no Firestore call, leaving
+  // that case completely unchanged from today. Also fails soft to null if
+  // the append call itself fails (appendInProgressSessionBlock's own
+  // fail-soft return of null) — an add should never block the user from
+  // continuing their workout, just accept that this one block won't sync,
+  // same degraded fallback as today; every blockId consumer downstream
+  // (_syncBlockDone, _buildCardioPlaceholderCard's onTap) already
+  // null-guards and no-ops rather than assuming a valid id, matching this.
   // Awaited by both call sites BEFORE the setState that actually adds the
   // block to _exercises, so no tappable "Start <Activity>"/set row for it
-  // can ever render before its real index (or the -1 fallback) is decided
-  // — no race where a fast tap targets a not-yet-resolved index.
-  Future<int> _appendBlockIfMidSession(Map<String, dynamic> blockData) async {
+  // can ever render before its real id (or the null fallback) is decided
+  // — no race where a fast tap targets a not-yet-resolved id.
+  Future<String?> _appendBlockIfMidSession(
+      Map<String, dynamic> blockData) async {
     final sessionRunId = _sessionRunId;
     final uid = AuthService().getCurrentUser()?.uid;
-    if (sessionRunId == null || uid == null) return -1;
-    final index = await FirestoreService()
+    if (sessionRunId == null || uid == null) return null;
+    return FirestoreService()
         .appendInProgressSessionBlock(uid, sessionRunId, blockData);
-    return index ?? -1;
   }
 
   // Mirrors _addCardioBlock()'s shape in build_routine_screen.dart (name
@@ -2637,7 +2764,7 @@ class _GymSessionState extends State<GymSessionScreen> {
   // isCardio:true block convention) but builds a typed _ExerciseData for
   // this screen's own in-memory model instead of a raw Firestore map.
   Future<void> _addCardioExercise(String activity, int minutes) async {
-    final originalIndex = await _appendBlockIfMidSession({
+    final blockId = await _appendBlockIfMidSession({
       'isCardio': true,
       'cardioActivity': activity,
       'cardioMinutes': minutes,
@@ -2659,7 +2786,7 @@ class _GymSessionState extends State<GymSessionScreen> {
         cardioActivity: activity,
         cardioMinutes: minutes,
         injuryRisk: [],
-        originalIndex: originalIndex,
+        blockId: blockId,
       ));
     });
   }
@@ -2682,7 +2809,7 @@ class _GymSessionState extends State<GymSessionScreen> {
             _SetData(prev: '—', type: _SetType.normal),
             _SetData(prev: '—', type: _SetType.normal),
           ];
-          final originalIndex = await _appendBlockIfMidSession({
+          final blockId = await _appendBlockIfMidSession({
             'name': name,
             'muscle': muscle,
             'restTime': 90,
@@ -2707,7 +2834,7 @@ class _GymSessionState extends State<GymSessionScreen> {
               restTime: 90,
               sets: sets,
               injuryRisk: [],
-              originalIndex: originalIndex,
+              blockId: blockId,
             ));
           });
           _loadPreviousSessionData();
@@ -2937,20 +3064,19 @@ class _GymSessionState extends State<GymSessionScreen> {
                             final ex = _exercises[actualIndex];
                             return Padding(
                               padding: const EdgeInsets.only(bottom: 16),
-                              // actualIndex is only a valid Firestore blocks[]
-                              // position when nothing has ever been removed
-                              // from _exercises ahead of it — not guaranteed
-                              // once injury filtering has run (see
-                              // ex.originalIndex's own field doc). Only
-                              // _buildExerciseCard still needs actualIndex —
-                              // that's local _exercises list access (sets,
-                              // notes, rest timer), which must stay a real
-                              // array position; _buildCardioPlaceholderCard's
-                              // blockIndex, by contrast, is Firestore-bound
-                              // and must use the stable ex.originalIndex.
+                              // actualIndex is only ever used for LOCAL
+                              // _exercises list access (sets, notes, rest
+                              // timer) via _buildExerciseCard — never
+                              // Firestore-bound.
+                              // _buildCardioPlaceholderCard's blockId, by
+                              // contrast, IS Firestore-bound and must use
+                              // the stable ex.blockId (see that field's own
+                              // doc comment) — never a position, which
+                              // isn't guaranteed to still be valid once
+                              // injury filtering has run.
                               child: ex.isCardio
                                   ? _buildCardioPlaceholderCard(
-                                      ex, ex.originalIndex)
+                                      ex, ex.blockId)
                                   : _buildExerciseCard(actualIndex),
                             );
                           },
@@ -3092,12 +3218,26 @@ class _GymSessionState extends State<GymSessionScreen> {
               onTap: () => context.pop(),
             ),
             const Spacer(),
-            Text(
-              _sessionName,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w700,
-                color: Colors.white70,
+            // Expanded (not Flexible) + textAlign: center — for any name
+            // short enough to already fit, this centers at exactly the
+            // same point the old unconstrained Text did between these two
+            // Spacers (an Expanded's share is fixed regardless of its
+            // child's own size, so the text's own center always lands at
+            // the true midpoint of the space between the leading button
+            // and the trailing SizedBox, matching the original two-Spacer
+            // symmetry exactly) — this fix is only visible once a name is
+            // long enough to need the ellipsis.
+            Expanded(
+              child: Text(
+                _sessionName,
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white70,
+                ),
               ),
             ),
             const Spacer(),
@@ -3144,13 +3284,28 @@ class _GymSessionState extends State<GymSessionScreen> {
               ],
             ),
           ),
-          // Session name
-          Text(
-            _sessionName,
-            style: const TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-              color: Colors.white70,
+          // Session name — Expanded (not Flexible) + textAlign: center, same
+          // reasoning as the _readOnly branch above: for any name short
+          // enough to already fit, this centers at exactly the same point
+          // the old unconstrained Text did between the elapsed-timer and
+          // controls Expandeds either side of it (both of those are
+          // left/right-anchored within their own box with no visible
+          // background, so their exact width doesn't move their own
+          // content — only this Text's centering is affected, and the
+          // math places its center at the same point regardless of
+          // whether it's flexed into thirds or left unconstrained). Only
+          // visible once a name is long enough to need the ellipsis.
+          Expanded(
+            child: Text(
+              _sessionName,
+              textAlign: TextAlign.center,
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: Colors.white70,
+              ),
             ),
           ),
           // Controls
@@ -3521,7 +3676,7 @@ class _GymSessionState extends State<GymSessionScreen> {
 
   // ── Section 4b — Cardio placeholder card ─────────────────────────────────
 
-  Widget _buildCardioPlaceholderCard(_ExerciseData ex, int blockIndex) {
+  Widget _buildCardioPlaceholderCard(_ExerciseData ex, String? blockId) {
     final icon = ex.cardioActivity == 'Run'
         ? Icons.directions_run_rounded
         : ex.cardioActivity == 'Walk'
@@ -3607,6 +3762,18 @@ class _GymSessionState extends State<GymSessionScreen> {
               onTap: _readOnly
                   ? null
                   : () async {
+                      // Re-entrancy guard — a second tap arriving while the
+                      // first is still being processed (the classic
+                      // "double-tap before the first push visually covers
+                      // this button" window) returns immediately instead of
+                      // risking a second context.push() that could collide
+                      // with the first on an identical page key and crash.
+                      // See _isNavigatingToCardio's own field doc — defense
+                      // in depth alongside, not instead of, router.dart's
+                      // own cardioSetup identity-keyed pageBuilder fix.
+                      if (_isNavigatingToCardio) return;
+                      _isNavigatingToCardio = true;
+
                       // Guards against the race where the user taps Start
                       // faster than _loadPlanSession()'s fire-and-forget
                       // createInProgressSession() write resolves — without
@@ -3616,22 +3783,49 @@ class _GymSessionState extends State<GymSessionScreen> {
                       final initFuture = _sessionInitFuture;
                       if (initFuture != null) await initFuture;
                       if (!mounted) return;
+
+                      // Waits for the most recent set-completion sync to
+                      // actually land before navigating — see
+                      // _pendingSyncFuture's own field doc. Without this, a
+                      // write from completing a gym exercise right before
+                      // this tap could still be in flight when the user
+                      // later returns from cardio and the session
+                      // re-hydrates from Firestore, reading stale
+                      // pre-completion data and appearing to lose it.
+                      final syncFuture = _pendingSyncFuture;
+                      if (syncFuture != null) await syncFuture;
+                      if (!mounted) return;
+
                       // TEMPORARY DEBUG — remove once the second-cardio-block
                       // bug is confirmed fixed.
                       print(
-                          'DEBUG_BLOCKINDEX: _buildCardioPlaceholderCard onTap '
-                          'name=${ex.name} originalIndex=${ex.originalIndex} '
-                          'blockIndex=$blockIndex sessionRunId=$_sessionRunId');
-                      context.push(
+                          'DEBUG_BLOCKID: _buildCardioPlaceholderCard onTap '
+                          'name=${ex.name} blockId=$blockId '
+                          'sessionRunId=$_sessionRunId');
+                      // Awaited (unlike before) specifically so
+                      // _isNavigatingToCardio can be reset below once this
+                      // resolves — matters for the case where the user
+                      // backs out of the cardio-setup screen via a normal
+                      // pop, returning to THIS SAME still-alive
+                      // GymSessionScreen instance (unlike the "completed
+                      // cardio, returned via mid_plan_cardio_complete_
+                      // screen.dart's Next button" path, which replaces the
+                      // whole stack via context.go and destroys this
+                      // instance entirely — a fresh instance takes over
+                      // there with its own fresh, already-false flag, so
+                      // this reset is a no-op in that case, not a bug).
+                      await context.push(
                         Routes.cardioSetup,
                         extra: {
                           'fromPlan': true,
                           'planActivity': ex.cardioActivity,
                           'planMinutes': ex.cardioMinutes,
                           'sessionRunId': _sessionRunId,
-                          'blockIndex': blockIndex,
+                          'blockId': blockId,
                         },
                       );
+                      if (!mounted) return;
+                      _isNavigatingToCardio = false;
                     },
               child: Container(
                 width: double.infinity,
@@ -4371,6 +4565,7 @@ class _GymExerciseSearchSheetState
     return _allExercises.where((e) {
       final name = (e['name'] as String?) ?? '';
       final muscle = (e['muscle'] as String?) ?? 'Other';
+      if (muscle == 'Cardio') return false;
       final nameMatch = _query.isEmpty ||
           name.toLowerCase().contains(_query.toLowerCase());
       final muscleMatch = _muscleFilter == 'All' || muscle == _muscleFilter;

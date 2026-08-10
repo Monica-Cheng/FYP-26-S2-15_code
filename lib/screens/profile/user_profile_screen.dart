@@ -48,6 +48,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   double _lifetimeVolume = 0;
   bool _gameStatsLoading = true;
 
+  // Starts at the fallback (matches whatever's actually configured in
+  // the common case) so the level card renders correctly-looking data
+  // immediately, no spinner/placeholder needed — see loadThresholds()'s
+  // own doc comment. Independent of _loadProfile()/_loadGameStats() (this
+  // is global config, not per-user data), so it loads in parallel with
+  // those rather than waiting on them.
+  List<num> _xpThresholds = XpLevels.fallbackThresholds;
+
   // users/{uid} (sessions/dailyActivityLog especially) is owner-only per
   // firestore.rules — streak/session-count/volume have no cross-user-
   // readable mirror, so those reads are only ever attempted for your own
@@ -64,11 +72,22 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     _loadProfile();
     _loadMyName();
     _loadCounts();
+    _loadXpThresholds();
     if (_isOwnProfile) {
       _loadGameStats();
     } else {
       _gameStatsLoading = false;
     }
+  }
+
+  // Level/XP card shows for both your own profile and other users' (per
+  // this screen's existing "game profile" section) — unlike
+  // _loadGameStats() above, not gated behind _isOwnProfile, since this is
+  // global config, not per-user data with owner-only Firestore rules.
+  Future<void> _loadXpThresholds() async {
+    final thresholds = await XpLevels.loadThresholds();
+    if (!mounted) return;
+    setState(() => _xpThresholds = thresholds);
   }
 
   Future<void> _loadGameStats() async {
@@ -437,9 +456,11 @@ _isLoading
 
   // ── Game profile (level/XP, streak, lifetime stats) ─────────────────────
   // Level card mirrors progress_screen.dart's own _buildLevelCard() look
-  // exactly (same "Lv.X" + level name + progress bar + "X XP · Y XP to
-  // next level" treatment), sourced from the same XpLevels table/logic —
-  // just applied to someone else's profile instead of the viewer's own.
+  // exactly (same "Lv.X" + progress bar + "X XP · Y XP to next level"
+  // treatment — no separate level-name text anymore, removed alongside
+  // the rest of the named-tier system), sourced from the same XpLevels
+  // table/logic — just applied to someone else's profile instead of the
+  // viewer's own.
   // Streak/lifetime stats use the same minimal 2-color treatment (WW
   // .primary icon + WW.text value, no colored boxes) established in the
   // Feed redesign, not the old 4-color pill style.
@@ -481,9 +502,9 @@ _isLoading
   }
 
   Widget _buildLevelCard() {
-    final progress = XpLevels.progress(_level, _totalXp);
-    final isMaxLevel = _level >= XpLevels.thresholds.length;
-    final nextLevelXp = isMaxLevel ? 0 : XpLevels.thresholds[_level];
+    final progress = XpLevels.progress(_level, _totalXp, _xpThresholds);
+    final isMaxLevel = _level >= _xpThresholds.length;
+    final nextLevelXp = isMaxLevel ? 0 : _xpThresholds[_level];
     final xpToNext = isMaxLevel ? 0 : nextLevelXp - _totalXp;
 
     return Container(
@@ -505,15 +526,6 @@ _isLoading
                   fontSize: 28,
                   fontWeight: FontWeight.w700,
                   color: WW.primaryDark,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                XpLevels.levelName(_level),
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                  color: WW.textSec,
                 ),
               ),
             ],

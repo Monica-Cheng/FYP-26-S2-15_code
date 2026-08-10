@@ -45,10 +45,6 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
   String _heightUnit = 'cm';
   String _weightUnit = 'kg';
   bool _isLoading = false;
-  Map<String, bool> _connected = {
-    'apple': false,
-    'google': false,
-  };
   bool _healthGranted = false;
 
   @override
@@ -153,52 +149,27 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Apple Health — requests real HealthKit permissions via HealthService.
+  // Unified health connect — requests real HealthKit (iOS) or Health Connect
+  // (Android) permissions via HealthService, only marking connected if the
+  // grant actually succeeded (was previously always set true on iOS
+  // regardless of `granted` — fixed here for both platforms).
   // ---------------------------------------------------------------------------
-  Future<void> _handleAppleHealth() async {
+  Future<void> _handleConnectHealth() async {
     final granted = await HealthService().requestPermissions();
     if (!mounted) return;
-    setState(() => _connected['apple'] = true);
+    setState(() => _healthGranted = granted);
+    final source = Platform.isIOS ? 'Apple Health' : 'Health Connect';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          granted
+              ? '$source connected successfully!'
+              : "Couldn't connect $source. You can try again from Settings later.",
+        ),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
     if (granted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Apple Health connected successfully!'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Apple Health connected. You can manage permissions in Settings → Health.'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
-    _checkAllConnected();
-  }
-
-  void _handleGoogleHealth() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Google Health Connect is available on Android devices.'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-    setState(() => _connected['google'] = true);
-    _checkAllConnected();
-  }
-
-  void _handleGoogleHealthUnsupported() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Google Health Connect is only available on Android devices.'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
-
-  void _checkAllConnected() {
-    if (_connected.values.every((v) => v)) {
       Future.delayed(const Duration(milliseconds: 400), () {
         if (mounted) setState(() => _subStep = 1);
       });
@@ -284,8 +255,7 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
         if (heightCm != null) 'heightCm': heightCm,
         if (weightKg != null) 'weightKg': weightKg,
         'preferredUnits': _heightUnit == 'cm' ? 'metric' : 'imperial',
-        'healthConnected':
-            _connected['apple'] == true || _connected['google'] == true,
+        'healthConnected': _healthGranted,
       };
 
       await _firestoreService.saveOnboardingStep1(uid, data);
@@ -378,27 +348,21 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
             ),
           ),
           const SizedBox(height: 8),
-          const Text(
-            'Link Apple Health to get personalised insights and automatic workout syncing.',
-            style: TextStyle(fontSize: 14, color: WW.textSec, height: 1.6),
+          Text(
+            Platform.isIOS
+                ? 'Link Apple Health to get personalised insights and automatic workout syncing.'
+                : 'Link Health Connect to get personalised insights and automatic workout syncing.',
+            style: const TextStyle(fontSize: 14, color: WW.textSec, height: 1.6),
           ),
           const SizedBox(height: 28),
           _HealthCard(
-            icon: _AppleHealthIcon(),
-            title: 'Apple Health',
-            description: 'Sync heart rate, steps, sleep, and workouts.',
-            isConnected: _connected['apple']!,
-            onConnect: _handleAppleHealth,
-          ),
-          const SizedBox(height: 12),
-          _HealthCard(
-            icon: _GoogleHealthIcon(),
-            title: 'Google Health Connect',
+            icon: Platform.isIOS ? _AppleHealthIcon() : _GoogleHealthIcon(),
+            title: Platform.isIOS ? 'Apple Health' : 'Health Connect',
             description: Platform.isIOS
-                ? 'Available on Android devices only.'
-                : 'Access fitness and wellness data on Android.',
-            isConnected: _connected['google']!,
-            onConnect: Platform.isIOS ? _handleGoogleHealthUnsupported : _handleGoogleHealth,
+                ? 'Sync heart rate, steps, sleep, and workouts.'
+                : 'Sync heart rate, steps, and active calories from Health Connect.',
+            isConnected: _healthGranted,
+            onConnect: _handleConnectHealth,
           ),
           const SizedBox(height: 36),
           SizedBox(

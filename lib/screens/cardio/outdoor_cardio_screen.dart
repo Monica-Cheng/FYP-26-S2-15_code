@@ -238,7 +238,19 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   // standalone (including via the temporary Routes.outdoorCardioTest
   // route, which doesn't pass any extra at all).
   String? _sessionRunId;
-  int? _blockIndex;
+  String? _blockId;
+
+  // Injury Alert banner — same fields/data source as
+  // cardio_session_screen.dart's own _showInjuryWarning/_activeInjuries/
+  // _injuryWarningDismissed (that screen didn't have this at all before;
+  // ported here for indoor/outdoor parity). Screen-local State, not
+  // persisted — this route is a plain GoRoute with no keep-alive
+  // wrapper, so a fresh session (indoor or outdoor) always gets a fresh
+  // widget instance and these reset to their defaults automatically; no
+  // extra plumbing needed for "dismiss lasts only this session."
+  bool _showInjuryWarning = false;
+  List<Map<String, dynamic>> _activeInjuries = [];
+  bool _injuryWarningDismissed = false;
 
   // ── Accrual-pause anti-cheat config — Firestore-configurable, see
   // _loadCardioAntiCheatConfig() and the _kFallback-prefixed consts above.
@@ -405,6 +417,28 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     // just fired) so _startTracking() can await this exact call rather
     // than kicking off a second, redundant fetch.
     _cardioAntiCheatConfigFuture = _loadCardioAntiCheatConfig();
+    _loadInjuryWarning();
+  }
+
+  // Same getUserInjuryData() call cardio_session_screen.dart's own
+  // _loadInjuryWarning() already uses — reused directly, not
+  // reimplemented, per this port's own scope.
+  Future<void> _loadInjuryWarning() async {
+    if (_uid == null) return;
+    try {
+      final data = await FirestoreService().getUserInjuryData(_uid!);
+      final enabled = data['injuryFilteringEnabled'] as bool? ?? false;
+      if (!enabled) return;
+      final injuries = List<Map<String, dynamic>>.from(
+          data['injuries'] as List? ?? []);
+      if (injuries.isEmpty) return;
+      if (mounted) {
+        setState(() {
+          _activeInjuries = injuries;
+          _showInjuryWarning = true;
+        });
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadCardioAntiCheatConfig() async {
@@ -454,7 +488,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     setState(() {
       if (activity != null && activity.isNotEmpty) _activity = activity;
       _sessionRunId = extra?['sessionRunId'] as String?;
-      _blockIndex = extra?['blockIndex'] as int?;
+      _blockId = extra?['blockId'] as String?;
     });
   }
 
@@ -1564,6 +1598,13 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
                         ? _buildStartOverlay()
                         : _buildLiveStatsAndControls(),
                   ),
+                if (!isFinished)
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    child: _buildInjuryWarningBanner(),
+                  ),
               ],
             ),
     );
@@ -1673,6 +1714,84 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
               fontSize: 13,
               fontWeight: FontWeight.w600,
               color: WW.primary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Same visual style/copy as cardio_session_screen.dart's own
+  // _buildInjuryWarningBanner() ("Injury Alert" + safety disclaimer +
+  // dismiss X), ported here for indoor/outdoor parity. One difference
+  // from that screen's version: no manual
+  // MediaQuery.of(context).padding.top offset in the padding here — this
+  // screen already has a Scaffold-level AppBar (unlike
+  // cardio_session_screen.dart, which has none), so the Positioned
+  // banner below already sits under the status bar/notch without needing
+  // to self-manage that inset. Positioned as a top-level Stack sibling
+  // (see build()'s body: Stack(...) — this screen already had one, no
+  // Column→Stack conversion needed the way cardio_session_screen.dart's
+  // fix required), gated on !isFinished so it doesn't linger over the
+  // post-session summary.
+  Widget _buildInjuryWarningBanner() {
+    if (!_showInjuryWarning || _injuryWarningDismissed) {
+      return const SizedBox.shrink();
+    }
+    final injuryNames = _activeInjuries
+        .map((i) => i['name'] as String? ?? '')
+        .where((n) => n.isNotEmpty)
+        .join(', ');
+    return Container(
+      width: double.infinity,
+      color: const Color(0xFFFEF3C7),
+      padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 2),
+            child: Icon(Icons.healing_rounded,
+                color: Color(0xFFD97706), size: 16),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Injury Alert',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF92400E),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Active injuries: $injuryNames. Listen to your body and stop if you feel pain. This is not medical advice.',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF92400E),
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              setState(() => _injuryWarningDismissed = true);
+            },
+            child: const Padding(
+              padding: EdgeInsets.all(4),
+              child: Icon(
+                Icons.close_rounded,
+                size: 18,
+                color: Color(0xFF92400E),
+              ),
             ),
           ),
         ],
@@ -2532,7 +2651,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
 
   // Branches on whether this session was launched from a plan's cardio
   // block (see cardio_setup_screen.dart's _handleStart(), which forwards
-  // sessionRunId/blockIndex through from gym_session_screen.dart) — mirrors
+  // sessionRunId/blockId through from gym_session_screen.dart) — mirrors
   // cardio_session_screen.dart's own _finishSession() branch. If not (both
   // null), everything is byte-for-byte the original standalone behavior —
   // untouched. If launched from a plan, this block's result is persisted
@@ -2570,8 +2689,8 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
       final caloriesRounded = _calories.round();
 
       final sessionRunId = _sessionRunId;
-      final blockIndex = _blockIndex;
-      if (sessionRunId != null && blockIndex != null) {
+      final blockId = _blockId;
+      if (sessionRunId != null && blockId != null) {
         // isCardio: true must be included — updateInProgressSessionBlock
         // replaces the whole block rather than merging, and
         // finalizeInProgressSession's gym-vs-cardio composition check keys
@@ -2593,52 +2712,27 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
         };
         // TEMPORARY DEBUG — remove once the second-cardio-block bug is
         // confirmed fixed.
-        print('DEBUG_BLOCKINDEX: outdoor_cardio_screen finish uid=$uid '
-            'sessionRunId=$sessionRunId blockIndex=$blockIndex');
+        print('DEBUG_BLOCKID: outdoor_cardio_screen finish uid=$uid '
+            'sessionRunId=$sessionRunId blockId=$blockId');
         await FirestoreService().updateInProgressSessionBlock(
-            uid, sessionRunId, blockIndex, blockData);
-
-        final fullyDone = await FirestoreService()
-            .isInProgressSessionFullyDone(uid, sessionRunId);
+            uid, sessionRunId, blockId, blockData);
 
         if (!mounted) return;
 
-        if (!fullyDone) {
-          context.pushReplacement(Routes.midPlanCardioComplete, extra: {
-            'sessionRunId': sessionRunId,
-            'blockIndex': blockIndex,
-            'blockData': blockData,
-          });
-          return;
-        }
-
-        String? finalSessionId;
-        List<Map<String, dynamic>> newlyEarnedBadges = [];
-        try {
-          final finalizeResult = await FirestoreService()
-              .finalizeInProgressSession(uid, sessionRunId);
-          finalSessionId = finalizeResult.sessionId;
-          newlyEarnedBadges = finalizeResult.newlyEarnedBadges;
-        } catch (_) {}
-
-        if (!mounted) return;
-        context.pushReplacement(
-          Routes.postSessionSummary,
-          extra: {
-            'sessionName':
-                trimmedName.isEmpty ? '$_activity · Outdoor' : trimmedName,
-            'elapsedSeconds': _activeSeconds,
-            'date': DateTime.now(),
-            'exercises': [],
-            'isCardio': true,
-            'cardioActivity': _activity,
-            'cardioCalories': caloriesRounded,
-            'goalMinutes': 0,
-            'sessionId': finalSessionId,
-            if (newlyEarnedBadges.isNotEmpty)
-              'newlyEarnedBadges': newlyEarnedBadges,
-          },
-        );
+        // Always shows the block-completion summary, even when this
+        // happens to be the last remaining incomplete block in the
+        // session — isInProgressSessionFullyDone() must NOT be used here
+        // to skip straight to finalizing/postSessionSummary. The session
+        // should only ever end via an explicit Finish/End Session tap on
+        // the main gym_session_screen.dart (see that screen's own Finish
+        // Session flow for the real finalizeInProgressSession() call),
+        // never auto-detected just because every planned block happens to
+        // be done.
+        context.pushReplacement(Routes.midPlanCardioComplete, extra: {
+          'sessionRunId': sessionRunId,
+          'blockId': blockId,
+          'blockData': blockData,
+        });
         return;
       }
 
