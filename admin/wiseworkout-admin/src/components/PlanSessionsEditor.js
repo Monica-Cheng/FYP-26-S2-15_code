@@ -1,7 +1,7 @@
 import React from 'react';
 import { Clock3, Dumbbell, MoonStar, Plus, Trash2 } from 'lucide-react';
 import Badge from './ui/Badge';
-import { CARDIO_ACTIVITIES, MUSCLE_OPTIONS } from '../utils/planUtils';
+import { CARDIO_ACTIVITIES } from '../utils/planUtils';
 
 const DAYS_IN_WEEK = 7;
 
@@ -11,6 +11,35 @@ const SET_TYPE_OPTIONS = [
   { value: 'N', label: 'Normal (N)' },
   { value: 'D', label: 'Drop Set (D)' },
 ];
+
+function getAllowedBlockKinds(planType) {
+  if (planType === 'Gym') return { strength: true, cardio: false };
+  if (planType === 'Cardio') return { strength: false, cardio: true };
+  return { strength: true, cardio: true };
+}
+
+function findCatalogExercise(exerciseCatalog, name) {
+  const normalizedName = (name || '').trim().toLowerCase();
+  if (!normalizedName) return null;
+  return exerciseCatalog.find((exercise) => (exercise?.name || '').trim().toLowerCase() === normalizedName) || null;
+}
+
+function hasCatalogMuscle(exercise) {
+  return typeof exercise?.muscle === 'string' && exercise.muscle.trim() !== '';
+}
+
+function cardioEditorFromPlanExercise(exercise) {
+  return {
+    isCardio: true,
+    cardioActivity: CARDIO_ACTIVITIES.includes(exercise?.cardioActivity) ? exercise.cardioActivity : CARDIO_ACTIVITIES[0],
+    cardioMinutes:
+      exercise?.cardioMinutes !== undefined && exercise?.cardioMinutes !== null
+        ? String(exercise.cardioMinutes)
+        : exercise?.sets?.[0]?.reps !== undefined
+          ? String(exercise.sets[0].reps)
+          : '15',
+  };
+}
 
 export function emptyExercise() {
   return { name: '', muscle: '', tag: 'Primary', sets: '3', reps: '10', restTime: '60', note: '', isCardio: false };
@@ -35,47 +64,53 @@ export function buildDefaultSessions(daysPerWeek) {
 
 export function sessionsFromPlan(rawSessions) {
   const list = Array.isArray(rawSessions) ? rawSessions : [];
-  return list.map((session) => ({
-    name: session.isRestDay ? session.name || 'Rest' : session.name || '',
-    isRestDay: !!session.isRestDay,
-    estimatedMinutes:
-      session.estimatedMinutes !== undefined && session.estimatedMinutes !== null ? String(session.estimatedMinutes) : '0',
-    exercises: Array.isArray(session.exercises)
-      ? session.exercises.map((exercise) => {
-          if (exercise && exercise.isCardio === true) {
-            return {
-              isCardio: true,
-              cardioActivity: CARDIO_ACTIVITIES.includes(exercise.cardioActivity) ? exercise.cardioActivity : CARDIO_ACTIVITIES[0],
-              cardioMinutes:
-                exercise.cardioMinutes !== undefined && exercise.cardioMinutes !== null
-                  ? String(exercise.cardioMinutes)
-                  : exercise.sets?.[0]?.reps !== undefined
-                    ? String(exercise.sets[0].reps)
-                    : '15',
-            };
-          }
+  return list.map((session) => {
+    const { name, isRestDay, estimatedMinutes, exercises, day, type, ...restSessionFields } = session || {};
+    return {
+      name: isRestDay ? name || 'Rest' : name || '',
+      isRestDay: !!isRestDay,
+      estimatedMinutes: estimatedMinutes !== undefined && estimatedMinutes !== null ? String(estimatedMinutes) : '0',
+      exercises: Array.isArray(exercises)
+        ? exercises.map((exercise) => {
+            if (exercise && exercise.isCardio === true) {
+              return cardioEditorFromPlanExercise(exercise);
+            }
 
-          return {
-            isCardio: false,
-            name: exercise.name || '',
-            muscle: exercise.muscle || '',
-            tag: exercise.tag === 'Accessory' ? 'Accessory' : 'Primary',
-            sets:
-              typeof exercise.sets === 'number'
-                ? String(exercise.sets)
-                : Array.isArray(exercise.sets)
-                  ? String(exercise.sets.length)
-                  : '3',
-            reps: exercise.reps !== undefined && exercise.reps !== null ? String(exercise.reps) : '10',
-            restTime: exercise.restTime !== undefined && exercise.restTime !== null ? String(exercise.restTime) : '60',
-            note: exercise.note || '',
-          };
-        })
-      : [],
-  }));
+            const {
+              name: exerciseName,
+              muscle,
+              tag,
+              sets,
+              reps,
+              restTime,
+              note,
+              ...restExerciseFields
+            } = exercise || {};
+
+            return {
+              isCardio: false,
+              name: exerciseName || '',
+              muscle: muscle || '',
+              tag: tag === 'Accessory' ? 'Accessory' : 'Primary',
+              sets:
+                typeof sets === 'number'
+                  ? String(sets)
+                  : Array.isArray(sets)
+                    ? String(sets.length)
+                    : '3',
+              reps: reps !== undefined && reps !== null ? String(reps) : '10',
+              restTime: restTime !== undefined && restTime !== null ? String(restTime) : '60',
+              note: note || '',
+              _extra: restExerciseFields,
+            };
+          })
+        : [],
+      _extra: restSessionFields,
+    };
+  });
 }
 
-export function buildAndValidateSessions(sessions, expectedDaysPerWeek) {
+export function buildAndValidateSessions(sessions, expectedDaysPerWeek, planType, exerciseCatalog) {
   if (sessions.length !== DAYS_IN_WEEK) {
     return { error: `Exactly 7 sessions (one per day of the week) are required — currently ${sessions.length}.` };
   }
@@ -83,6 +118,7 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek) {
     return { error: 'A plan cannot consist of 7 rest days — at least one training session is required.' };
   }
 
+  const allowedKinds = getAllowedBlockKinds(planType);
   const built = [];
   for (let sessionIndex = 0; sessionIndex < sessions.length; sessionIndex += 1) {
     const session = sessions[sessionIndex];
@@ -90,6 +126,7 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek) {
 
     if (session.isRestDay) {
       built.push({
+        ...session._extra,
         day: dayLabel,
         name: session.name.trim() || 'Rest',
         type: 'rest',
@@ -110,6 +147,9 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek) {
       const exercise = session.exercises[exerciseIndex];
 
       if (exercise.isCardio) {
+        if (!allowedKinds.cardio) {
+          return { error: `${dayLabel}: ${planType} plans cannot contain cardio blocks. Remove the cardio block(s) before saving.` };
+        }
         if (!CARDIO_ACTIVITIES.includes(exercise.cardioActivity)) {
           return { error: `${dayLabel}, cardio block ${exerciseIndex + 1}: Activity must be Run, Walk, or Cycle.` };
         }
@@ -121,9 +161,6 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek) {
           name: `${exercise.cardioActivity} ${minutes}min`,
           muscle: 'Cardio',
           restTime: 0,
-          note: '',
-          tag: 'Primary',
-          sets: [{ type: 'N', kg: '', reps: String(minutes) }],
           isCardio: true,
           cardioActivity: exercise.cardioActivity,
           cardioMinutes: minutes,
@@ -132,7 +169,16 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek) {
       }
 
       if (!exercise.name.trim()) return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Name is required.` };
-      if (!exercise.muscle.trim()) return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Muscle is required.` };
+      if (!allowedKinds.strength) {
+        return { error: `${dayLabel}: ${planType} plans cannot contain strength exercises. Remove the strength exercise(s) before saving.` };
+      }
+      const catalogExercise = findCatalogExercise(exerciseCatalog, exercise.name);
+      if (!catalogExercise) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Select an exercise from the catalog before saving.` };
+      }
+      if (!hasCatalogMuscle(catalogExercise)) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: The selected catalog exercise is missing a target muscle.` };
+      }
       const sets = Number(exercise.sets);
       const reps = Number(exercise.reps);
       if (!Number.isInteger(sets) || sets <= 0) {
@@ -146,8 +192,9 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek) {
         return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Rest Time must be a valid non-negative integer.` };
       }
       const builtExercise = {
-        name: exercise.name.trim(),
-        muscle: exercise.muscle.trim(),
+        ...exercise._extra,
+        name: catalogExercise.name,
+        muscle: catalogExercise.muscle || '',
         tag: exercise.tag,
         sets,
         reps,
@@ -159,6 +206,7 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek) {
 
     const estimatedMinutes = Number(session.estimatedMinutes);
     built.push({
+      ...session._extra,
       day: dayLabel,
       name: session.name.trim(),
       type: 'gym',
@@ -210,6 +258,19 @@ export function customSessionsFromPlan(rawSessions) {
       type: type || 'gym',
       exercises: Array.isArray(exercises)
         ? exercises.map((exercise) => {
+            if (exercise && exercise.isCardio === true) {
+              const { isCardio, cardioActivity, cardioMinutes, sets, ...restExerciseFields } = exercise || {};
+              delete restExerciseFields.name;
+              delete restExerciseFields.muscle;
+              delete restExerciseFields.restTime;
+              delete restExerciseFields.tag;
+              delete restExerciseFields.note;
+              return {
+                ...cardioEditorFromPlanExercise({ isCardio, cardioActivity, cardioMinutes, sets }),
+                _extra: restExerciseFields,
+              };
+            }
+
             const { name: exerciseName, muscle, tag, restTime, note, sets, ...restExerciseFields } = exercise;
             const setsArray =
               Array.isArray(sets) && sets.length > 0
@@ -235,7 +296,7 @@ export function customSessionsFromPlan(rawSessions) {
   });
 }
 
-export function buildAndValidateCustomSessions(sessions) {
+export function buildAndValidateCustomSessions(sessions, planType, exerciseCatalog) {
   if (sessions.length === 0) {
     return { error: 'Add at least one training day.' };
   }
@@ -243,6 +304,7 @@ export function buildAndValidateCustomSessions(sessions) {
     return { error: 'At least one non-rest training session is required.' };
   }
 
+  const allowedKinds = getAllowedBlockKinds(planType);
   const built = [];
   for (let sessionIndex = 0; sessionIndex < sessions.length; sessionIndex += 1) {
     const session = sessions[sessionIndex];
@@ -268,8 +330,40 @@ export function buildAndValidateCustomSessions(sessions) {
     const exercises = [];
     for (let exerciseIndex = 0; exerciseIndex < session.exercises.length; exerciseIndex += 1) {
       const exercise = session.exercises[exerciseIndex];
+      if (exercise.isCardio) {
+        if (!allowedKinds.cardio) {
+          return { error: `${dayLabel}: ${planType} plans cannot contain cardio blocks. Remove the cardio block(s) before saving.` };
+        }
+        if (!CARDIO_ACTIVITIES.includes(exercise.cardioActivity)) {
+          return { error: `${dayLabel}, cardio block ${exerciseIndex + 1}: Activity must be Run, Walk, or Cycle.` };
+        }
+        const minutes = Number(exercise.cardioMinutes);
+        if (!Number.isInteger(minutes) || minutes <= 0) {
+          return { error: `${dayLabel}, cardio block ${exerciseIndex + 1}: Minutes must be a positive integer.` };
+        }
+        exercises.push({
+          ...exercise._extra,
+          isCardio: true,
+          cardioActivity: exercise.cardioActivity,
+          cardioMinutes: minutes,
+          name: `${exercise.cardioActivity} ${minutes}min`,
+          muscle: 'Cardio',
+          restTime: 0,
+        });
+        continue;
+      }
+
       if (!exercise.name.trim()) return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Name is required.` };
-      if (!exercise.muscle.trim()) return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Muscle is required.` };
+      if (!allowedKinds.strength) {
+        return { error: `${dayLabel}: ${planType} plans cannot contain strength exercises. Remove the strength exercise(s) before saving.` };
+      }
+      const catalogExercise = findCatalogExercise(exerciseCatalog, exercise.name);
+      if (!catalogExercise) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Select an exercise from the catalog before saving.` };
+      }
+      if (!hasCatalogMuscle(catalogExercise)) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: The selected catalog exercise is missing a target muscle.` };
+      }
       if (!exercise.sets || exercise.sets.length === 0) {
         return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: at least one set is required.` };
       }
@@ -289,8 +383,8 @@ export function buildAndValidateCustomSessions(sessions) {
 
       const restTime = Number(exercise.restTime);
       exercises.push({
-        name: exercise.name.trim(),
-        muscle: exercise.muscle.trim(),
+        name: catalogExercise.name,
+        muscle: catalogExercise.muscle || '',
         tag: exercise.tag,
         restTime: Number.isInteger(restTime) && restTime >= 0 ? restTime : 90,
         note: exercise.note ? exercise.note.trim() : '',
@@ -437,6 +531,12 @@ function PlanSessionsEditorStyles() {
         color: var(--ww-text-sec);
         font-size: var(--ww-type-body-size);
       }
+      .wwpse__inline-error {
+        margin-top: 6px;
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-danger, #b42318);
+        line-height: 1.45;
+      }
       .wwpse__sets {
         border-top: 1px solid var(--ww-divider);
         padding-top: 12px;
@@ -498,9 +598,11 @@ function PlanSessionsEditorStyles() {
   );
 }
 
-function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'official' }) {
+function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'official', planType = '' }) {
   const isCustomMode = mode === 'custom';
   const makeEmptyExercise = () => (isCustomMode ? emptyCustomExercise() : emptyExercise());
+  const allowedKinds = getAllowedBlockKinds(planType);
+  const makeDefaultTrainingExercises = () => (allowedKinds.cardio && !allowedKinds.strength ? [emptyCardioBlock()] : [makeEmptyExercise()]);
 
   const updateSession = (index, changes) => {
     onChange(sessions.map((session, sessionIndex) => (sessionIndex === index ? { ...session, ...changes } : session)));
@@ -520,16 +622,16 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
       updateSession(
         index,
         isCustomMode
-          ? { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, exercises: [makeEmptyExercise()] }
-          : { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, estimatedMinutes: '45', exercises: [makeEmptyExercise()] }
+          ? { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, exercises: makeDefaultTrainingExercises() }
+          : { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, estimatedMinutes: '45', exercises: makeDefaultTrainingExercises() }
       );
     }
   };
 
   const addDay = () => {
     const newDay = isCustomMode
-      ? { name: '', isRestDay: false, type: 'gym', exercises: [makeEmptyExercise()], _extra: {} }
-      : { name: '', isRestDay: false, estimatedMinutes: '45', exercises: [makeEmptyExercise()] };
+      ? { name: '', isRestDay: false, type: 'gym', exercises: makeDefaultTrainingExercises(), _extra: {} }
+      : { name: '', isRestDay: false, estimatedMinutes: '45', exercises: makeDefaultTrainingExercises() };
     onChange([...sessions, newDay]);
   };
 
@@ -559,8 +661,8 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
   };
 
   const handleExerciseNameChange = (dayIndex, exerciseIndex, name) => {
-    const match = exerciseCatalog.find((exercise) => exercise.name.toLowerCase() === name.toLowerCase());
-    updateExercise(dayIndex, exerciseIndex, match ? { name, muscle: match.muscle } : { name });
+    const match = findCatalogExercise(exerciseCatalog, name);
+    updateExercise(dayIndex, exerciseIndex, match ? { name: match.name, muscle: match.muscle || '' } : { name, muscle: '' });
   };
 
   const updateSet = (dayIndex, exerciseIndex, setIndex, changes) => {
@@ -651,7 +753,6 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
                           type="button"
                           className="wwa-btn wwa-btn-sm wwa-btn-danger"
                           onClick={() => removeExercise(dayIndex, exerciseIndex)}
-                          disabled={session.exercises.length === 1}
                         >
                           <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
                           Remove Cardio Block
@@ -703,7 +804,6 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
                           type="button"
                           className="wwa-btn wwa-btn-sm wwa-btn-danger"
                           onClick={() => removeExercise(dayIndex, exerciseIndex)}
-                          disabled={session.exercises.length === 1}
                         >
                           <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
                           Remove Exercise
@@ -721,17 +821,9 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
                             onChange={(event) => handleExerciseNameChange(dayIndex, exerciseIndex, event.target.value)}
                             placeholder="e.g. Bench Press"
                           />
-                        </div>
-                        <div>
-                          <label className="wwa-field-label" htmlFor={`exercise-muscle-${dayIndex}-${exerciseIndex}`}>Muscle</label>
-                          <input
-                            id={`exercise-muscle-${dayIndex}-${exerciseIndex}`}
-                            className="wwa-input"
-                            list="wwa-muscle-options"
-                            value={exercise.muscle}
-                            onChange={(event) => updateExercise(dayIndex, exerciseIndex, { muscle: event.target.value })}
-                            placeholder="e.g. Chest"
-                          />
+                          {exercise.name.trim() && !findCatalogExercise(exerciseCatalog, exercise.name) ? (
+                            <div className="wwpse__inline-error">Select an exercise from the exercise catalog.</div>
+                          ) : null}
                         </div>
                         <div>
                           <label className="wwa-field-label" htmlFor={`exercise-tag-${dayIndex}-${exerciseIndex}`}>Tag</label>
@@ -867,11 +959,13 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
               ))}
 
               <div className="wwpse__block-actions">
-                <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-brand-soft" onClick={() => addExercise(dayIndex)}>
-                  <Plus aria-hidden="true" size={14} strokeWidth={2} />
-                  Add Exercise
-                </button>
-                {!isCustomMode ? (
+                {allowedKinds.strength ? (
+                  <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-brand-soft" onClick={() => addExercise(dayIndex)}>
+                    <Plus aria-hidden="true" size={14} strokeWidth={2} />
+                    Add Exercise
+                  </button>
+                ) : null}
+                {allowedKinds.cardio ? (
                   <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={() => addCardioBlock(dayIndex)}>
                     <Plus aria-hidden="true" size={14} strokeWidth={2} />
                     Add Cardio Block
@@ -886,11 +980,6 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
       <datalist id="wwa-exercise-catalog">
         {exerciseCatalog.map((exercise) => (
           <option key={exercise.name} value={exercise.name} />
-        ))}
-      </datalist>
-      <datalist id="wwa-muscle-options">
-        {MUSCLE_OPTIONS.map((muscle) => (
-          <option key={muscle} value={muscle} />
         ))}
       </datalist>
 

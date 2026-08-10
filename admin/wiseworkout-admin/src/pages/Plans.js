@@ -19,10 +19,10 @@ import FormSection from '../components/ui/FormSection';
 import FormField from '../components/ui/FormField';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
-import { parseCommaList, buildDesignedBy } from '../utils/planUtils';
+import { parseCommaList, buildDesignedBy, CANONICAL_PLAN_TYPES, deriveOfficialMatchSport } from '../utils/planUtils';
 
 const CANONICAL_LEVELS = ['Beginner', 'Intermediate', 'Advanced'];
-const CANONICAL_TYPES = ['Gym', 'Running'];
+const CANONICAL_TYPES = CANONICAL_PLAN_TYPES;
 
 const getPlanSource = (plan) => {
   if (plan.isCoachPlan === true) return 'coach';
@@ -40,9 +40,9 @@ const emptyAddForm = {
   description: '',
   goals: '',
   matchGoals: '',
-  matchSport: 'Gym',
   matchLevel: 'Beginner',
   isActive: true,
+  featured: false,
   imageUrl: '',
   designedByName: '',
   designedByTitle: '',
@@ -208,7 +208,7 @@ function Plans() {
   ).sort((a, b) => a - b);
 
   const levelOptions = Array.from(new Set([...CANONICAL_LEVELS, ...levels])).filter((level) => level.toLowerCase() !== 'custom');
-  const typeOptions = Array.from(new Set([...CANONICAL_TYPES, ...types]));
+  const officialTypeOptions = CANONICAL_TYPES;
 
   const handleAddPlan = async () => {
     if (!addForm.name.trim()) {
@@ -236,7 +236,7 @@ function Plans() {
       return;
     }
 
-    const { sessions, error: sessionsError } = buildAndValidateSessions(addSessions, days);
+    const { sessions, error: sessionsError } = buildAndValidateSessions(addSessions, days, addForm.type, exerciseCatalog);
     if (sessionsError) {
       setAddError(sessionsError);
       return;
@@ -267,9 +267,10 @@ function Plans() {
         goals: goalsList,
         sessions,
         isActive: addForm.isActive,
+        featured: addForm.featured === true,
         matchGoals: matchGoalsList,
         matchLevel: addForm.matchLevel || addForm.level,
-        matchSport: addForm.matchSport || addForm.type,
+        matchSport: deriveOfficialMatchSport(addForm.type),
         imageUrl: addForm.imageUrl.trim(),
       };
       if (designedBy) payload.designedBy = designedBy;
@@ -555,8 +556,8 @@ function Plans() {
                   id="plan-type"
                   label="Type"
                   value={addForm.type}
-                  onChange={(event) => setAddForm((prev) => ({ ...prev, type: event.target.value, matchSport: event.target.value }))}
-                  options={typeOptions}
+                  onChange={(event) => setAddForm((prev) => ({ ...prev, type: event.target.value }))}
+                  options={officialTypeOptions}
                 />
 
                 <FormField label="Days per Week" labelFor="plan-days" required>
@@ -593,6 +594,17 @@ function Plans() {
                     <span>Active (visible to users)</span>
                   </label>
                 </FormField>
+
+                <FormField label="Featured Plan" labelFor="plan-featured" fullWidth>
+                  <label id="plan-featured" className="wwa-toggle-inline">
+                    <input
+                      type="checkbox"
+                      checked={addForm.featured}
+                      onChange={(event) => setAddForm((prev) => ({ ...prev, featured: event.target.checked }))}
+                    />
+                    <span>Highlight this official plan in featured placements</span>
+                  </label>
+                </FormField>
               </FormSection>
 
               <FormSection title="Plan Matching" columns={2}>
@@ -600,8 +612,9 @@ function Plans() {
                   <input
                     id="plan-match-sport"
                     className="wwa-input"
-                    value={addForm.matchSport}
-                    onChange={(event) => setAddForm((prev) => ({ ...prev, matchSport: event.target.value }))}
+                    value={deriveOfficialMatchSport(addForm.type)}
+                    readOnly
+                    disabled
                   />
                 </FormField>
 
@@ -711,6 +724,7 @@ function Plans() {
                   onChange={setAddSessions}
                   exerciseCatalog={exerciseCatalog}
                   mode="official"
+                  planType={addForm.type}
                 />
               </FormSection>
 
@@ -830,7 +844,7 @@ function Plans() {
                 plan={selectedPlan}
                 creatorLabel={getCreatorLabel(selectedPlan)}
                 levelOptions={levelOptions}
-                typeOptions={typeOptions}
+                typeOptions={officialTypeOptions}
                 exerciseCatalog={exerciseCatalog}
                 onClose={() => setSelectedPlanId(null)}
                 onSave={handleSavePlan}

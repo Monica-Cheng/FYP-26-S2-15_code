@@ -15,7 +15,7 @@ import PlanSessionsEditor, {
 } from './PlanSessionsEditor';
 import { formatDate } from '../utils/dateUtils';
 import { formatEquipment } from '../utils/formatUtils';
-import { parseCommaList, formatCommaList, buildDesignedBy } from '../utils/planUtils';
+import { parseCommaList, formatCommaList, buildDesignedBy, deriveOfficialMatchSport, normalizeOfficialPlanType } from '../utils/planUtils';
 
 const SET_TYPE_LABELS = { W: 'Warmup', N: 'Normal', D: 'Drop Set' };
 
@@ -429,6 +429,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
   const sessions = Array.isArray(plan.sessions) ? plan.sessions : [];
   const isCustom = !!plan.isCustom;
   const isActive = plan.isActive !== false;
+  const isFeatured = plan.featured === true;
   const designedBy = plan.designedBy && typeof plan.designedBy === 'object' ? plan.designedBy : null;
   const isEditMode = isEditing || isEditingOfficial;
   const canEdit = typeof onSave === 'function';
@@ -463,7 +464,11 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       return;
     }
 
-    const { sessions: builtSessions, error: sessionsError } = buildAndValidateCustomSessions(customSessions);
+    const { sessions: builtSessions, error: sessionsError } = buildAndValidateCustomSessions(
+      customSessions,
+      plan.type,
+      exerciseCatalog || []
+    );
     if (sessionsError) {
       setError(sessionsError);
       return;
@@ -501,15 +506,15 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       name: plan.name || '',
       description: plan.description || '',
       level: plan.level || (levelOptions && levelOptions[0]) || 'Beginner',
-      type: plan.type || (typeOptions && typeOptions[0]) || 'Gym',
+      type: normalizeOfficialPlanType(plan.type),
       daysPerWeek: plan.daysPerWeek ?? '',
       durationWeeks: plan.durationWeeks ?? '',
       equipment: formatCommaList(plan.equipment),
       goals: formatCommaList(plan.goals),
       matchGoals: formatCommaList(plan.matchGoals),
-      matchSport: plan.matchSport || plan.type || '',
       matchLevel: plan.matchLevel || plan.level || '',
       isActive: plan.isActive !== false,
+      featured: plan.featured === true,
       imageUrl: plan.imageUrl || '',
       designedByName: designedBy?.name || '',
       designedByTitle: designedBy?.title || '',
@@ -552,7 +557,12 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       return;
     }
 
-    const { sessions: builtSessions, error: sessionsError } = buildAndValidateSessions(officialSessions, days);
+    const { sessions: builtSessions, error: sessionsError } = buildAndValidateSessions(
+      officialSessions,
+      days,
+      officialForm.type,
+      exerciseCatalog || []
+    );
     if (sessionsError) {
       setError(sessionsError);
       return;
@@ -569,6 +579,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     });
 
     const changes = {};
+    const derivedMatchSport = deriveOfficialMatchSport(officialForm.type);
     if (officialForm.name.trim() !== (plan.name || '')) changes.name = officialForm.name.trim();
     if (officialForm.description.trim() !== (plan.description || '')) changes.description = officialForm.description.trim();
     if (officialForm.level !== plan.level) changes.level = officialForm.level;
@@ -581,9 +592,10 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     if (JSON.stringify(goalsList) !== JSON.stringify(existingGoals)) changes.goals = goalsList;
     const existingMatchGoals = Array.isArray(plan.matchGoals) ? plan.matchGoals : [];
     if (JSON.stringify(matchGoalsList) !== JSON.stringify(existingMatchGoals)) changes.matchGoals = matchGoalsList;
-    if (officialForm.matchSport !== (plan.matchSport || '')) changes.matchSport = officialForm.matchSport;
+    if (derivedMatchSport !== (plan.matchSport || '')) changes.matchSport = derivedMatchSport;
     if (officialForm.matchLevel !== (plan.matchLevel || '')) changes.matchLevel = officialForm.matchLevel;
     if (officialForm.isActive !== isActive) changes.isActive = officialForm.isActive;
+    if (officialForm.featured !== isFeatured) changes.featured = officialForm.featured;
     if (officialForm.imageUrl.trim() !== (plan.imageUrl || '')) changes.imageUrl = officialForm.imageUrl.trim();
     if (newDesignedBy && JSON.stringify(newDesignedBy) !== JSON.stringify(designedBy || undefined)) {
       changes.designedBy = newDesignedBy;
@@ -645,6 +657,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
           <Badge tone={levelTone(plan.level)}>{plan.level || 'Beginner'}</Badge>
           <Badge tone="brand">{plan.type || plan.category || 'General'}</Badge>
           <Badge tone={isActive ? 'success' : 'danger'}>{isActive ? 'Active' : 'Inactive'}</Badge>
+          {!isCustom && isFeatured ? <Badge tone="warning">Featured</Badge> : null}
         </div>
       </div>
     </div>
@@ -773,6 +786,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
                 onChange={setCustomSessions}
                 exerciseCatalog={exerciseCatalog || []}
                 mode="custom"
+                planType={plan.type}
               />
             </FormSection>
           </div>
@@ -808,7 +822,6 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
                   setOfficialForm((prev) => ({
                     ...prev,
                     type: event.target.value,
-                    matchSport: event.target.value,
                   }))
                 }
                 options={typeOptions || [officialForm.type]}
@@ -843,6 +856,16 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
                   <span>Active (visible to users)</span>
                 </label>
               </FormField>
+              <FormField label="Featured Plan" labelFor="official-plan-featured" fullWidth>
+                <label id="official-plan-featured" className="wwa-toggle-inline">
+                  <input
+                    type="checkbox"
+                    checked={officialForm.featured}
+                    onChange={(event) => setOfficialForm((prev) => ({ ...prev, featured: event.target.checked }))}
+                  />
+                  <span>Highlight this official plan in featured placements</span>
+                </label>
+              </FormField>
             </FormSection>
 
             <FormSection title="Plan Matching" columns={2}>
@@ -850,8 +873,9 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
                 <input
                   id="official-plan-match-sport"
                   className="wwa-input"
-                  value={officialForm.matchSport}
-                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, matchSport: event.target.value }))}
+                  value={deriveOfficialMatchSport(officialForm.type)}
+                  readOnly
+                  disabled
                 />
               </FormField>
               <FormField label="Match Level" labelFor="official-plan-match-level">
@@ -952,6 +976,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
                 onChange={setOfficialSessions}
                 exerciseCatalog={exerciseCatalog || []}
                 mode="official"
+                planType={officialForm.type}
               />
             </FormSection>
           </div>
@@ -964,6 +989,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
               <DetailRow label="Creator UID" value={plan.createdBy || undefined} />
               <DetailRow label="Duration" value={plan.durationWeeks ? `${plan.durationWeeks} weeks` : undefined} />
               <DetailRow label="Days per Week" value={plan.daysPerWeek ?? undefined} />
+              {!isCustom ? <DetailRow label="Featured" value={isFeatured ? 'Yes' : 'No'} /> : null}
               <DetailRow label="Equipment" value={formatEquipment(plan.equipment) || undefined} />
               <ListRow label="Goals" values={Array.isArray(plan.goals) ? plan.goals.filter(Boolean) : parseCommaList(plan.goals)} />
               <DetailRow label="Created" value={plan.createdAt ? formatDate(plan.createdAt) : undefined} />
@@ -973,7 +999,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
             {(plan.matchSport || plan.matchLevel || (Array.isArray(plan.matchGoals) && plan.matchGoals.length > 0)) ? (
               <section className="wwa-detail-section">
                 <div className="wwa-detail-section__title">Matching</div>
-                <DetailRow label="Match Sport" value={plan.matchSport || undefined} />
+                <DetailRow label="Match Sport" value={!isCustom ? deriveOfficialMatchSport(plan.type) : plan.matchSport || undefined} />
                 <DetailRow label="Match Level" value={plan.matchLevel || undefined} />
                 <ListRow label="Match Goals" values={Array.isArray(plan.matchGoals) ? plan.matchGoals.filter(Boolean) : parseCommaList(plan.matchGoals)} />
               </section>

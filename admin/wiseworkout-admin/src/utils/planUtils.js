@@ -1,5 +1,15 @@
 export const CARDIO_ACTIVITIES = ['Run', 'Walk', 'Cycle'];
 export const MUSCLE_OPTIONS = ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Glutes', 'Cardio'];
+export const CANONICAL_PLAN_TYPES = ['Gym', 'Cardio', 'Combine'];
+
+export function normalizeOfficialPlanType(value) {
+  if (value === 'Running') return 'Cardio';
+  return CANONICAL_PLAN_TYPES.includes(value) ? value : CANONICAL_PLAN_TYPES[0];
+}
+
+export function deriveOfficialMatchSport(type) {
+  return normalizeOfficialPlanType(type);
+}
 
 export function parseCommaList(value) {
   return (value || '').split(',').map(s => s.trim()).filter(Boolean);
