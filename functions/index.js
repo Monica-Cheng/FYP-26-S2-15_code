@@ -2200,6 +2200,13 @@ exports.adminUpdatePlan = onCall(async (request) => {
     }
 
     updateData = normalizeOfficialPlanData(merged);
+
+    if (
+      requestedChanges.designedBy !== undefined &&
+      normalizeAdminDesignedBy(requestedChanges.designedBy) === null
+    ) {
+      updateData.designedBy = FieldValue.delete();
+    }
   }
 
   await planRef.update({

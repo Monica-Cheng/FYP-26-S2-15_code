@@ -22,7 +22,13 @@ import FormSection from '../components/ui/FormSection';
 import FormField from '../components/ui/FormField';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
-import { parseCommaList, buildDesignedBy, CANONICAL_PLAN_TYPES, deriveOfficialMatchSport } from '../utils/planUtils';
+import {
+  parseCommaList,
+  buildDesignedBy,
+  CANONICAL_PLAN_TYPES,
+  deriveOfficialMatchSport,
+  getCallableErrorMessage,
+} from '../utils/planUtils';
 
 const CANONICAL_LEVELS = ['Beginner', 'Intermediate', 'Advanced'];
 const CANONICAL_TYPES = CANONICAL_PLAN_TYPES;
@@ -309,32 +315,37 @@ function Plans() {
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error(err);
-      setAddError('Failed to create plan. Please try again.');
+      setAddError(getCallableErrorMessage(err, 'Failed to create plan. Please try again.'));
     }
 
     setAddSaving(false);
   };
 
   const handleSavePlan = async (planId, changes) => {
-    const adminUpdatePlan = httpsCallable(functions, 'adminUpdatePlan');
-    const result = await adminUpdatePlan({
-      planId,
-      changes,
-    });
+    try {
+      const adminUpdatePlan = httpsCallable(functions, 'adminUpdatePlan');
+      const result = await adminUpdatePlan({
+        planId,
+        changes,
+      });
 
-    const savedPlan = result.data.plan || changes;
+      const savedPlan = result.data.plan || changes;
 
-    setPlans((prev) =>
-      prev.map((plan) =>
-        plan.id === planId
-          ? {
-              ...plan,
-              ...savedPlan,
-              updatedAt: new Date().toISOString(),
-            }
-          : plan
-      )
-    );
+      setPlans((prev) =>
+        prev.map((plan) =>
+          plan.id === planId
+            ? {
+                ...plan,
+                ...savedPlan,
+                updatedAt: new Date().toISOString(),
+              }
+            : plan
+        )
+      );
+    } catch (err) {
+      console.error(err);
+      throw new Error(getCallableErrorMessage(err, 'Failed to update plan. Please try again.'));
+    }
   };
 
   const handleDeletePlan = async (plan) => {
@@ -352,14 +363,19 @@ function Plans() {
 
     if (confirmation !== 'DELETE') return;
 
-    const adminDeletePlan = httpsCallable(functions, 'adminDeletePlan');
-    await adminDeletePlan({
-      planId: plan.id,
-    });
+    try {
+      const adminDeletePlan = httpsCallable(functions, 'adminDeletePlan');
+      await adminDeletePlan({
+        planId: plan.id,
+      });
+    } catch (err) {
+      console.error(err);
+      throw new Error(getCallableErrorMessage(err, 'Failed to delete plan. Please try again.'));
+    }
 
     setPlans((prev) => prev.filter((existing) => existing.id !== plan.id));
     setSelectedPlanId(null);
-    setSuccessMsg(`${plan.isCustom ? 'Custom' : 'Official'} plan deleted successfully`);
+    setSuccessMsg(`${sourceLabel(plan)} plan deleted successfully`);
     setTimeout(() => setSuccessMsg(''), 3000);
   };
 
@@ -425,7 +441,7 @@ function Plans() {
             : '-'
           : plan.equipment || '-',
         Type: plan.type || plan.category || '-',
-        Source: plan.isCustom ? 'Custom' : 'Official',
+        Source: sourceLabel(plan),
         Creator: creator === '—' ? '-' : creator,
       };
     });
@@ -815,7 +831,7 @@ function Plans() {
                       onChange={(event) => setSourceFilter(event.target.value)}
                       options={[
                         { value: 'all', label: 'Source: All' },
-                        { value: 'official', label: 'Source: Official' },
+                        { value: 'official', label: 'Source: Official/System' },
                         { value: 'coach', label: 'Source: Coach' },
                         { value: 'custom', label: 'Source: Custom' },
                       ]}

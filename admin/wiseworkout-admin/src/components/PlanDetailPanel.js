@@ -17,7 +17,13 @@ import PlanSessionsEditor, {
 } from './PlanSessionsEditor';
 import { formatDate } from '../utils/dateUtils';
 import { formatEquipment } from '../utils/formatUtils';
-import { parseCommaList, formatCommaList, buildDesignedBy, deriveOfficialMatchSport, normalizeOfficialPlanType } from '../utils/planUtils';
+import {
+  parseCommaList,
+  formatCommaList,
+  buildDesignedBy,
+  deriveOfficialMatchSport,
+  normalizeOfficialPlanType,
+} from '../utils/planUtils';
 
 const SET_TYPE_LABELS = { W: 'Warmup', N: 'Normal', D: 'Drop Set' };
 
@@ -606,6 +612,8 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     if (officialForm.imageUrl.trim() !== (plan.imageUrl || '')) changes.imageUrl = officialForm.imageUrl.trim();
     if (newDesignedBy && JSON.stringify(newDesignedBy) !== JSON.stringify(designedBy || undefined)) {
       changes.designedBy = newDesignedBy;
+    } else if (!newDesignedBy && designedBy) {
+      changes.designedBy = null;
     }
     if (JSON.stringify(builtSessions) !== JSON.stringify(sessions)) changes.sessions = builtSessions;
 
@@ -625,7 +633,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error(err);
-      setError('Failed to update plan. Please try again.');
+      setError(err?.message || 'Failed to update plan. Please try again.');
     }
     setOfficialSaving(false);
   };
@@ -643,7 +651,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       await onDelete(plan);
     } catch (err) {
       console.error(err);
-      setError('Failed to delete plan. Please try again.');
+      setError(err?.message || 'Failed to delete plan. Please try again.');
       setDeleting(false);
     }
   };

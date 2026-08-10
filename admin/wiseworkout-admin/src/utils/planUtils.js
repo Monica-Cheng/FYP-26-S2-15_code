@@ -55,6 +55,41 @@ export function validateOfficialWeeklySchedule(sessions, daysPerWeek, durationWe
   return null;
 }
 
+function toPositiveInteger(value) {
+  const num = Number(value);
+  return Number.isInteger(num) && num > 0 ? num : null;
+}
+
+function toNonNegativeInteger(value) {
+  const num = Number(value);
+  return Number.isInteger(num) && num >= 0 ? num : null;
+}
+
+export function calculateOfficialExerciseSeconds(exercise) {
+  if (!exercise || typeof exercise !== 'object') return 0;
+
+  if (exercise.isCardio === true) {
+    const cardioMinutes = toPositiveInteger(exercise.cardioMinutes);
+    return cardioMinutes ? cardioMinutes * 60 : 0;
+  }
+
+  const sets = toPositiveInteger(exercise.sets);
+  const estTimePerSet = toPositiveInteger(exercise.estTimePerSet);
+  const restTime = toNonNegativeInteger(exercise.restTime);
+
+  if (!sets || !estTimePerSet || restTime === null) return 0;
+  return sets * (estTimePerSet + restTime);
+}
+
+export function calculateOfficialSessionEstimatedMinutes(session) {
+  if (!session || session.isRestDay === true) return 0;
+
+  const exercises = Array.isArray(session.exercises) ? session.exercises : [];
+  const totalSeconds = exercises.reduce((sum, exercise) => sum + calculateOfficialExerciseSeconds(exercise), 0);
+
+  return totalSeconds > 0 ? Math.ceil(totalSeconds / 60) : 0;
+}
+
 export function parseCommaList(value) {
   return (value || '').split(',').map(s => s.trim()).filter(Boolean);
 }
@@ -73,4 +108,30 @@ export function buildDesignedBy({ name, title, credential, quote }) {
     quote: (quote || '').trim(),
   };
   return Object.values(trimmed).some(Boolean) ? trimmed : undefined;
+}
+
+export function getCallableErrorMessage(error, fallbackMessage) {
+  const code = typeof error?.code === 'string' ? error.code : '';
+  const message = typeof error?.message === 'string' ? error.message.trim() : '';
+
+  const safeCodes = new Set([
+    'functions/invalid-argument',
+    'functions/failed-precondition',
+    'functions/not-found',
+    'functions/already-exists',
+    'functions/permission-denied',
+    'functions/unauthenticated',
+    'invalid-argument',
+    'failed-precondition',
+    'not-found',
+    'already-exists',
+    'permission-denied',
+    'unauthenticated',
+  ]);
+
+  if (message && safeCodes.has(code)) {
+    return message.replace(/^Firebase:\s*/i, '');
+  }
+
+  return fallbackMessage;
 }

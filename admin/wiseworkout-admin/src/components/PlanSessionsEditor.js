@@ -4,6 +4,7 @@ import Badge from './ui/Badge';
 import {
   CARDIO_ACTIVITIES,
   OFFICIAL_PLAN_WEEK_LENGTH,
+  calculateOfficialSessionEstimatedMinutes,
   getRequiredOfficialDayCount,
   groupOfficialSessionsByWeek,
   validateOfficialWeeklySchedule,
@@ -55,12 +56,11 @@ function cardioEditorFromPlanExercise(exercise) {
 
 function createOfficialTrainingSession(planType) {
   const allowedKinds = getAllowedBlockKinds(planType);
-  return {
+  return withCalculatedOfficialMinutes({
     name: '',
     isRestDay: false,
-    estimatedMinutes: '45',
     exercises: allowedKinds.cardio && !allowedKinds.strength ? [emptyCardioBlock()] : [emptyExercise()],
-  };
+  });
 }
 
 function createOfficialRestSession() {
@@ -77,6 +77,13 @@ function sessionHasMeaningfulContent(session) {
   if ((session.name || '').trim()) return true;
   const exercises = Array.isArray(session.exercises) ? session.exercises : [];
   return exercises.length > 0;
+}
+
+function withCalculatedOfficialMinutes(session) {
+  return {
+    ...session,
+    estimatedMinutes: String(calculateOfficialSessionEstimatedMinutes(session)),
+  };
 }
 
 export function emptyExercise() {
@@ -124,11 +131,11 @@ export function officialSessionsNeedTruncationConfirm(sessions) {
 export function sessionsFromPlan(rawSessions) {
   const list = Array.isArray(rawSessions) ? rawSessions : [];
   return list.map((session) => {
-    const { name, isRestDay, estimatedMinutes, exercises, day, type, ...restSessionFields } = session || {};
+    const { name, isRestDay, exercises, day, type, ...restSessionFields } = session || {};
     return {
       name: isRestDay ? name || 'Rest' : name || '',
       isRestDay: !!isRestDay,
-      estimatedMinutes: estimatedMinutes !== undefined && estimatedMinutes !== null ? String(estimatedMinutes) : '0',
+      estimatedMinutes: String(calculateOfficialSessionEstimatedMinutes({ isRestDay, exercises })),
       exercises: Array.isArray(exercises)
         ? exercises.map((exercise) => {
             if (exercise && exercise.isCardio === true) {
@@ -272,14 +279,13 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek, planType
       exercises.push(builtExercise);
     }
 
-    const estimatedMinutes = Number(session.estimatedMinutes);
     built.push({
       ...session._extra,
       day: dayLabel,
       name: session.name.trim(),
       type: 'gym',
       isRestDay: false,
-      estimatedMinutes: Number.isInteger(estimatedMinutes) && estimatedMinutes >= 0 ? estimatedMinutes : 0,
+      estimatedMinutes: calculateOfficialSessionEstimatedMinutes({ isRestDay: false, exercises }),
       exercises,
     });
   }
@@ -527,10 +533,16 @@ function PlanSessionsEditorStyles() {
       .wwpse__minutes-field {
         min-width: 92px;
       }
-      .wwpse__minutes-input {
-        min-width: 92px;
-        width: 100%;
-        box-sizing: border-box;
+      .wwpse__minutes-display {
+        min-height: var(--ww-control-height);
+        padding: 10px 12px;
+        border-radius: var(--ww-radius-control);
+        border: 1px solid var(--ww-divider);
+        background: var(--ww-elevated);
+        display: flex;
+        align-items: center;
+        color: var(--ww-text);
+        font-size: var(--ww-type-body-size);
       }
       .wwpse__day-toggle {
         display: inline-flex;
@@ -679,7 +691,11 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
     : groupOfficialSessionsByWeek(sessions);
 
   const updateSession = (index, changes) => {
-    onChange(sessions.map((session, sessionIndex) => (sessionIndex === index ? { ...session, ...changes } : session)));
+    onChange(sessions.map((session, sessionIndex) => {
+      if (sessionIndex !== index) return session;
+      const updated = { ...session, ...changes };
+      return isCustomMode ? updated : withCalculatedOfficialMinutes(updated);
+    }));
   };
 
   const toggleRestDay = (index) => {
@@ -690,14 +706,14 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
         index,
         isCustomMode
           ? { isRestDay: true, name: session.name || 'Rest', exercises: [] }
-          : { isRestDay: true, name: session.name || 'Rest', estimatedMinutes: '0', exercises: [] }
+          : { isRestDay: true, name: session.name || 'Rest', exercises: [] }
       );
     } else {
       updateSession(
         index,
         isCustomMode
           ? { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, exercises: makeDefaultTrainingExercises() }
-          : { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, estimatedMinutes: '45', exercises: makeDefaultTrainingExercises() }
+          : { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, exercises: makeDefaultTrainingExercises() }
       );
     }
   };
@@ -705,7 +721,7 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
   const addDay = () => {
     const newDay = isCustomMode
       ? { name: '', isRestDay: false, type: 'gym', exercises: makeDefaultTrainingExercises(), _extra: {} }
-      : { name: '', isRestDay: false, estimatedMinutes: '45', exercises: makeDefaultTrainingExercises() };
+      : withCalculatedOfficialMinutes({ name: '', isRestDay: false, exercises: makeDefaultTrainingExercises() });
     onChange([...sessions, newDay]);
   };
 
@@ -797,15 +813,8 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
                 </label>
                 {!isCustomMode && !session.isRestDay ? (
                   <div className="wwpse__minutes-field">
-                    <label className="wwa-field-label" htmlFor={`session-minutes-${dayIndex}`}>Estimated Minutes</label>
-                    <input
-                      id={`session-minutes-${dayIndex}`}
-                      type="number"
-                      min="0"
-                      className="wwa-input wwpse__minutes-input"
-                      value={session.estimatedMinutes}
-                      onChange={(event) => updateSession(dayIndex, { estimatedMinutes: event.target.value })}
-                    />
+                    <label className="wwa-field-label">Estimated Duration</label>
+                    <div className="wwpse__minutes-display">{session.estimatedMinutes || '0'} min</div>
                   </div>
                 ) : null}
               </div>
