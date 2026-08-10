@@ -28,15 +28,31 @@ class StorageService {
   // original picked filename) so re-applying after a rejection, or
   // picking two files with the same name, can never collide/overwrite
   // an earlier upload.
+  //
+  // Explicit contentType (rather than leaving it to putFile's own
+  // inference, which isn't reliable across platforms) so a PDF opens
+  // inline/downloads correctly from its URL — e.g. in a browser, on the
+  // admin dashboard side — instead of arriving as a generic
+  // application/octet-stream blob. Same path/upload mechanism regardless
+  // of file type: a PDF is just a different extension through this same
+  // method, no separate logic needed.
   Future<String> uploadCredentialFile(String uid, File file) async {
-    final ext = file.path.contains('.') ? file.path.split('.').last : 'jpg';
+    final ext = file.path.contains('.')
+        ? file.path.split('.').last.toLowerCase()
+        : 'jpg';
+    final contentType = switch (ext) {
+      'pdf' => 'application/pdf',
+      'png' => 'image/png',
+      'jpg' || 'jpeg' => 'image/jpeg',
+      _ => 'application/octet-stream',
+    };
     final ref = _storage
         .ref()
         .child('businessPartners')
         .child(uid)
         .child('credentials')
         .child('${DateTime.now().millisecondsSinceEpoch}.$ext');
-    final task = await ref.putFile(file);
+    final task = await ref.putFile(file, SettableMetadata(contentType: contentType));
     return task.ref.getDownloadURL();
   }
 
