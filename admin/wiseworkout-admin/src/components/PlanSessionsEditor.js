@@ -80,7 +80,7 @@ function sessionHasMeaningfulContent(session) {
 }
 
 export function emptyExercise() {
-  return { name: '', muscle: '', tag: 'Primary', sets: '3', reps: '10', restTime: '60', note: '', isCardio: false };
+  return { name: '', muscle: '', tag: 'Primary', sets: '3', reps: '10', restTime: '60', estTimePerSet: '', note: '', isCardio: false };
 }
 
 export function emptyCardioBlock() {
@@ -142,6 +142,7 @@ export function sessionsFromPlan(rawSessions) {
               sets,
               reps,
               restTime,
+              estTimePerSet,
               note,
               ...restExerciseFields
             } = exercise || {};
@@ -159,6 +160,7 @@ export function sessionsFromPlan(rawSessions) {
                     : '3',
               reps: reps !== undefined && reps !== null ? String(reps) : '10',
               restTime: restTime !== undefined && restTime !== null ? String(restTime) : '60',
+              estTimePerSet: estTimePerSet !== undefined && estTimePerSet !== null ? String(estTimePerSet) : '',
               note: note || '',
               _extra: restExerciseFields,
             };
@@ -249,6 +251,13 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek, planType
       if (!Number.isInteger(restTime) || restTime < 0) {
         return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Rest Time must be a valid non-negative integer.` };
       }
+      const estTimePerSet = Number(exercise.estTimePerSet);
+      if (exercise.estTimePerSet === '' || exercise.estTimePerSet === undefined || exercise.estTimePerSet === null) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Estimated time per set is required.` };
+      }
+      if (!Number.isInteger(estTimePerSet) || estTimePerSet <= 0) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Estimated time per set must be greater than 0 seconds.` };
+      }
       const builtExercise = {
         ...exercise._extra,
         name: catalogExercise.name,
@@ -257,6 +266,7 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek, planType
         sets,
         reps,
         restTime,
+        estTimePerSet,
       };
       if (exercise.note && exercise.note.trim()) builtExercise.note = exercise.note.trim();
       exercises.push(builtExercise);
@@ -941,6 +951,17 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
                                 className="wwa-input"
                                 value={exercise.reps}
                                 onChange={(event) => updateExercise(dayIndex, exerciseIndex, { reps: event.target.value })}
+                              />
+                            </div>
+                            <div>
+                              <label className="wwa-field-label" htmlFor={`exercise-est-time-${dayIndex}-${exerciseIndex}`}>Est. Set Time (sec)</label>
+                              <input
+                                id={`exercise-est-time-${dayIndex}-${exerciseIndex}`}
+                                type="number"
+                                min="1"
+                                className="wwa-input"
+                                value={exercise.estTimePerSet}
+                                onChange={(event) => updateExercise(dayIndex, exerciseIndex, { estTimePerSet: event.target.value })}
                               />
                             </div>
                           </>
