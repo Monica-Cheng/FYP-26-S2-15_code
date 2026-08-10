@@ -1,25 +1,38 @@
 // lib/screens/settings/manage_app_screen.dart
-// Settings > "Manage App" — per-category toggles for the health data
-// WiseWorkout reads via HealthService (HealthDataType.HEART_RATE/STEPS/
-// ACTIVE_ENERGY_BURNED, see HealthService._readTypes). Each toggle is backed
-// by users/{uid}.healthCategoriesEnabled (read/written via
+// Settings > "Manage App" — a single Heart Rate toggle for the health data
+// WiseWorkout reads via HealthService (HealthDataType.HEART_RATE — the only
+// category any real call site checks; Steps/Active Calories toggles were
+// removed since nothing in the app ever read HealthService.getTodaySteps()/
+// getTodayCalories() or their corresponding healthCategoriesEnabled keys —
+// confirmed via a repo-wide grep before deleting). Backed by
+// users/{uid}.healthCategoriesEnabled.heartRate (read/written via
 // FirestoreService.isHealthCategoryEnabled()/updateUserProfile()), defaulting
 // to true so existing users see no behavior change until they actively
-// switch something off.
+// switch it off.
 //
-// This does NOT reflect real HealthKit permission state — Apple deliberately
-// never discloses whether READ access was granted for a given type (see
-// package:health's hasPermissions() doc comment), so there is no OS-level
-// state to read here. Toggling off only stops WiseWorkout's own call sites
-// (see cardio_session_screen.dart / outdoor_cardio_screen.dart) from using
-// that category — it can't revoke HealthKit access itself, which iOS also
-// has no API for (see package:health's revokePermissions() doc comment:
-// Android-only). The footer note below makes that distinction explicit.
+// This does NOT reflect real HealthKit/Health Connect permission state.
+// Apple deliberately never discloses whether READ access was granted for a
+// type (see package:health's hasPermissions() doc comment), so there is no
+// OS-level state to read on iOS; Android's Health Connect *can* disclose
+// real grant state, but this screen doesn't query it either — same
+// Firestore-boolean-only design on both platforms. Toggling off only stops
+// WiseWorkout's own call sites (see cardio_session_screen.dart /
+// outdoor_cardio_screen.dart) from using that category — it can't revoke
+// HealthKit access itself, which iOS also has no API for (see package:
+// health's revokePermissions() doc comment: Android-only). The footer note
+// below makes that distinction explicit.
 //
-// iOS-focused for now — Android's "Google Health Connect" button in
-// onboarding is a UI stub with no real permission request behind it, so
-// these toggles just gate Firestore-side usage on Android too, for
-// consistency, rather than reflecting any real platform permission there.
+// The toggle is locked (greyed out, tap shows a "Connect" snackbar) whenever
+// users/{uid}.healthConnected is false/missing. The snackbar's Connect
+// action calls HealthService().requestPermissions() directly, in place —
+// same real HealthKit/Health Connect request onboarding's health-connect
+// step performs (see onboarding_step1_screen.dart's _handleConnectHealth) —
+// rather than navigating into onboarding to trigger it. Navigating there
+// previously dropped the user into unrelated onboarding UI (and its
+// unrelated profile-creation form if they kept tapping through), and left
+// this screen showing stale locked state on return since nothing here ever
+// re-read Firestore after the fact. Connecting in place with an immediate
+// setState avoids both problems.
 
 import 'dart:io';
 
@@ -30,6 +43,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/app_theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+import '../../services/health_service.dart';
 
 const _kDivider = Color(0xFFE8EAF8);
 
@@ -46,8 +60,11 @@ class _ManageAppScreenState extends State<ManageAppScreen> {
 
   bool _isLoading = true;
   bool _heartRateEnabled = true;
-  bool _stepsEnabled = true;
-  bool _activeCaloriesEnabled = true;
+  // Set from onboarding's `healthConnected` (see
+  // onboarding_step1_screen.dart's _handleConnectHealth) — the Heart Rate
+  // toggle below is locked until this is true, since there's nothing to
+  // gate otherwise (no permission has ever been granted for this user).
+  bool _healthConnected = false;
 
   @override
   void initState() {
@@ -68,9 +85,7 @@ class _ManageAppScreenState extends State<ManageAppScreen> {
       if (mounted) {
         setState(() {
           _heartRateEnabled = categories?['heartRate'] as bool? ?? true;
-          _stepsEnabled = categories?['steps'] as bool? ?? true;
-          _activeCaloriesEnabled =
-              categories?['activeCalories'] as bool? ?? true;
+          _healthConnected = profile?['healthConnected'] as bool? ?? false;
           _isLoading = false;
         });
       }
@@ -79,9 +94,10 @@ class _ManageAppScreenState extends State<ManageAppScreen> {
     }
   }
 
-  // Always writes the full 3-key map — this screen is the only writer of
-  // healthCategoriesEnabled and always holds all 3 values in memory, so a
-  // full overwrite here can never clobber a key some other caller set.
+  // Only writes the heartRate key now — Steps/Active Calories were removed
+  // (nothing in the app ever read them; see the investigation this session
+  // started from). Still a full-map overwrite, same as before — this screen
+  // remains the only writer of healthCategoriesEnabled, so that's safe.
   Future<void> _savePrefs() async {
     final uid = _auth.getCurrentUser()?.uid;
     if (uid == null) return;
@@ -89,11 +105,60 @@ class _ManageAppScreenState extends State<ManageAppScreen> {
       await _firestore.updateUserProfile(uid, {
         'healthCategoriesEnabled': {
           'heartRate': _heartRateEnabled,
-          'steps': _stepsEnabled,
-          'activeCalories': _activeCaloriesEnabled,
         },
       });
     } catch (_) {}
+  }
+
+  // ── Locked-state prompt (health not connected yet) ──────────────────────
+
+  void _promptConnectHealth() {
+    final source = Platform.isIOS ? 'Apple Health' : 'Health Connect';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Connect $source first to use this.'),
+        behavior: SnackBarBehavior.floating,
+        action: SnackBarAction(
+          label: 'Connect',
+          onPressed: _handleConnectHealth,
+        ),
+      ),
+    );
+  }
+
+  // Requests HealthKit (iOS) / Health Connect (Android) permissions right
+  // here, no navigation — same call onboarding's own connect step makes
+  // (see onboarding_step1_screen.dart's _handleConnectHealth). Only marks
+  // connected, locally and in Firestore, if the grant actually succeeded;
+  // the immediate setState is what makes the row unlock right away instead
+  // of showing stale locked state until some future reload.
+  Future<void> _handleConnectHealth() async {
+    final granted = await HealthService().requestPermissions();
+    if (!mounted) return;
+    final source = Platform.isIOS ? 'Apple Health' : 'Health Connect';
+    if (granted) {
+      final uid = _auth.getCurrentUser()?.uid;
+      if (uid != null) {
+        try {
+          await _firestore.updateUserProfile(uid, {'healthConnected': true});
+        } catch (_) {}
+      }
+      if (!mounted) return;
+      setState(() => _healthConnected = true);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$source connected successfully!'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Couldn't connect $source. You can try again anytime."),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   @override
@@ -124,31 +189,17 @@ class _ManageAppScreenState extends State<ManageAppScreen> {
                                 _toggleRow(
                                   icon: Icons.favorite_rounded,
                                   title: 'Heart Rate',
-                                  subtitle: 'Live heart rate during workouts.',
+                                  subtitle: _healthConnected
+                                      ? 'Live heart rate during workouts.'
+                                      : Platform.isIOS
+                                          ? 'Connect Apple Health first.'
+                                          : 'Connect Health Connect first.',
                                   value: _heartRateEnabled,
                                   first: true,
+                                  enabled: _healthConnected,
+                                  onLockedTap: _promptConnectHealth,
                                   onChanged: (v) {
                                     setState(() => _heartRateEnabled = v);
-                                    _savePrefs();
-                                  },
-                                ),
-                                _toggleRow(
-                                  icon: Icons.directions_walk_rounded,
-                                  title: 'Steps',
-                                  subtitle: 'Daily step count.',
-                                  value: _stepsEnabled,
-                                  onChanged: (v) {
-                                    setState(() => _stepsEnabled = v);
-                                    _savePrefs();
-                                  },
-                                ),
-                                _toggleRow(
-                                  icon: Icons.local_fire_department_rounded,
-                                  title: 'Active Calories',
-                                  subtitle: 'Calories burned from Apple Health.',
-                                  value: _activeCaloriesEnabled,
-                                  onChanged: (v) {
-                                    setState(() => _activeCaloriesEnabled = v);
                                     _savePrefs();
                                   },
                                 ),
@@ -251,8 +302,10 @@ class _ManageAppScreenState extends State<ManageAppScreen> {
     required bool value,
     required ValueChanged<bool> onChanged,
     bool first = false,
+    bool enabled = true,
+    VoidCallback? onLockedTap,
   }) {
-    return Container(
+    final row = Container(
       constraints: const BoxConstraints(minHeight: 64),
       decoration: BoxDecoration(
         border: first
@@ -298,11 +351,25 @@ class _ManageAppScreenState extends State<ManageAppScreen> {
           ),
           CupertinoSwitch(
             value: value,
-            onChanged: onChanged,
+            onChanged: enabled ? onChanged : null,
             activeTrackColor: WW.primary,
             inactiveTrackColor: WW.border,
           ),
         ],
+      ),
+    );
+
+    if (enabled) return row;
+
+    // Locked state — greys the whole row out and swallows taps into
+    // onLockedTap (prompting the user to go connect) rather than letting
+    // any tap reach the now-disabled CupertinoSwitch underneath.
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onLockedTap,
+      child: Opacity(
+        opacity: 0.5,
+        child: IgnorePointer(child: row),
       ),
     );
   }

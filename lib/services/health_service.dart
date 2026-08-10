@@ -9,10 +9,13 @@ class HealthService {
   final Health _health = Health();
   bool _configured = false;
 
+  // Heart Rate is the only type any call site in the app actually reads —
+  // getTodaySteps()/getTodayCalories() below are unreachable dead code (no
+  // callers anywhere in the repo, confirmed by grep), so STEPS/
+  // ACTIVE_ENERGY_BURNED were dropped here to keep the OS permission
+  // dialog limited to what's actually used.
   static const List<HealthDataType> _readTypes = [
     HealthDataType.HEART_RATE,
-    HealthDataType.STEPS,
-    HealthDataType.ACTIVE_ENERGY_BURNED,
   ];
 
   /// health: ^12.0.0's `Health` class docs say `configure()` must be called

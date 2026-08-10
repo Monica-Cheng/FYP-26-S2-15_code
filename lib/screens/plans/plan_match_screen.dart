@@ -1256,16 +1256,24 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
   // Derives a real "what a typical week looks like" preview directly from
   // the matched plan's own sessions[] — replaces the old hardcoded
   // _kPreviewGym/_kPreviewRun sample data entirely. Every non-rest session
-  // in the plan is included (not just the first one) so the preview shows
-  // the plan's actual real week, matching _buildPreviewSection's existing
-  // multi-card visual format (originally 3 cards of invented sample
-  // text — now however many real training days this specific plan
-  // actually has). Output shape matches exactly what _PreviewDayCard
-  // already expects ({day, session, exercises: List<String>}), so that
-  // widget itself needed no changes.
+  // in the plan's first week is included (not just the first one) so the
+  // preview shows the plan's actual real week, matching
+  // _buildPreviewSection's existing multi-card visual format (originally 3
+  // cards of invented sample text — now however many real training days
+  // this specific plan's repeating weekly pattern actually has). Output
+  // shape matches exactly what _PreviewDayCard already expects ({day,
+  // session, exercises: List<String>}), so that widget itself needed no
+  // changes.
+  //
+  // Sliced to the first 7 entries before filtering rest days — a plan's
+  // sessions[] is a flat, multi-week array for multi-week plans (14, 21+
+  // sessions, the days-per-week pattern repeating every 7 entries), and
+  // without this slice every training day across every week would render
+  // here as if it were one week. A no-op for a normal 7-session plan.
   List<Map<String, dynamic>> _buildRealPreviewWeek(Map<String, dynamic> plan) {
     final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
     return sessions
+        .take(7)
         .whereType<Map>()
         .where((s) => s['isRestDay'] != true)
         .map((s) {
