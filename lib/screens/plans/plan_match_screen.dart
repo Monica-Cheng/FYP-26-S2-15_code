@@ -1010,12 +1010,13 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
     final level = plan['level'] as String? ?? _level;
     final daysPerWeek = (plan['daysPerWeek'] as num?)?.toInt() ?? _days;
     final durationWeeks = (plan['durationWeeks'] as num?)?.toInt() ?? 8;
+    final isCustom = plan['isCustom'] == true;
     final previewWeek = _buildRealPreviewWeek(plan);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildMatchCard(name, type, level, daysPerWeek, durationWeeks),
+        _buildMatchCard(name, type, level, daysPerWeek, durationWeeks, isCustom),
         const SizedBox(height: 12),
         _buildPreviewSection(previewWeek),
         const SizedBox(height: 20),
@@ -1161,8 +1162,8 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
     );
   }
 
-  Widget _buildMatchCard(
-      String name, String type, String level, int days, int weeks) {
+  Widget _buildMatchCard(String name, String type, String level, int days,
+      int weeks, bool isCustom) {
     return Container(
       decoration: BoxDecoration(
         gradient: const LinearGradient(
@@ -1222,7 +1223,13 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
             spacing: 6,
             runSpacing: 6,
             children: [
-              _heroChip('$days days/wk'),
+              // getPlans() (the candidate pool for this screen's matching)
+              // reads the whole plans collection, custom/coach routines
+              // included, so a custom plan can in principle end up here —
+              // its daysPerWeek is just an exercise-day count, not a real
+              // weekly constraint, so it's misleading to show as "days/wk"
+              // the same way an official plan's is.
+              if (!isCustom) _heroChip('$days days/wk'),
               _heroChip('${weeks}w programme'),
               _heroChip(level),
               _heroChip(type),

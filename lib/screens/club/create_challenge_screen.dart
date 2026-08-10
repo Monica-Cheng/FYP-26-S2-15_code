@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/constants.dart';
+import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 
@@ -142,6 +144,19 @@ class _CreateChallengeScreenState extends State<CreateChallengeScreen> {
     if (uid == null) return;
     setState(() => _isSaving = true);
     try {
+      final profile = await _firestoreService.getUserProfile(uid);
+      final isPremium = profile?['isPremium'] as bool? ?? false;
+      if (!isPremium) {
+        final createdCount =
+            await _firestoreService.getCreatedChallengeCount(uid);
+        if (createdCount >= AppConstants.freeChallengeLimit) {
+          if (mounted) {
+            setState(() => _isSaving = false);
+            await context.push(Routes.upgrade);
+          }
+          return;
+        }
+      }
       await _firestoreService.createChallenge(
         uid,
         name: _nameCtrl.text.trim(),
@@ -157,7 +172,16 @@ class _CreateChallengeScreenState extends State<CreateChallengeScreen> {
         context.pop();
         _snack('Challenge created');
       }
-    } catch (_) {
+    } catch (e) {
+      // Was a bare `catch (_)` — a real failure here (e.g. the
+      // PERMISSION_DENIED that used to come from getCreatedChallengeCount()'s
+      // old query shape, see that method's own doc comment) was previously
+      // indistinguishable from any other failure, both in the console and
+      // to the user, making this exact bug much harder to diagnose than it
+      // needed to be. Logged here so a future issue like that shows up
+      // immediately instead of needing independent investigation from
+      // scratch.
+      debugPrint('CreateChallengeScreen: _submit failed — $e');
       if (mounted) {
         setState(() => _isSaving = false);
         _snack('Something went wrong. Please try again.');

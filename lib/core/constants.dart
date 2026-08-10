@@ -32,5 +32,9 @@ class AppConstants {
   // this file directly); keep both in sync if this ever changes.
   static const int freeMessageLimit = 25;
   static const int freeRoutineLimit = 3;
-  static const int freeChallengeLimit = 1;
+  // Free-tier cap on challenges a user has CREATED (createdBy == uid) —
+  // distinct from challenges they've joined/were invited to, which don't
+  // count against this. Enforced in create_challenge_screen.dart's
+  // _submit(), via FirestoreService.getCreatedChallengeCount().
+  static const int freeChallengeLimit = 3;
 }
