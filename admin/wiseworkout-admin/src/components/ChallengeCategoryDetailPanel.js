@@ -112,7 +112,7 @@ function ChallengeCategoryDetailPanel({ category, startInEdit, usageCount, onClo
           </div>
         ) : (
           <div className="wwa-cell-actions" style={{ width: '100%' }}>
-            <button className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => onDelete(category.id)}>
+            <button className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => onDelete(category)}>
               Delete
             </button>
           </div>

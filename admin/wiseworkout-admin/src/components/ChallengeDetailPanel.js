@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React from 'react';
 import DetailDrawer from './ui/DetailDrawer';
+import Badge from './ui/Badge';
 import { formatDate } from '../utils/dateUtils';
-import { resolveCategoryDisplay, formatGoal, computeChallengeStatus, computeInviteEligibility } from '../utils/challengeUtils';
+import { resolveCategoryDisplay, formatGoal, computeChallengeStatus } from '../utils/challengeUtils';
 
 const monoStyle = { fontFamily: 'Consolas, Menlo, monospace', fontSize: '12px' };
 
@@ -15,108 +16,144 @@ function DetailRow({ label, value }) {
   );
 }
 
-// View + Delete for global challenges. Private challenges are user-owned.
-// Invite All remains preview-only until its bulk notification workflow is
-// implemented and tested securely.
-function ChallengeDetailPanel({ challenge, categories, users, onClose, onDelete }) {
-  const [showInvitePreview, setShowInvitePreview] = useState(false);
+function isChallengeDeletable(challenge) {
+  const participantCount = Array.isArray(challenge?.participantUids) ? challenge.participantUids.length : 0;
+  return challenge?.isGlobal === true && participantCount === 0;
+}
 
+function getUserDisplay(user) {
+  if (!user) return null;
+
+  const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
+  const name =
+    user.displayName ||
+    user.name ||
+    fullName ||
+    user.username ||
+    user.email ||
+    null;
+
+  const email = typeof user.email === 'string' ? user.email.trim() : '';
+
+  return {
+    name: name || 'Unknown user',
+    email,
+  };
+}
+
+function resolveCreator(challenge, usersById) {
+  const creator = usersById?.get?.(challenge?.createdBy);
+  const creatorDisplay = getUserDisplay(creator);
+
+  if (challenge?.isGlobal === true) {
+    return {
+      sourceLabel: 'Global',
+      creatorName: 'Admin',
+      creatorEmail: creatorDisplay?.email || '',
+      technicalId: challenge?.createdBy || '',
+    };
+  }
+
+  return {
+    sourceLabel: 'User-created',
+    creatorName: creatorDisplay?.name || 'Unknown user',
+    creatorEmail: creatorDisplay?.email || '',
+    technicalId: challenge?.createdBy || '',
+  };
+}
+
+function ChallengeDetailPanel({ challenge, categories, usersById, onClose, onDelete }) {
   if (!challenge) return null;
 
   const categoryDisplay = resolveCategoryDisplay(challenge.categoryId, categories);
-  const isGlobal = challenge.isGlobal === true;
   const status = computeChallengeStatus(challenge.startDate, challenge.endDate);
-  const eligibility = computeInviteEligibility(challenge, users || []);
+  const participantCount = Array.isArray(challenge.participantUids) ? challenge.participantUids.length : 0;
+  const invitedCount = Array.isArray(challenge.invitedUids) ? challenge.invitedUids.length : 0;
+  const creator = resolveCreator(challenge, usersById);
+  const deletable = isChallengeDeletable(challenge);
 
   return (
     <DetailDrawer
-      title="Challenge Detail"
+      title="Challenge View"
       open={Boolean(challenge)}
       onClose={onClose}
       viewportLocked
-      footer={
-        <div className="wwa-cell-actions" style={{ width: '100%', marginTop: 0 }}>
-          {challenge.isGlobal === true ? (
-            <button
-              className="wwa-btn wwa-btn-sm wwa-btn-danger"
-              onClick={() => onDelete(challenge)}
-            >
-              Delete
-            </button>
-          ) : (
-            <div style={{ fontSize: 12.5, color: '#9ca3af' }}>
-              Private challenges are managed by their creator.
-            </div>
-          )}
-        </div>
-      }
-    >
-      <div style={{ marginBottom: 8 }}>
-        <DetailRow label="Challenge ID" value={<span style={monoStyle}>{challenge.id}</span>} />
-        <DetailRow label="Name" value={challenge.name || challenge.title || '—'} />
-        <DetailRow
-          label="Category"
-          value={categoryDisplay.missing
-            ? <span style={{ color: '#cc8800' }}>⚠ {categoryDisplay.text} (category not found)</span>
-            : categoryDisplay.text}
-        />
-        <DetailRow
-          label="Category ID"
-          value={challenge.categoryId ? <span style={monoStyle}>{challenge.categoryId}</span> : undefined}
-        />
-        <DetailRow label="Metric Type" value={challenge.metricType || '—'} />
-        <DetailRow label="Unit" value={challenge.unit || '—'} />
-        <DetailRow label="Goal Value" value={formatGoal(challenge, categories)} />
-        <DetailRow label="Start Date" value={formatDate(challenge.startDate)} />
-        <DetailRow label="End Date" value={formatDate(challenge.endDate)} />
-        <DetailRow label="Type" value={isGlobal ? 'Global' : 'Private'} />
-        <DetailRow label="Status" value={status} />
-        <DetailRow label="Created By" value={challenge.createdBy || 'system'} />
-        <DetailRow label="Participants" value={Array.isArray(challenge.participantUids) ? challenge.participantUids.length : 0} />
-        <DetailRow label="Invited" value={Array.isArray(challenge.invitedUids) ? challenge.invitedUids.length : 0} />
-        <DetailRow label="Created At" value={formatDate(challenge.createdAt)} />
-      </div>
-
-      {isGlobal && (
-        <div style={{ marginBottom: 20 }}>
-          <div className="wwa-panel-subtitle" style={{ marginBottom: 8 }}>Invite All Users</div>
-
-          {status === 'Ended' ? (
-            <div className="wwa-alert-error">This challenge has already ended.</div>
-          ) : !showInvitePreview ? (
-            <button className="wwa-btn wwa-btn-sm wwa-btn-brand-soft" onClick={() => setShowInvitePreview(true)}>
-              Invite All Users
-            </button>
-          ) : (
-            <div style={{ background: '#f9fafb', border: '1px solid #eef0f4', borderRadius: 12, padding: 16 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#111827', marginBottom: 10 }}>
-                Invite all eligible WiseWorkout users to join this global challenge?
-              </div>
-              <DetailRow label="Challenge" value={challenge.name || challenge.title || '—'} />
-              <DetailRow label="Eligible Users" value={eligibility.eligibleCount} />
-              <DetailRow label="Already Participating" value={eligibility.participatingCount} />
-              <DetailRow label="Already Invited" value={eligibility.invitedCount} />
-              <DetailRow label="Skipped (Suspended)" value={eligibility.suspendedCount} />
-              <DetailRow label="New Invitations" value={eligibility.eligibleCount} />
-
-              <div className="wwa-alert-error" style={{ marginTop: 12 }}>
-                Sending is disabled for now — the admin-only Firestore rule for this write, and the exact
-                challenge-invite notification shape expected under users/{'{uid}'}/notifications, haven't
-                been confirmed yet. See chat for details.
-              </div>
-
-              <div className="wwa-cell-actions" style={{ marginTop: 12 }}>
-                <button className="wwa-btn wwa-btn-secondary" onClick={() => setShowInvitePreview(false)}>
-                  Cancel
-                </button>
-                <button className="wwa-btn wwa-btn-primary" disabled>
-                  Send Invitations
-                </button>
-              </div>
-            </div>
-          )}
+      summary={(
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--ww-text)' }}>
+            {challenge.name || challenge.title || 'Untitled challenge'}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <Badge tone={status === 'Active' ? 'success' : status === 'Upcoming' ? 'brand' : 'neutral'}>
+              {status}
+            </Badge>
+            <Badge tone={challenge.isGlobal === true ? 'brand' : 'neutral'}>
+              {creator.sourceLabel}
+            </Badge>
+          </div>
         </div>
       )}
+      footer={
+        deletable ? (
+          <div className="wwa-cell-actions" style={{ width: '100%', marginTop: 0 }}>
+            <button className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => onDelete?.(challenge)}>
+              Delete
+            </button>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12.5, color: '#6b7280' }}>
+            {challenge.isGlobal === true
+              ? 'Global challenges can only be deleted when they have no participants.'
+              : 'User-created challenges are managed by their creator in the mobile app.'}
+          </div>
+        )
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <section>
+          <div className="wwa-panel-subtitle" style={{ marginBottom: 10 }}>Overview</div>
+          <DetailRow
+            label="Category"
+            value={categoryDisplay.missing ? `${categoryDisplay.text} (category not found)` : categoryDisplay.text}
+          />
+          <DetailRow label="Metric" value={challenge.metricType || '—'} />
+          <DetailRow label="Goal" value={formatGoal(challenge, categories)} />
+          <DetailRow label="Unit" value={challenge.unit || '—'} />
+        </section>
+
+        <section>
+          <div className="wwa-panel-subtitle" style={{ marginBottom: 10 }}>Schedule</div>
+          <DetailRow label="Start Date" value={formatDate(challenge.startDate)} />
+          <DetailRow label="End Date" value={formatDate(challenge.endDate)} />
+          <DetailRow label="Created Date" value={formatDate(challenge.createdAt)} />
+        </section>
+
+        <section>
+          <div className="wwa-panel-subtitle" style={{ marginBottom: 10 }}>Source</div>
+          <DetailRow label="Source Type" value={creator.sourceLabel} />
+          <DetailRow label="Creator" value={creator.creatorName} />
+          <DetailRow label="Creator Email" value={creator.creatorEmail || undefined} />
+          <DetailRow
+            label="Creator UID"
+            value={creator.technicalId ? <span style={monoStyle}>{creator.technicalId}</span> : undefined}
+          />
+        </section>
+
+        <section>
+          <div className="wwa-panel-subtitle" style={{ marginBottom: 10 }}>Membership</div>
+          <DetailRow label="Participants" value={participantCount} />
+          <DetailRow label="Invited" value={invitedCount} />
+        </section>
+
+        <section>
+          <div className="wwa-panel-subtitle" style={{ marginBottom: 10 }}>Technical</div>
+          <DetailRow label="Challenge ID" value={<span style={monoStyle}>{challenge.id}</span>} />
+          <DetailRow
+            label="Category ID"
+            value={challenge.categoryId ? <span style={monoStyle}>{challenge.categoryId}</span> : undefined}
+          />
+        </section>
+      </div>
     </DetailDrawer>
   );
 }
