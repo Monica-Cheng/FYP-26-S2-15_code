@@ -23,17 +23,23 @@ function DetailRow({ label, value }) {
   );
 }
 
-function ExerciseDetailPanel({ exercise, injuryCategories, onClose }) {
-  const [gifFailed, setGifFailed] = useState(false);
+function ExerciseDetailPanel({ exercise, injuryCategories, onClose, onEdit, onDelete }) {
+  const [mediaState, setMediaState] = useState('primary');
   const exerciseId = exercise ? exercise.id : null;
 
   useEffect(() => {
-    setGifFailed(false);
+    setMediaState('primary');
   }, [exerciseId]);
 
   if (!exercise) return null;
 
-  const showGif = exercise.gifUrl && isValidGifUrl(exercise.gifUrl) && !gifFailed;
+  const gifUrl = isValidGifUrl(exercise.gifUrl) ? exercise.gifUrl : '';
+  const imageUrl = isValidGifUrl(exercise.imageUrl) ? exercise.imageUrl : '';
+  const primaryMediaUrl = gifUrl || imageUrl;
+  const fallbackMediaUrl = gifUrl && imageUrl ? imageUrl : '';
+  const mediaUrl =
+    mediaState === 'primary' ? primaryMediaUrl : mediaState === 'fallback' ? fallbackMediaUrl : '';
+  const showMedia = Boolean(mediaUrl);
   const steps = Array.isArray(exercise.instructionSteps) ? exercise.instructionSteps.filter(Boolean) : [];
   const risks = Array.isArray(exercise.injuryRisk)
     ? exercise.injuryRisk.map((risk) => resolveInjuryRiskLabel(risk, injuryCategories)).filter(Boolean)
@@ -44,18 +50,38 @@ function ExerciseDetailPanel({ exercise, injuryCategories, onClose }) {
       title="Exercise"
       open={Boolean(exercise)}
       onClose={onClose}
+      actions={
+        onEdit ? (
+          <button type="button" className="wwa-btn wwa-btn-secondary wwa-btn-sm" onClick={() => onEdit(exercise)}>
+            Edit
+          </button>
+        ) : null
+      }
+      footer={
+        onDelete ? (
+          <button type="button" className="wwa-btn wwa-btn-danger" onClick={() => onDelete(exercise)}>
+            Delete
+          </button>
+        ) : null
+      }
       summary={
         <div className="wwa-detail-summary">
           <div className="wwa-detail-summary__media">
-            {showGif ? (
+            {showMedia ? (
               <img
-                src={exercise.gifUrl}
+                src={mediaUrl}
                 alt={exercise.name || 'Exercise'}
-                onError={() => setGifFailed(true)}
+                onError={() => {
+                  if (mediaState === 'primary' && fallbackMediaUrl) {
+                    setMediaState('fallback');
+                  } else {
+                    setMediaState('failed');
+                  }
+                }}
               />
             ) : (
               <div className="wwa-detail-summary__placeholder">
-                {exercise.gifUrl ? 'GIF could not be loaded' : 'No GIF available'}
+                {gifUrl || imageUrl ? 'Media could not be loaded' : 'No media available'}
               </div>
             )}
           </div>
