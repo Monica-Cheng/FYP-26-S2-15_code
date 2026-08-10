@@ -9,6 +9,7 @@
 
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -119,6 +120,14 @@ class _CoachRegisterScreenState extends State<CoachRegisterScreen> {
           subtitle: 'Select one or more existing photos',
           onTap: _pickCredentialsFromGallery,
         ),
+        QuickAddOption(
+          icon: Icons.picture_as_pdf_rounded,
+          iconColor: const Color(0xFFDC2626),
+          iconBg: const Color(0xFFFEE2E2),
+          title: 'Upload PDF',
+          subtitle: 'Select one or more PDF documents',
+          onTap: _pickCredentialPdfs,
+        ),
       ],
       title: 'Add Credential Document',
       subtitle: 'A certificate, license, or proof of qualification',
@@ -145,6 +154,24 @@ class _CoachRegisterScreenState extends State<CoachRegisterScreen> {
     if (picked.isEmpty || !mounted) return;
     setState(() {
       _credentialFiles.addAll(picked.map((x) => File(x.path)));
+    });
+  }
+
+  // Real certificates/licenses are commonly PDFs, not photos —
+  // image_picker only handles photos/gallery, so this uses file_picker
+  // (a separate package) restricted to just 'pdf' via
+  // FileType.custom/allowedExtensions, rather than FileType.any, so a
+  // user can't attach an arbitrary/unexpected file type.
+  Future<void> _pickCredentialPdfs() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf'],
+      allowMultiple: true,
+    );
+    final paths = result?.paths.whereType<String>().toList() ?? [];
+    if (paths.isEmpty || !mounted) return;
+    setState(() {
+      _credentialFiles.addAll(paths.map((p) => File(p)));
     });
   }
 
@@ -387,11 +414,14 @@ class _CoachRegisterScreenState extends State<CoachRegisterScreen> {
         ),
       );
 
-  // Thumbnail grid of picked credential files (Image.file — local
-  // preview only, nothing uploaded yet at this point, see _submit()) plus
-  // a trailing "+" tile. Wrap (not Row) so it drops to additional rows on
-  // narrow screens instead of overflowing — same reasoning as this app's
-  // other Wrap-based pill rows (see build_routine_screen.dart).
+  // Thumbnail grid of picked credential files — an image gets a real
+  // Image.file preview (local only, nothing uploaded yet at this point,
+  // see _submit()); a PDF can't easily show a thumbnail without extra
+  // work, so it gets a generic PDF icon + filename instead, standard
+  // practice for this. Plus a trailing "+" tile. Wrap (not Row) so it
+  // drops to additional rows on narrow screens instead of overflowing —
+  // same reasoning as this app's other Wrap-based pill rows (see
+  // build_routine_screen.dart).
   Widget _buildCredentialPicker() {
     const tileSize = 72.0;
     return Wrap(
@@ -402,15 +432,7 @@ class _CoachRegisterScreenState extends State<CoachRegisterScreen> {
           Stack(
             clipBehavior: Clip.none,
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.file(
-                  _credentialFiles[i],
-                  width: tileSize,
-                  height: tileSize,
-                  fit: BoxFit.cover,
-                ),
-              ),
+              _buildCredentialTile(_credentialFiles[i], tileSize),
               Positioned(
                 top: -6,
                 right: -6,
@@ -443,6 +465,41 @@ class _CoachRegisterScreenState extends State<CoachRegisterScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildCredentialTile(File file, double tileSize) {
+    final isPdf = file.path.toLowerCase().endsWith('.pdf');
+    if (!isPdf) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.file(file, width: tileSize, height: tileSize, fit: BoxFit.cover),
+      );
+    }
+    final fileName = file.path.split('/').last;
+    return Container(
+      width: tileSize,
+      height: tileSize,
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+      decoration: BoxDecoration(
+        color: WW.elevated,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: WW.border, width: 1),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.picture_as_pdf_rounded, color: Color(0xFFDC2626), size: 26),
+          const SizedBox(height: 4),
+          Text(
+            fileName,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: WW.textSec),
+          ),
+        ],
+      ),
     );
   }
 

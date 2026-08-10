@@ -263,6 +263,25 @@ function BusinessPartners() {
                       </div>
                     )}
 
+                    {Array.isArray(partner.credentialUrls) &&
+                      partner.credentialUrls.length > 0 && (
+                      <div className="wwa-row-meta">
+                        Credentials:{' '}
+                        {partner.credentialUrls.map((url, index) => (
+                          <span key={url}>
+                            {index > 0 && ', '}
+                            <a
+                              href={url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              View {index + 1}
+                            </a>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
                     {partner.revocationReason && (
                       <div className="wwa-row-meta">
                         Last revocation reason: {partner.revocationReason}
