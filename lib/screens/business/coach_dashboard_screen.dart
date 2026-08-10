@@ -65,7 +65,25 @@ class CoachDashboardScreen extends StatelessWidget {
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded, color: WW.text, size: 20),
-          onPressed: () => context.pop(),
+          // This screen is reached via context.pushReplacement() at both
+          // coach_register_screen.dart call sites (_checkExistingApplication
+          // and _submit()) — and that replacement often lands on top of a
+          // stack the router's redirect had already collapsed to a single
+          // entry (see router.dart's pendingCoachRegistration redirect,
+          // which uses context.go()-style redirection, not a push). The
+          // result: this screen frequently has nothing beneath it to pop
+          // to, so a plain context.pop() silently no-ops — the reported
+          // "back button does nothing, page frozen" bug. Falls back to
+          // Home (always a valid destination once logged in — see
+          // router.dart's redirect, nothing gates it for a pending coach)
+          // instead of assuming a poppable stack.
+          onPressed: () {
+            if (context.canPop()) {
+              context.pop();
+            } else {
+              context.go(Routes.home);
+            }
+          },
         ),
         title: const Text('Coach Dashboard', style: WW.titleMed),
         centerTitle: true,
@@ -86,7 +104,8 @@ class CoachManagementBody extends StatefulWidget {
   State<CoachManagementBody> createState() => _CoachManagementBodyState();
 }
 
-class _CoachManagementBodyState extends State<CoachManagementBody> {
+class _CoachManagementBodyState extends State<CoachManagementBody>
+    with WidgetsBindingObserver {
   final _authService = AuthService();
   final _firestoreService = FirestoreService();
 
@@ -103,7 +122,37 @@ class _CoachManagementBodyState extends State<CoachManagementBody> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadProfile();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  // This widget is embedded inside home_screen.dart's MainShell
+  // IndexedStack as the coach-dashboard landing tab (see
+  // CoachDashboardScreen's embedded=true case) — IndexedStack keeps every
+  // tab's State alive for the whole logged-in session rather than
+  // disposing/recreating it on tab switches, so _loadProfile()'s one-time
+  // initState() fetch was the ONLY time isApproved ever got re-checked.
+  // If an admin revoked approval (isApproved: false, or deleted the
+  // businessPartners doc) while a coach's app was merely backgrounded —
+  // not force-quit — resuming it kept showing the stale cached "approved"
+  // state indefinitely, since nothing else in this widget's lifetime ever
+  // re-fetched. Re-running _loadProfile() on every foreground resume
+  // (which also naturally covers a genuine cold start via initState
+  // above) makes revocation take effect on the coach's next real app
+  // open, matching how a standalone pushed CoachDashboardScreen
+  // (Routes.coachDashboard, not embedded) already behaves correctly on
+  // every fresh navigation to it.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _loadProfile();
+    }
   }
 
   Future<void> _loadProfile() async {

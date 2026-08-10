@@ -601,24 +601,27 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
         size: const Size(360, 640),
       );
       debugPrint('[PostToFeed] label=${card.label} captured bytes=${pngBytes?.length}');
-      // Downscaled before base64-encoding for Firestore specifically — the
-      // raw capture is full-resolution (1080x1920 real pixels @
-      // pixelRatio 3.0) PNG, and PNG compresses photographic/map content
-      // poorly enough that a Map/Photo card's full-res capture can exceed
-      // Firestore's ~1 MiB per-document limit once base64-encoded
-      // (verified via test/capture_size_test.dart — a worst-case captured
-      // background landed at ~8.8MB base64; only got safely under the
-      // limit once downscaled). This is exactly what was causing the
-      // "posting to Feed" invalid-argument regression once the async-
-      // image capture race (see widget_capture.dart) was fixed and these
-      // cards started actually capturing real image content instead of a
-      // blank canvas. Share (native OS share sheet) has no such
-      // constraint and stays full-resolution — only this Post-to-Feed
-      // path downscales.
+      // Re-encoded as JPEG (via encodeCapturedCardBase64, not the old
+      // PNG-based encodeImageBytesBase64) before base64-encoding for
+      // Firestore specifically — the raw capture is full-resolution
+      // (1080x1920 real pixels @ pixelRatio 3.0), and PNG compresses
+      // photographic/map content poorly enough that a Map/Photo card's
+      // full-res capture can exceed Firestore's ~1 MiB per-document limit
+      // once base64-encoded. JPEG's compression is far more efficient for
+      // that same photographic content, which is what let this switch
+      // from a blurry, hard-downscaled 240px PNG to a compress-until-
+      // under-budget cascade that starts at full 1080px resolution — see
+      // encodeCapturedCardBase64's own doc comment. This is exactly what
+      // was causing the "posting to Feed" invalid-argument regression
+      // once the async-image capture race (see widget_capture.dart) was
+      // fixed and these cards started actually capturing real image
+      // content instead of a blank canvas. Share (native OS share sheet)
+      // has no such constraint and stays full-resolution — only this
+      // Post-to-Feed path re-encodes.
       final imageBase64 = pngBytes != null
-          ? await encodeImageBytesBase64(pngBytes)
+          ? await encodeCapturedCardBase64(pngBytes)
           : null;
-      debugPrint('[PostToFeed] label=${card.label} downscaled imageBase64 '
+      debugPrint('[PostToFeed] label=${card.label} re-encoded imageBase64 '
           'length=${imageBase64?.length}');
 
       await FirestoreService().createFeedPost(

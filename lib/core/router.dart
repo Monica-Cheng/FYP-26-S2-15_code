@@ -128,6 +128,30 @@ class Routes {
 String? _lastGymSessionIdentity;
 ValueKey<String>? _lastGymSessionKey;
 
+// Same machinery, same reasoning, as _lastGymSessionIdentity/
+// _lastGymSessionKey above — see that pair's own doc comment for the full
+// history this mirrors. Added after a crash ('!keyReservation.contains
+// (key)': is not true) traced to Routes.cardioSetup previously using a
+// plain builder: (go_router's default path-only pageKey, identical on
+// every push regardless of `extra`) — two pushes of this route ended up
+// trying to reserve the same key simultaneously. Identity here is
+// sessionRunId+blockId (falling back to 'standalone' when either is
+// absent — plans_screen.dart's own cardio-setup entry point pushes this
+// route with no `extra` at all, unlike gym_session_screen.dart's plan-
+// linked entry point) rather than gymSession's forceRefresh-style
+// always-fresh token: unlike gymSession's mid-plan "Next" button, there's
+// no legitimate case here where the SAME block/session needs to be
+// treated as a fresh identity on every visit — a genuine repeat visit to
+// the same block only happens after the earlier CardioSetupScreen page
+// was already popped (removed from the stack entirely), so reusing the
+// same key then is safe; it's only TWO SIMULTANEOUS pushes for the same
+// block (the double-tap crash this fixes) that this identity caching
+// guards against, and gym_session_screen.dart's own onTap now also
+// guards against that directly (defense in depth, not relying on this
+// alone).
+String? _lastCardioSetupIdentity;
+ValueKey<String>? _lastCardioSetupKey;
+
 // Set by coach_register_screen.dart's "sign in first" gate (its Create
 // Account / I already have an account buttons) so the redirect below can
 // route to coach registration instead of Home once auth genuinely
@@ -438,7 +462,35 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: Routes.cardioSetup,
-        builder: (context, state) => const CardioSetupScreen(),
+        // pageBuilder + cached identity-based key — see
+        // _lastCardioSetupIdentity/_lastCardioSetupKey's own doc comment
+        // above for why (fixes a real '!keyReservation.contains(key)'
+        // crash from two rapid pushes of this route colliding on the
+        // previous plain builder:'s identical default path-only key).
+        pageBuilder: (context, state) {
+          final extra = state.extra as Map<String, dynamic>?;
+          final sessionRunId = extra?['sessionRunId'] as String?;
+          final blockId = extra?['blockId'] as String?;
+          final identity = sessionRunId != null && blockId != null
+              ? '$sessionRunId-$blockId'
+              : 'standalone';
+
+          final ValueKey<String> key;
+          if (_lastCardioSetupIdentity == identity &&
+              _lastCardioSetupKey != null) {
+            key = _lastCardioSetupKey!;
+          } else {
+            key = ValueKey(
+                'cardio-setup-$identity-${DateTime.now().microsecondsSinceEpoch}');
+            _lastCardioSetupIdentity = identity;
+            _lastCardioSetupKey = key;
+          }
+
+          return MaterialPage(
+            key: key,
+            child: const CardioSetupScreen(),
+          );
+        },
       ),
       GoRoute(
         path: Routes.cardioSession,

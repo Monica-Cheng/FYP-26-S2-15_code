@@ -7,18 +7,37 @@ class HealthService {
   HealthService._internal();
 
   final Health _health = Health();
+  bool _configured = false;
 
+  // Heart Rate is the only type any call site in the app actually reads —
+  // getTodaySteps()/getTodayCalories() below are unreachable dead code (no
+  // callers anywhere in the repo, confirmed by grep), so STEPS/
+  // ACTIVE_ENERGY_BURNED were dropped here to keep the OS permission
+  // dialog limited to what's actually used.
   static const List<HealthDataType> _readTypes = [
     HealthDataType.HEART_RATE,
-    HealthDataType.STEPS,
-    HealthDataType.ACTIVE_ENERGY_BURNED,
   ];
 
-  /// Request HealthKit permissions. Returns true if granted, false otherwise.
-  /// Always returns false on Android or simulator.
+  /// health: ^12.0.0's `Health` class docs say `configure()` must be called
+  /// before any other method — cheap, only needs to run once per app launch.
+  Future<void> _ensureConfigured() async {
+    if (_configured) return;
+    await _health.configure();
+    _configured = true;
+  }
+
+  /// Request HealthKit (iOS) or Health Connect (Android) permissions for
+  /// _readTypes. Returns true only if the grant actually succeeded — on iOS
+  /// that means the permission dialog was shown without error (HealthKit
+  /// never discloses real READ grant state); on Android it reflects the
+  /// real Health Connect grant, since Health Connect's permission API can
+  /// disclose it. `requestAuthorization` throws on Android if the Health
+  /// Connect app isn't installed on the device — caught below, same as any
+  /// other failure.
   Future<bool> requestPermissions() async {
-    if (!Platform.isIOS) return false;
+    if (!Platform.isIOS && !Platform.isAndroid) return false;
     try {
+      await _ensureConfigured();
       final requested = await _health.requestAuthorization(_readTypes);
       return requested;
     } catch (_) {

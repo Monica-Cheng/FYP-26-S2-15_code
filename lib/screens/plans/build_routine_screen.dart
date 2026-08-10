@@ -12,7 +12,7 @@ import '../../services/firestore_service.dart';
 // ── Exercise library ───────────────────────────────────────────────────────────
 
 const _kMuscleFilters = [
-  'All', 'Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Glutes', 'Cardio',
+  'All', 'Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Core', 'Glutes',
 ];
 
 // ── Muscle color helpers ───────────────────────────────────────────────────────
@@ -217,7 +217,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         final rawSets = ex['sets'];
         final List<Map<String, dynamic>> sets;
         if (rawSets is List && rawSets.isNotEmpty) {
-          sets = (rawSets as List<dynamic>).map((s) {
+          sets = rawSets.map((s) {
             final sm = s as Map<String, dynamic>;
             final sid = _nextId();
             return <String, dynamic>{
@@ -236,6 +236,13 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           'name': ex['name'] as String? ?? '',
           'muscle': ex['muscle'] as String? ?? '',
           'restTime': (ex['restTime'] as num?)?.toInt() ?? 90,
+          // Preserves whatever this exercise was actually saved with —
+          // without this, re-opening an existing routine for edit would
+          // silently reset every exercise back to the 'Primary' default
+          // the moment it's saved again, discarding any Accessory choice
+          // made in an earlier edit.
+          'tag': ex['tag'] as String? ?? 'Primary',
+          'estTimePerSet': (ex['estTimePerSet'] as num?)?.toString() ?? '45',
           'sets': sets,
         };
       }).toList();
@@ -244,6 +251,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         'id': _nextId(),
         'label': session['day'] as String? ?? session['name'] as String? ?? 'Day',
         'exercises': exercises,
+        'isRestDay': session['isRestDay'] == true,
       };
     }).toList();
 
@@ -270,6 +278,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         'id': _nextId(),
         'label': label,
         'exercises': <Map<String, dynamic>>[],
+        'isRestDay': false,
       };
 
   Map<String, dynamic> _newExercise(String name, String muscle) => {
@@ -277,6 +286,19 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         'name': name,
         'muscle': muscle,
         'restTime': 90,
+        // Safe default — matches admin-authored plans' own default (see
+        // PlanSessionsEditor.js's emptyExercise()). No equivalent field on
+        // cardio blocks (see _addCardioBlock) — compression handles cardio
+        // via duration override, not removal, so tagging one Accessory
+        // would have no effect.
+        'tag': 'Primary',
+        // Realistic full time per set in seconds, including transition/
+        // setup — feeds _computeEstimatedMinutes() below. String-typed to
+        // match how kg/reps are already edited as free-text TextFields in
+        // this builder (see _buildSetRow), not int-typed like restTime,
+        // which uses a picker instead of free text. No equivalent field on
+        // cardio blocks — their time is cardioMinutes directly, unchanged.
+        'estTimePerSet': '45',
         'sets': <Map<String, dynamic>>[
           _newSet(),
         ],
@@ -302,8 +324,8 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
 
   // ── Computed ───────────────────────────────────────────────────────────────
 
-  bool get _canSave =>
-      _days.any((d) => (d['exercises'] as List).isNotEmpty);
+  bool get _canSave => _days.any(
+      (d) => d['isRestDay'] != true && (d['exercises'] as List).isNotEmpty);
 
   List<Map<String, dynamic>> get _currentExercises =>
       List<Map<String, dynamic>>.from(
@@ -504,6 +526,33 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
     });
   }
 
+  // Marking a day rest clears its exercises (with the same controller
+  // cleanup _deleteDay() does) rather than leaving them stripped only at
+  // save time in _saveRoutine() — keeping isRestDay and "has exercises"
+  // mutually exclusive in _days itself, not just in the saved payload,
+  // is what keeps _canSave and _saveRoutine's own activeDays/daysPerWeek
+  // count (which filters on the in-memory exercises list, not isRestDay)
+  // correct with no changes needed there. Unmarking just flips the flag
+  // back — nothing to restore, since a rest day never has exercises to
+  // begin with.
+  void _toggleRestDay(int dayIdx) {
+    final day = _days[dayIdx];
+    final markingRest = day['isRestDay'] != true;
+    if (markingRest) {
+      final exercises = day['exercises'] as List<Map<String, dynamic>>;
+      for (final ex in exercises) {
+        for (final s in (ex['sets'] as List<Map<String, dynamic>>)) {
+          _removeCtrlsForSet(s);
+        }
+      }
+    }
+    setState(() {
+      day['isRestDay'] = markingRest;
+      if (markingRest) (day['exercises'] as List).clear();
+      _hasChanges = true;
+    });
+  }
+
   // ── Rest timer picker ──────────────────────────────────────────────────────
 
   void _showRestPicker(int exIdx) {
@@ -641,6 +690,40 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         onAdd: (name, muscle) {
           Navigator.of(ctx).pop();
           _addExercise(name, muscle);
+        },
+      ),
+    );
+  }
+
+  // Same picker as _showExerciseSheet() above, but splices the selection
+  // into exIdx's existing slot instead of appending — this is what keeps
+  // the replaced exercise's position in the day, unlike Add which always
+  // goes to the end. Runs the same controller-disposal cleanup
+  // _deleteExercise() does for the outgoing exercise before overwriting it,
+  // so no stale kg/reps controllers leak for the exercise being replaced.
+  void _replaceExercise(int exIdx) {
+    final currentNames = _currentExercises.map((e) => e['name'] as String).toSet();
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: WW.card,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => _ExerciseSearchSheet(
+        alreadyAdded: currentNames,
+        onAdd: (name, muscle) {
+          Navigator.of(ctx).pop();
+          final outgoing = _currentExercises[exIdx];
+          for (final s in (outgoing['sets'] as List<Map<String, dynamic>>)) {
+            _removeCtrlsForSet(s);
+          }
+          setState(() {
+            (_days[_activeDay]['exercises']
+                as List<Map<String, dynamic>>)[exIdx] = _newExercise(name, muscle);
+            _hasChanges = true;
+          });
         },
       ),
     );
@@ -821,6 +904,30 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
 
   // ── Save ───────────────────────────────────────────────────────────────────
 
+  // Computes a session's estimatedMinutes from its already-finalized
+  // exercises list (the same shape about to be written to Firestore, with
+  // sets/restTime/estTimePerSet/cardioMinutes all resolved) — cardio blocks
+  // contribute their real cardioMinutes directly, unchanged; every other
+  // exercise contributes sets.length × (estTimePerSet + restTime) seconds.
+  // Mirrors compress_utils.dart's estimatedMinutesAfterCompression(), which
+  // uses this exact same formula to compute a real (not flat/assumed) time
+  // saving when an exercise like this is removed via Compress Workout.
+  int _computeEstimatedMinutes(List<Map<String, dynamic>> exercises) {
+    var totalSeconds = 0;
+    for (final ex in exercises) {
+      if (ex['isCardio'] == true) {
+        final cardioMinutes = (ex['cardioMinutes'] as num?)?.toInt() ?? 0;
+        totalSeconds += cardioMinutes * 60;
+      } else {
+        final sets = ex['sets'] as List<dynamic>? ?? [];
+        final estTimePerSet = (ex['estTimePerSet'] as num?)?.toInt() ?? 0;
+        final restTime = (ex['restTime'] as num?)?.toInt() ?? 0;
+        totalSeconds += sets.length * (estTimePerSet + restTime);
+      }
+    }
+    return (totalSeconds / 60).round();
+  }
+
   Future<void> _saveRoutine() async {
     if (_routineName.trim().isEmpty) {
       _snack('Please enter a routine name');
@@ -860,8 +967,15 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
       final sessions = _days.asMap().entries.map((entry) {
         final i = entry.key;
         final day = entry.value;
-        final exercises =
-            (day['exercises'] as List<Map<String, dynamic>>).map((ex) {
+        final isRest = day['isRestDay'] == true;
+        // A rest day is always saved with an empty exercises list,
+        // regardless of whatever might still be sitting in this day's
+        // in-memory state (e.g. exercises added before the day was marked
+        // rest) — the UI already keeps the two states from being entered
+        // together, but the save shape shouldn't rely on that alone.
+        final exercises = isRest
+            ? <Map<String, dynamic>>[]
+            : (day['exercises'] as List<Map<String, dynamic>>).map((ex) {
           final sets = (ex['sets'] as List<Map<String, dynamic>>).map((s) {
             final sid = s['id'] as String;
             return {
@@ -871,11 +985,23 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
             };
           }).toList();
 
+          final exId = ex['id'] as String;
           return {
             'name': ex['name'],
             'muscle': ex['muscle'],
             'restTime': ex['restTime'],
-            'tag': 'Primary',
+            // No tag at all for cardio blocks — matches admin-authored
+            // plans' own emptyCardioBlock() default (no tag field),
+            // consistent with compression treating cardio as a duration
+            // override rather than something to remove.
+            if (ex['isCardio'] != true) ...{
+              'tag': ex['tag'] as String? ?? 'Primary',
+              'estTimePerSet': int.tryParse(
+                      _controllers['${exId}_estTimePerSet']?.text ??
+                          ex['estTimePerSet'] as String? ??
+                          '') ??
+                  0,
+            },
             'sets': sets,
             if (ex['isCardio'] == true) ...{
               'isCardio': true,
@@ -886,11 +1012,12 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         }).toList();
 
         return {
-          'name': day['label'],
+          'name': isRest ? 'Rest' : day['label'],
           'day': 'Day ${i + 1}',
-          'type': 'gym',
-          'isRestDay': false,
+          'type': isRest ? 'rest' : 'gym',
+          'isRestDay': isRest,
           'exercises': exercises,
+          'estimatedMinutes': _computeEstimatedMinutes(exercises),
         };
       }).toList();
 
@@ -1108,10 +1235,12 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
             child: _DayTab(
               label: _days[i]['label'] as String,
               active: active,
+              isRestDay: _days[i]['isRestDay'] == true,
               canDelete: _days.length > 1,
               onTap: () => setState(() => _activeDay = i),
               onRename: () => _showDayRenameDialog(i),
               onDelete: () => _deleteDay(i),
+              onToggleRest: () => _toggleRestDay(i),
             ),
           );
         },
@@ -1122,6 +1251,10 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
   // ── Exercise list ──────────────────────────────────────────────────────────
 
   Widget _buildExerciseList() {
+    if (_days[_activeDay]['isRestDay'] == true) {
+      return _buildRestDayState();
+    }
+
     final exercises = _currentExercises;
 
     if (exercises.isEmpty) {
@@ -1141,6 +1274,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
             getCtrl: _ctrl,
             onChanged: () => setState(() => _hasChanges = true),
             onDelete: () => _deleteExercise(exIdx),
+            onReplace: () => _replaceExercise(exIdx),
             onDeleteSet: (set) {
               _removeCtrlsForSet(set);
               setState(() => _hasChanges = true);
@@ -1193,9 +1327,75 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
     );
   }
 
+  // Same layout as _buildEmptyDayState() above, swapped for rest-day
+  // iconography/copy — shown instead of the exercise list/empty state
+  // whenever the active day is marked rest (see _buildExerciseList()).
+  Widget _buildRestDayState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 64,
+              height: 64,
+              decoration: BoxDecoration(
+                color: WW.chipBg,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Center(
+                child: Icon(Icons.nightlight_round,
+                    size: 30, color: WW.primary),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Rest Day',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                color: WW.text,
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'No exercises on a rest day. Unmark it from\nthe day tab above to add a workout.',
+              style: TextStyle(fontSize: 13, color: WW.textSec, height: 1.5),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ── Footer ─────────────────────────────────────────────────────────────────
 
   Widget _buildFooter() {
+    final isActiveDayRest = _days[_activeDay]['isRestDay'] == true;
+    if (isActiveDayRest) {
+      return Container(
+        color: WW.card,
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+            child: Center(
+              child: Text(
+                'Rest day — no exercises to add',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: WW.textSec,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return Container(
       color: WW.card,
       child: SafeArea(
@@ -1275,18 +1475,22 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
 class _DayTab extends StatefulWidget {
   final String label;
   final bool active;
+  final bool isRestDay;
   final bool canDelete;
   final VoidCallback onTap;
   final VoidCallback onRename;
   final VoidCallback onDelete;
+  final VoidCallback onToggleRest;
 
   const _DayTab({
     required this.label,
     required this.active,
+    required this.isRestDay,
     required this.canDelete,
     required this.onTap,
     required this.onRename,
     required this.onDelete,
+    required this.onToggleRest,
   });
 
   @override
@@ -1359,6 +1563,16 @@ class _DayTabState extends State<_DayTab> {
                           onTap: () {
                             _closeMenu();
                             widget.onRename();
+                          },
+                        ),
+                        _menuItem(
+                          icon: Icons.nightlight_round,
+                          label: widget.isRestDay
+                              ? 'Unmark Rest Day'
+                              : 'Mark as Rest Day',
+                          onTap: () {
+                            _closeMenu();
+                            widget.onToggleRest();
                           },
                         ),
                         if (widget.canDelete)
@@ -1436,6 +1650,18 @@ class _DayTabState extends State<_DayTab> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // Same nightlight_round icon plan_schedule_screen.dart's
+              // _ScheduleDayCard already uses for its rest-day badge — kept
+              // to just an icon here (no separate pill/background) since
+              // this tab is already a compact, self-contained pill.
+              if (widget.isRestDay) ...[
+                Icon(
+                  Icons.nightlight_round,
+                  size: 13,
+                  color: widget.active ? Colors.white70 : WW.textSec,
+                ),
+                const SizedBox(width: 5),
+              ],
               Text(
                 widget.label,
                 style: TextStyle(
@@ -1470,6 +1696,7 @@ class _ExerciseCard extends StatefulWidget {
   final TextEditingController Function(String key, String initial) getCtrl;
   final VoidCallback onChanged;
   final VoidCallback onDelete;
+  final VoidCallback onReplace;
   final void Function(Map<String, dynamic> set) onDeleteSet;
   final VoidCallback onShowRest;
   final void Function(String msg) onSnack;
@@ -1480,6 +1707,7 @@ class _ExerciseCard extends StatefulWidget {
     required this.getCtrl,
     required this.onChanged,
     required this.onDelete,
+    required this.onReplace,
     required this.onDeleteSet,
     required this.onShowRest,
     required this.onSnack,
@@ -1531,6 +1759,16 @@ class _ExerciseCardState extends State<_ExerciseCard> {
     widget.onChanged();
   }
 
+  // Toggles this exercise between Primary/Accessory — same tap-to-cycle
+  // pattern as _cycleType() above, just a 2-value cycle instead of 3. No
+  // equivalent exists (or is called) for cardio blocks — see the tag pill's
+  // own `if (!isCardio)` gate in build() below.
+  void _cycleTag() {
+    final current = _ex['tag'] as String? ?? 'Primary';
+    _ex['tag'] = current == 'Accessory' ? 'Primary' : 'Accessory';
+    widget.onChanged();
+  }
+
   void _toggleMenu() {
     if (_menuOpen) {
       _closeMenu();
@@ -1574,7 +1812,7 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                           label: 'Replace Exercise',
                           onTap: () {
                             _closeMenu();
-                            widget.onSnack('Replace coming soon');
+                            widget.onReplace();
                           },
                         ),
                         _menuItem(
@@ -1609,15 +1847,20 @@ class _ExerciseCardState extends State<_ExerciseCard> {
 
   @override
   Widget build(BuildContext context) {
+    final exId = _ex['id'] as String;
     final name = _ex['name'] as String? ?? '';
     final muscle = _ex['muscle'] as String? ?? '';
     final restTime = _ex['restTime'] as int? ?? 90;
     final isCardio = _ex['isCardio'] as bool? ?? false;
     final cardioActivity = _ex['cardioActivity'] as String? ?? '';
     final cardioMinutes = _ex['cardioMinutes'] as int? ?? 30;
+    final tag = _ex['tag'] as String? ?? 'Primary';
+    final isAccessory = tag == 'Accessory';
     final mc = _muscleColor(muscle);
     final mb = _muscleBg(muscle);
     final isOff = restTime == 0;
+    final estTimeCtrl = widget.getCtrl(
+        '${exId}_estTimePerSet', _ex['estTimePerSet'] as String? ?? '45');
 
     return Stack(
       children: [
@@ -1669,9 +1912,17 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                         ),
                       ),
                       if (!isCardio) ...[
-                      const SizedBox(height: 2),
-                      // Rest timer pill
-                      GestureDetector(
+                      const SizedBox(height: 4),
+                      // Rest timer pill + Primary/Accessory tag pill — Wrap
+                      // (not Row) so the two pills fall to a second line
+                      // instead of overflowing on narrow screens (see the
+                      // Small_Phone-profile overflow lessons elsewhere in
+                      // this app).
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: [
+                          GestureDetector(
                         onTap: widget.onShowRest,
                         child: Container(
                           padding: const EdgeInsets.symmetric(
@@ -1708,6 +1959,53 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                             ],
                           ),
                         ),
+                          ),
+                          // Primary/Accessory tag pill — tap to cycle, same
+                          // interaction pattern as a set's type cycling
+                          // (_cycleType). Determines whether Compress can
+                          // ever offer to remove this exercise; defaults to
+                          // Primary (never removed) until the user marks it
+                          // otherwise.
+                          GestureDetector(
+                            onTap: () => setState(() => _cycleTag()),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: isAccessory ? WW.elevated : WW.chipBg,
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: isAccessory
+                                      ? WW.border
+                                      : WW.primary.withValues(alpha: 0.3),
+                                  width: 0.5,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    isAccessory
+                                        ? Icons.low_priority_rounded
+                                        : Icons.push_pin_rounded,
+                                    size: 10,
+                                    color: isAccessory ? WW.textSec : WW.primary,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    tag,
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                      color:
+                                          isAccessory ? WW.textSec : WW.primary,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                     ],
@@ -1790,6 +2088,66 @@ class _ExerciseCardState extends State<_ExerciseCard> {
               ),
             ),
           ] else ...[
+            // ── Est. time per set ────────────────────────────────────────────
+            // Feeds _computeEstimatedMinutes()'s sets_count × (estTimePerSet
+            // + restTime) formula — a plain free-typed field (matching
+            // kg/reps' TextField style below) rather than a picker like
+            // restTime's, since this is a new field with no existing bottom-
+            // sheet component to reuse and a picker felt like more machinery
+            // than a rarely-fussed-over seconds value warrants.
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 4, 14, 6),
+              child: Row(
+                children: [
+                  const Text(
+                    'Est. time/set',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: WW.textSec,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    width: 56,
+                    height: 30,
+                    child: TextField(
+                      controller: estTimeCtrl,
+                      keyboardType: TextInputType.number,
+                      textAlign: TextAlign.center,
+                      onChanged: (v) {
+                        _ex['estTimePerSet'] = v;
+                        widget.onChanged();
+                      },
+                      decoration: InputDecoration(
+                        isDense: true,
+                        contentPadding: EdgeInsets.zero,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(7),
+                          borderSide: const BorderSide(color: WW.border, width: 1),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(7),
+                          borderSide: const BorderSide(color: WW.border, width: 1),
+                        ),
+                        filled: true,
+                        fillColor: WW.bg,
+                      ),
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: WW.text,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  const Text(
+                    'sec',
+                    style: TextStyle(fontSize: 11, color: WW.textSec),
+                  ),
+                ],
+              ),
+            ),
             // ── Set table header ─────────────────────────────────────────────
             const Padding(
               padding: EdgeInsets.fromLTRB(14, 4, 14, 2),
@@ -2107,6 +2465,7 @@ class _ExerciseSearchSheetState extends State<_ExerciseSearchSheet> {
     return _allExercises.where((e) {
       final name = (e['name'] as String?) ?? '';
       final muscle = (e['muscle'] as String?) ?? 'Other';
+      if (muscle == 'Cardio') return false;
       final nameMatch = _query.isEmpty ||
           name.toLowerCase().contains(_query.toLowerCase());
       final muscleMatch = _muscleFilter == 'All' || muscle == _muscleFilter;

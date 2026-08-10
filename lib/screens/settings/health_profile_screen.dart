@@ -627,6 +627,24 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
     } catch (_) {}
   }
 
+  // Mirrors _onCalorieToggle() above — persists the on/off state itself
+  // immediately on every flip, independent of _saveWeightGoal()'s "Save
+  // Weight Goal" button (which only saves goalWeight/goalDate, and is
+  // only rendered while this is on). Previously the switch only updated
+  // local state, with no write path at all for turning it off — the
+  // button that could persist that was itself hidden the instant the
+  // toggle went off, so an OFF state could never actually reach
+  // Firestore and always silently reverted to the last-saved ON value
+  // on the next load.
+  Future<void> _onWeightGoalToggle(bool val) async {
+    setState(() => _weightGoalActive = val);
+    final uid = _auth.getCurrentUser()?.uid;
+    if (uid == null) return;
+    try {
+      await _firestore.updateHealthData({'weightGoalActive': val});
+    } catch (_) {}
+  }
+
   void _autoCalcFromDaily() {
     final daily = int.tryParse(_dailyCalCtrl.text) ?? 0;
     if (daily > 0) {
@@ -1479,8 +1497,7 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
               ),
               Switch(
                 value: _weightGoalActive,
-                onChanged: (val) =>
-                    setState(() => _weightGoalActive = val),
+                onChanged: _onWeightGoalToggle,
                 activeColor: WW.teal,
               ),
             ],
@@ -1661,7 +1678,14 @@ class _HealthProfileScreenState extends State<HealthProfileScreen> {
       children: [
         _sectionHeader('Fitness Preferences'),
         const Text(
-          'These preferences influence WiseCoach recommendations and plan matching.',
+          // Was "...influence WiseCoach recommendations and plan
+          // matching." — WiseCoach never reads any of these fields
+          // (grepped for every consumer; there are none), and only Sport
+          // does anything for plan matching today, as a one-time initial
+          // default for Plan Match's own sport survey (see
+          // plan_match_screen.dart's _loadSavedPrefs()), not an ongoing
+          // sync. Softened to avoid claiming more than that.
+          'Your sport preference helps set your starting point in Plan Match.',
           style: TextStyle(
             fontSize: 12,
             color: WW.textSec,

@@ -1,5 +1,6 @@
 // lib/screens/plans/explore_screen.dart
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -7,6 +8,24 @@ import '../../core/app_theme.dart';
 import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+
+// ── Shared category theming ─────────────────────────────────────────────────
+// Single source of truth for the Gym/Cardio/Combine icon, reused by the
+// inline sport chip icon, the vertical list card's image-fallback tile, and
+// the Featured card's image-fallback background — was previously duplicated
+// per-widget as _PlanCard._sportIcon.
+IconData _categoryIcon(String sport) {
+  switch (sport.toLowerCase()) {
+    case 'cardio':
+      return Icons.directions_run_rounded;
+    case 'combine':
+      return Icons.merge_type_rounded;
+    case 'gym':
+      return Icons.fitness_center_rounded;
+    default:
+      return Icons.sports_rounded;
+  }
+}
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
@@ -88,7 +107,11 @@ class _ExploreScreenState extends State<ExploreScreen> {
   }
 
   // All plans: real non-custom Firestore plans only — the "coming soon"
-  // catalog filler (_kCatalogPlans) has been removed.
+  // catalog filler (_kCatalogPlans) has been removed. This also acts as
+  // the belt-and-suspenders guard for _featuredPlans below: custom/coach
+  // plans can never have featured:true written to them server-side (not
+  // in their write allowlist), but excluding isCustom docs here too means
+  // _featuredPlans never trusts a forged/bad client write either.
   List<Map<String, dynamic>> get _allPlans =>
       _firestorePlans.where((p) => p['isCustom'] != true).toList();
 
@@ -130,26 +153,33 @@ class _ExploreScreenState extends State<ExploreScreen> {
         return sport == 'gym';
       }).toList();
 
-  List<Map<String, dynamic>> get _runningPlans =>
+  List<Map<String, dynamic>> get _cardioPlans =>
       _allPlans.where((p) {
         final sport = (p['sport'] ?? p['type'] ?? '').toString().toLowerCase();
-        return sport == 'running';
+        return sport == 'cardio';
       }).toList();
 
-  // Featured: first 3 gym/running plans from Firestore (up to 2 gym + 1
-  // running) — degrades gracefully to fewer than 3 if there aren't enough
-  // real plans yet (.take() never throws on a shorter list).
-  List<Map<String, dynamic>> get _featuredPlans {
-    final gym = _gymPlans.take(2).toList();
-    final run = _runningPlans.take(1).toList();
-    return [...gym, ...run].take(3).toList();
-  }
+  List<Map<String, dynamic>> get _combinePlans =>
+      _allPlans.where((p) {
+        final sport = (p['sport'] ?? p['type'] ?? '').toString().toLowerCase();
+        return sport == 'combine';
+      }).toList();
+
+  // Real featured plans, driven by the featured:true flag (Phase 1 backend
+  // work) instead of the old client-computed "first 2 gym + 1 running"
+  // guess. Deliberately NOT excluded from _gymPlans/_cardioPlans/
+  // _combinePlans above — a featured plan is meant to show up twice (once
+  // here, once in its normal category section further down).
+  List<Map<String, dynamic>> get _featuredPlans =>
+      _allPlans.where((p) => p['featured'] == true).toList();
 
   Color _accentColor(Map<String, dynamic> plan) {
     final sport = (plan['sport'] ?? plan['type'] ?? '').toString().toLowerCase();
     switch (sport) {
-      case 'running':
+      case 'cardio':
         return WW.teal;
+      case 'combine':
+        return WW.gold;
       case 'gym':
         return WW.primary;
       default:
@@ -328,7 +358,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
         active: _sportFilter != 'All',
         onTap: () => _showFilterSheet(
           'Sport',
-          ['All', 'Gym', 'Running'],
+          ['All', 'Gym', 'Cardio', 'Combine'],
           _sportFilter,
           (v) => setState(() => _sportFilter = v),
         ),
@@ -493,7 +523,8 @@ class _ExploreScreenState extends State<ExploreScreen> {
 
   Widget _buildBrowseMode() {
     final gym = _gymPlans;
-    final running = _runningPlans;
+    final cardio = _cardioPlans;
+    final combine = _combinePlans;
     final featured = _featuredPlans;
 
     return SingleChildScrollView(
@@ -504,6 +535,10 @@ class _ExploreScreenState extends State<ExploreScreen> {
           // ── Coach's Plans (only if this client has an accepted coach
           // relationship with at least one coach who's created plans) —
           // same card style as Featured Plans below, positioned above it.
+          // Data source (getCoachPlansForClient via _loadCoachPlans) is
+          // unchanged by this phase. Coach plans never carry imageUrl, so
+          // imageUrl is intentionally omitted below — the card always
+          // falls back to its gradient + workspace_premium icon.
           if (_coachPlans.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
@@ -529,13 +564,17 @@ class _ExploreScreenState extends State<ExploreScreen> {
                   accentColor: _accentColor(_coachPlans[i]),
                   onTap: () => _onPlanTap(_coachPlans[i]),
                   badgeLabel: 'COACH',
+                  fallbackIcon: Icons.workspace_premium_rounded,
                 ),
               ),
             ),
             const SizedBox(height: 20),
           ],
 
-          // ── Featured ──────────────────────────────────────────────────────
+          // ── Featured — real featured:true official plans (Phase 1
+          // backend). No hardcoded count cap; the card row just scrolls
+          // further with more of them. Uses each plan's real imageUrl when
+          // set, falling back to a gradient + category icon otherwise.
           if (featured.isNotEmpty) ...[
             const Padding(
               padding: EdgeInsets.fromLTRB(16, 8, 16, 10),
@@ -556,11 +595,17 @@ class _ExploreScreenState extends State<ExploreScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 itemCount: featured.length,
                 separatorBuilder: (ctx2, idx2) => const SizedBox(width: 12),
-                itemBuilder: (ctx3, i) => _FeaturedCard(
-                  plan: featured[i],
-                  accentColor: _accentColor(featured[i]),
-                  onTap: () => _onPlanTap(featured[i]),
-                ),
+                itemBuilder: (ctx3, i) {
+                  final plan = featured[i];
+                  final sport = (plan['sport'] ?? plan['type'] ?? '').toString();
+                  return _FeaturedCard(
+                    plan: plan,
+                    accentColor: _accentColor(plan),
+                    onTap: () => _onPlanTap(plan),
+                    imageUrl: plan['imageUrl'] as String?,
+                    fallbackIcon: _categoryIcon(sport),
+                  );
+                },
               ),
             ),
             const SizedBox(height: 20),
@@ -611,14 +656,15 @@ class _ExploreScreenState extends State<ExploreScreen> {
             const SizedBox(height: 10),
           ],
 
-          // ── Running Plans ─────────────────────────────────────────────────
-          if (running.isNotEmpty) ...[
+          // ── Cardio Plans (replaces the old "Running Plans" section —
+          // same widget/layout, just the renamed category) ─────────────────
+          if (cardio.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
               child: Row(
                 children: [
                   const Text(
-                    'Running Plans',
+                    'Cardio Plans',
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w800,
@@ -634,7 +680,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
                       borderRadius: BorderRadius.circular(10),
                     ),
                     child: Text(
-                      '${running.length}',
+                      '${cardio.length}',
                       style: const TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w700,
@@ -645,7 +691,56 @@ class _ExploreScreenState extends State<ExploreScreen> {
                 ],
               ),
             ),
-            ...running.map((p) => Padding(
+            ...cardio.map((p) => Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                  child: _PlanCard(
+                    plan: p,
+                    accentColor: _accentColor(p),
+                    onTap: () => _onPlanTap(p),
+                  ),
+                )),
+            const SizedBox(height: 10),
+          ],
+
+          // ── Combine Plans (new category) ─────────────────────────────────
+          if (combine.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: Row(
+                children: [
+                  const Text(
+                    'Combine Plans',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: WW.primaryDark,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      // No dedicated WW.goldBg token exists — derived at
+                      // runtime from WW.gold instead of a new hardcoded
+                      // hex, same convention _FeaturedCard's gradient
+                      // already uses below for its own tint.
+                      color: WW.gold.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '${combine.length}',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: WW.gold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            ...combine.map((p) => Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
                   child: _PlanCard(
                     plan: p,
@@ -661,6 +756,10 @@ class _ExploreScreenState extends State<ExploreScreen> {
 }
 
 // ── Featured card (horizontal scroll) ────────────────────────────────────────
+// Used for both "Your Coaches' Plans" (badgeLabel:'COACH', no imageUrl —
+// coach plans never carry one, so the background is always the gradient +
+// fallbackIcon path) and "Featured Plans" (badgeLabel:'FEATURED', real
+// imageUrl when the official plan has one).
 
 class _FeaturedCard extends StatelessWidget {
   final Map<String, dynamic> plan;
@@ -670,13 +769,47 @@ class _FeaturedCard extends StatelessWidget {
   // completely unchanged — the Coach's Plans section above passes
   // 'COACH' instead so the two don't read as the same category of card.
   final String badgeLabel;
+  // Null/empty for coach cards (coach plans never have this field) and for
+  // featured plans that simply haven't had an image set yet.
+  final String? imageUrl;
+  // Centered over the gradient whenever there's no image (or it fails to
+  // load) — the per-category icon for Featured cards, or
+  // Icons.workspace_premium_rounded for Coach cards (chosen at the call
+  // site in _buildBrowseMode, not computed here).
+  final IconData fallbackIcon;
 
   const _FeaturedCard({
     required this.plan,
     required this.accentColor,
     required this.onTap,
     this.badgeLabel = 'FEATURED',
+    this.imageUrl,
+    this.fallbackIcon = Icons.sports_rounded,
   });
+
+  bool get _hasImage => (imageUrl ?? '').isNotEmpty;
+
+  Widget _gradientFallback() {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            accentColor,
+            accentColor.withValues(alpha: 0.65),
+          ],
+        ),
+      ),
+      child: Center(
+        child: Icon(
+          fallbackIcon,
+          size: 64,
+          color: Colors.white.withValues(alpha: 0.35),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -685,21 +818,27 @@ class _FeaturedCard extends StatelessWidget {
     final days = (plan['daysPerWeek'] as num?)?.toInt() ?? 0;
     final weeks = (plan['totalWeeks'] as num?)?.toInt() ?? 0;
     final desc = plan['description'] as String? ?? '';
+    final coachName = plan['coachDisplayName'] as String?;
+    // saveCustomRoutine() in firestore_service.dart writes this exact
+    // string as a hardcoded, non-empty description for every custom
+    // routine — coach plans included, since build_routine_screen.dart
+    // never collects a real description from the coach. So on a COACH
+    // card, `desc` is never actually empty/null the way plan['description']
+    // is for a genuinely-missing description elsewhere — this literal
+    // value IS the "no real description" case for a coach plan. Scoped to
+    // badgeLabel == 'COACH' only: a non-coach card's description Text
+    // renders exactly as before (unconditionally, even if desc is empty —
+    // unchanged from the original behavior, not newly gated here).
+    final hideCoachDesc = badgeLabel == 'COACH' &&
+        (desc.isEmpty || desc == 'Custom routine created by user');
 
     return GestureDetector(
       onTap: onTap,
       child: Container(
         width: 260,
+        clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(18),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              accentColor,
-              accentColor.withValues(alpha: 0.65),
-            ],
-          ),
           boxShadow: [
             BoxShadow(
               color: accentColor.withValues(alpha: 0.3),
@@ -708,91 +847,149 @@ class _FeaturedCard extends StatelessWidget {
             ),
           ],
         ),
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Stack(
+          fit: StackFit.expand,
           children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.25),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    badgeLabel,
-                    style: const TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
-                      letterSpacing: 0.6,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              name,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w800,
-                color: Colors.white,
-                letterSpacing: -0.3,
-                height: 1.2,
-              ),
-            ),
-            const SizedBox(height: 5),
-            Text(
-              desc,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 11,
-                color: Colors.white.withValues(alpha: 0.78),
-                height: 1.4,
-              ),
-            ),
-            const Spacer(),
-            Row(
-              children: [
-                if (level.isNotEmpty)
-                  _FeaturedChip(level),
-                if (days > 0) ...[
-                  const SizedBox(width: 5),
-                  _FeaturedChip('$days d/wk'),
-                ],
-                if (weeks > 0) ...[
-                  const SizedBox(width: 5),
-                  _FeaturedChip('$weeks wks'),
-                ],
-                const Spacer(),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.22),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'Explore',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                        ),
-                      ),
-                      SizedBox(width: 4),
-                      Icon(Icons.chevron_right_rounded, color: Colors.white, size: 14),
+            // Background layer: real image when available, else the
+            // existing gradient + large centered icon.
+            if (_hasImage)
+              CachedNetworkImage(
+                imageUrl: imageUrl!,
+                fit: BoxFit.cover,
+                placeholder: (context, url) => _gradientFallback(),
+                errorWidget: (context, url, error) => _gradientFallback(),
+              )
+            else
+              _gradientFallback(),
+            // Legibility scrim over a photo background only — the plain
+            // gradient fallback is already dark enough for white text on
+            // its own, matching the original design.
+            if (_hasImage)
+              Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.05),
+                      Colors.black.withValues(alpha: 0.6),
                     ],
                   ),
                 ),
-              ],
+              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.25),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          badgeLabel,
+                          style: const TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.white,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                      letterSpacing: -0.3,
+                      height: 1.2,
+                    ),
+                  ),
+                  if (badgeLabel == 'COACH' && coachName != null && coachName.isNotEmpty) ...[
+                    const SizedBox(height: 3),
+                    Row(
+                      children: [
+                        Icon(Icons.person_rounded,
+                            size: 12, color: Colors.white.withValues(alpha: 0.78)),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            coachName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white.withValues(alpha: 0.78),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                  if (!hideCoachDesc) ...[
+                    const SizedBox(height: 5),
+                    Text(
+                      desc,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.white.withValues(alpha: 0.78),
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                  const Spacer(),
+                  Row(
+                    children: [
+                      if (level.isNotEmpty)
+                        _FeaturedChip(level),
+                      if (days > 0) ...[
+                        const SizedBox(width: 5),
+                        _FeaturedChip('$days d/wk'),
+                      ],
+                      if (weeks > 0) ...[
+                        const SizedBox(width: 5),
+                        _FeaturedChip('$weeks wks'),
+                      ],
+                      const Spacer(),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.22),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Explore',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white,
+                              ),
+                            ),
+                            SizedBox(width: 4),
+                            Icon(Icons.chevron_right_rounded, color: Colors.white, size: 14),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -825,12 +1022,14 @@ class _FeaturedChip extends StatelessWidget {
   }
 }
 
-// ── Plan list card ─────────────────────────────────────────────────────────────
+// ── Plan list card (image-left layout) ───────────────────────────────────────
 
 class _PlanCard extends StatelessWidget {
   final Map<String, dynamic> plan;
   final Color accentColor;
   final VoidCallback onTap;
+
+  static const double _tileSize = 84;
 
   const _PlanCard({
     required this.plan,
@@ -838,24 +1037,18 @@ class _PlanCard extends StatelessWidget {
     required this.onTap,
   });
 
-  // Same plan['sport']/plan['type'] field and three-way branching structure
-  // (running/gym/default) as _ExploreScreenState's own _accentColor(), kept
-  // consistent so the icon and accent color always agree about a plan's
-  // category. Icons.fitness_center_rounded matches this app's own
-  // established gym icon elsewhere (e.g. gym_session_screen.dart's
-  // exercises-empty state, activity_detail_screen.dart's _headerIcon).
-  // Icons.sports_rounded is a neutral "other/unspecified" fallback — not
-  // tied to any particular sport, mirroring _accentColor()'s own neutral
-  // WW.lavender default.
-  IconData _sportIcon(String sport) {
-    switch (sport.toLowerCase()) {
-      case 'running':
-        return Icons.directions_run_rounded;
-      case 'gym':
-        return Icons.fitness_center_rounded;
-      default:
-        return Icons.sports_rounded;
-    }
+  // Tinted square tile — soft accentColor background + the category's
+  // rounded icon, shown whenever there's no imageUrl (or it fails to
+  // load). Reuses the same accentColor already passed down from
+  // _ExploreScreenState._accentColor(), same theming source as before,
+  // just applied to a tile instead of the old left accent-bar strip.
+  Widget _iconTile(String sport) {
+    return Container(
+      color: accentColor.withValues(alpha: 0.15),
+      child: Center(
+        child: Icon(_categoryIcon(sport), size: 32, color: accentColor),
+      ),
+    );
   }
 
   @override
@@ -868,6 +1061,7 @@ class _PlanCard extends StatelessWidget {
     final coach = plan['coach'] as String? ?? 'WiseWorkout';
     final saves = (plan['saves'] as num?)?.toInt() ?? 0;
     final goal = plan['goal'] as String? ?? '';
+    final imageUrl = plan['imageUrl'] as String? ?? '';
 
     return GestureDetector(
       onTap: onTap,
@@ -878,110 +1072,111 @@ class _PlanCard extends StatelessWidget {
           border: Border.all(color: WW.border, width: 0.5),
           boxShadow: WW.shadow,
         ),
-        clipBehavior: Clip.hardEdge,
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Left accent bar
-              Container(width: 4, color: accentColor),
-              // Content
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                width: _tileSize,
+                height: _tileSize,
+                child: imageUrl.isNotEmpty
+                    ? CachedNetworkImage(
+                        imageUrl: imageUrl,
+                        fit: BoxFit.cover,
+                        placeholder: (context, url) => _iconTile(sport),
+                        errorWidget: (context, url, error) => _iconTile(sport),
+                      )
+                    : _iconTile(sport),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Name row
+                  Text(
+                    name,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: WW.text,
+                      height: 1.25,
+                    ),
+                  ),
+                  const SizedBox(height: 7),
+                  // Chips row
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 4,
                     children: [
-                      // Name row
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(
-                            child: Text(
-                              name,
-                              style: const TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
-                                color: WW.text,
-                                height: 1.25,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 7),
-                      // Chips row
-                      Wrap(
-                        spacing: 5,
-                        runSpacing: 4,
-                        children: [
-                          if (level.isNotEmpty)
-                            _Chip(label: level, bg: WW.chipBg, textColor: WW.primary),
-                          if (sport.isNotEmpty)
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(_sportIcon(sport),
-                                    size: 12, color: WW.textSec),
-                                const SizedBox(width: 3),
-                                _Chip(
-                                    label: sport,
-                                    bg: WW.elevated,
-                                    textColor: WW.textSec),
-                              ],
-                            ),
-                          if (days > 0)
-                            _Chip(label: '$days d/wk', bg: WW.elevated, textColor: WW.textSec),
-                          if (goal.isNotEmpty)
-                            _Chip(label: goal, bg: WW.elevated, textColor: WW.textSec),
-                        ],
-                      ),
-                      if (desc.isNotEmpty) ...[
-                        const SizedBox(height: 7),
-                        Text(
-                          desc,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: WW.textSec,
-                            height: 1.4,
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 8),
-                      // Bottom row: coach + saves
-                      Row(
-                        children: [
-                          const Icon(Icons.person_outline_rounded,
-                              size: 12, color: WW.textSec),
-                          const SizedBox(width: 4),
-                          Expanded(
-                            child: Text(
-                              coach,
-                              style: const TextStyle(
-                                  fontSize: 11, color: WW.textSec),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          if (saves > 0) ...[
-                            const Icon(Icons.bookmark_outline_rounded,
+                      if (level.isNotEmpty)
+                        _Chip(label: level, bg: WW.chipBg, textColor: WW.primary),
+                      if (sport.isNotEmpty)
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(_categoryIcon(sport),
                                 size: 12, color: WW.textSec),
                             const SizedBox(width: 3),
-                            Text(
-                              '$saves saves',
-                              style: const TextStyle(
-                                  fontSize: 11, color: WW.textSec),
-                            ),
+                            _Chip(
+                                label: sport,
+                                bg: WW.elevated,
+                                textColor: WW.textSec),
                           ],
-                        ],
-                      ),
+                        ),
+                      if (days > 0)
+                        _Chip(label: '$days d/wk', bg: WW.elevated, textColor: WW.textSec),
+                      if (goal.isNotEmpty)
+                        _Chip(label: goal, bg: WW.elevated, textColor: WW.textSec),
                     ],
                   ),
-                ),
+                  if (desc.isNotEmpty) ...[
+                    const SizedBox(height: 7),
+                    Text(
+                      desc,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: WW.textSec,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  // Bottom row: coach + saves
+                  Row(
+                    children: [
+                      const Icon(Icons.person_outline_rounded,
+                          size: 12, color: WW.textSec),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          coach,
+                          style: const TextStyle(
+                              fontSize: 11, color: WW.textSec),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (saves > 0) ...[
+                        const Icon(Icons.bookmark_outline_rounded,
+                            size: 12, color: WW.textSec),
+                        const SizedBox(width: 3),
+                        Text(
+                          '$saves saves',
+                          style: const TextStyle(
+                              fontSize: 11, color: WW.textSec),
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );

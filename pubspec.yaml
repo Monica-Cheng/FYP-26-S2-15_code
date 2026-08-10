@@ -16,6 +16,11 @@ dependencies:
   cloud_firestore: ^5.4.4
   firebase_messaging: ^15.1.3
   cloud_functions: ^5.1.3
+  # Coach registration credential documents (see storage_service.dart) —
+  # full-resolution uploads, deliberately NOT base64-in-Firestore like
+  # this app's other images, since a certificate's fine print needs to
+  # stay readable for admin review, unlike a decorative photo.
+  firebase_storage: ^12.3.7
   # Navigation
   go_router: ^14.2.7
   # State management
@@ -34,11 +39,15 @@ dependencies:
   health: ^12.0.0
   share_plus: ^10.1.4
   path_provider: ^2.1.5
-  flutter_dotenv: ^5.1.0
   url_launcher: ^6.3.0
   image_picker: ^1.1.2
   camera: ^0.11.1
   mobile_scanner: ^6.0.2
+  # Coach registration credential documents — PDFs specifically (real
+  # certificates/licenses are commonly PDF, not photos). image_picker
+  # only handles photos/gallery, so this is a separate, arbitrary-file
+  # picker used just for the PDF option in coach_register_screen.dart.
+  file_picker: ^8.1.4
   # Outdoor cardio (GPS tracking + map rendering)
   geolocator: ^14.0.2
   maplibre_gl: ^0.26.2
@@ -47,6 +56,9 @@ dependencies:
   # JPEG encoding for session photos (see outdoor_cardio_screen.dart's
   # _encodeImageForSession) — dart:ui has no JPEG encoder of its own.
   image: ^4.9.1
+  # Explore Plans images (plan.imageUrl) — cached network image loading with
+  # built-in placeholder/error-widget support.
+  cached_network_image: ^3.4.1
 
 dev_dependencies:
   flutter_test:
@@ -55,7 +67,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  assets:
-    - .env
   config:
     enable-swift-package-manager: false

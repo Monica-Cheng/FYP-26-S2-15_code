@@ -1,0 +1,63 @@
+rules_version = '2';
+
+// WiseWorkout Firebase Storage security rules.
+//
+// This is the app's FIRST use of Firebase Storage — every other image in
+// this app (profile photos, meal photos, share cards) is base64-encoded
+// directly into a Firestore document instead (see
+// lib/utils/image_encode.dart), a deliberate tradeoff accepted elsewhere
+// in this project for decorative/lossy-tolerant images. Coach
+// registration credential documents (certificates, proof of
+// qualification) are the one case where that tradeoff was judged
+// unacceptable — an admin needs to actually read fine print on them — so
+// storage_service.dart uploads full-resolution files here instead.
+//
+// Before this file existed, this project had NO deployed Storage rules
+// at all (no "storage" key in firebase.json, no storage.rules file) —
+// Storage was running on whatever Firebase's own default is for a
+// project that's never explicitly configured it, which denies
+// unauthenticated/unmatched access. That's the direct cause of the
+// "unauthorized" upload error this file fixes.
+//
+// Path derived directly from the real upload code
+// (storage_service.dart's uploadCredentialFile():
+// _storage.ref().child('businessPartners').child(uid).child('credentials')
+// .child('<timestamp>.<ext>')) — not guessed.
+//
+// Admin read: there is no hardcoded admin UID anywhere in this project's
+// rules (firestore.rules has none either, despite that being assumed
+// when this file was requested — checked directly, not guessed). The
+// real admin-authorization mechanism already used everywhere else (see
+// functions/index.js's requireAdmin()) is an admins/{uid} Firestore
+// collection with an active:true field — mirrored here via Storage
+// Rules' cross-service firestore.get() support, rather than inventing a
+// separate, weaker (and driftable) hardcoded-UID mechanism just for this
+// one file. Not yet exercised by any current code path — the just-merged
+// React admin dashboard doesn't render credential images yet (see
+// coach_register_screen.dart's own history) — but this is the feature's
+// actual intended purpose, so it's included using the real, existing
+// admin mechanism ahead of that UI landing.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /businessPartners/{uid}/credentials/{fileName} {
+      // Only the applicant can upload their own credential files —
+      // registerAsCoach() (firestore_service.dart) is the only write
+      // path in the app, and it always uploads under the caller's own
+      // uid segment.
+      allow write: if request.auth != null && request.auth.uid == uid;
+
+      // The applicant can read back what they already uploaded (e.g. to
+      // preview it); an active admin can read any applicant's files for
+      // review.
+      allow read: if request.auth != null &&
+        (request.auth.uid == uid ||
+         firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.active == true);
+    }
+
+    // Default deny — everything else in this bucket. No other client
+    // code writes to Storage anywhere in this app today.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

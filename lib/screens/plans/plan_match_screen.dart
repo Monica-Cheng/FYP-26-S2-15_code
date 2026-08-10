@@ -12,9 +12,17 @@ import '../../services/firestore_service.dart';
 
 class _GoalOption {
   final String id;
-  final String emoji;
+  final IconData icon;
+  final Color iconBg;
+  final Color iconColor;
   final String label;
-  const _GoalOption({required this.id, required this.emoji, required this.label});
+  const _GoalOption({
+    required this.id,
+    required this.icon,
+    required this.iconBg,
+    required this.iconColor,
+    required this.label,
+  });
 }
 
 class _LevelOption {
@@ -26,11 +34,46 @@ class _LevelOption {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const _kGoalOptions = [
-  _GoalOption(id: 'Build Muscle', emoji: '💪', label: 'Build Muscle'),
-  _GoalOption(id: 'Improve Endurance', emoji: '🏃', label: 'Improve Endurance'),
-  _GoalOption(id: 'Lose Weight', emoji: '🔥', label: 'Lose Weight'),
-  _GoalOption(id: 'Build Strength', emoji: '🏋️', label: 'Build Strength'),
+// Icons/colors for Build Muscle, Improve Endurance and Lose Weight match
+// onboarding_step2_screen.dart's own "primary goal" question exactly
+// (same underlying concept, different screen) — fitness_center_rounded/
+// bolt_rounded/local_fire_department_rounded with the same color pairings,
+// for visual consistency between the app's two "goal" surveys. Build
+// Strength has no onboarding counterpart (that question offers "General
+// Fitness" as its 4th option instead), so it gets a new icon
+// (Icons.shield_rounded, distinct from the other three) — not const
+// because WW.gold has no dedicated background-tint token the way
+// chipBg/tealBg/lavenderBg exist for primary/teal/lavender, so its tint
+// is computed at runtime via withValues() rather than a new hardcoded hex.
+final _kGoalOptions = [
+  const _GoalOption(
+    id: 'Build Muscle',
+    icon: Icons.fitness_center_rounded,
+    iconBg: WW.chipBg,
+    iconColor: WW.primary,
+    label: 'Build Muscle',
+  ),
+  const _GoalOption(
+    id: 'Improve Endurance',
+    icon: Icons.bolt_rounded,
+    iconBg: WW.lavenderBg,
+    iconColor: WW.lavender,
+    label: 'Improve Endurance',
+  ),
+  const _GoalOption(
+    id: 'Lose Weight',
+    icon: Icons.local_fire_department_rounded,
+    iconBg: Color(0xFFFFF3E0),
+    iconColor: Color(0xFFF97316),
+    label: 'Lose Weight',
+  ),
+  _GoalOption(
+    id: 'Build Strength',
+    icon: Icons.shield_rounded,
+    iconBg: WW.gold.withValues(alpha: 0.15),
+    iconColor: WW.gold,
+    label: 'Build Strength',
+  ),
 ];
 
 const _kLevelOptions = [
@@ -39,9 +82,111 @@ const _kLevelOptions = [
   _LevelOption(id: 'Advanced', label: 'Advanced', sub: 'Training 2+ years'),
 ];
 
-const _kSportOptions = ['Gym only', 'Running only', 'Both'];
-const _kEquipmentOptions = ['Home (bodyweight)', 'Gym with weights', 'Outdoor', 'Both'];
+const _kSportOptions = ['Gym', 'Cardio', 'Combine', 'Any'];
 const _kDayOptions = [2, 3, 4, 5, 6];
+
+// Display labels for onboarding_step2_screen.dart's equipmentAvailable ids
+// ('bodyweight'/'gym_weights'/'outdoor'/'both') — used only for the
+// read-only "Your saved preferences" summary below now that Plan Match no
+// longer asks its own separate equipment question (see
+// _buildSurveyForm()'s removed Q4 and _loadSavedPrefs() below).
+const _kEquipmentLabels = {
+  'bodyweight': 'Home (bodyweight)',
+  'gym_weights': 'Gym with weights',
+  'outdoor': 'Outdoor',
+  'both': 'Both',
+};
+
+// Equipment items observed in real official plan docs today (Barbell,
+// Dumbbells, Cable machine, Bench) plus a few obvious close synonyms an
+// admin might type instead — the admin's own Equipment field is free text
+// (comma-separated), not a fixed enum, so this is a best-effort keyword
+// match, not a strict taxonomy.
+const _kGymWeightKeywords = [
+  'barbell',
+  'dumbbell',
+  'kettlebell',
+  'cable',
+  'bench',
+  'machine',
+  'plate',
+  'rack',
+];
+
+// Maps one of the user's onboarding equipmentAvailable ids to whether a
+// given plan is a reasonable match. Deliberately coarse, matching the
+// 4-category granularity of the onboarding question against the plan's
+// own free-text equipment[] list (specific named items) and its
+// sport/type — there's no shared vocabulary between the two sides, so
+// this is a heuristic, not an exact comparison (see the earlier
+// equipment-scoring investigation this session for why a direct string
+// match isn't possible here the way level/goal/sport/days already are).
+// 'bodyweight' only matches a plan with a genuinely EMPTY equipment[] (or
+// missing entirely) — deliberately not attempting to infer "bodyweight-
+// only" from a non-empty-but-non-gym-weight list (e.g. a Cardio plan's
+// ["Running shoes"]), since that would incorrectly credit cardio plans as
+// bodyweight matches.
+bool _equipmentMatchesPlan(String equipmentId, Map<String, dynamic> plan) {
+  final rawEquipment = (plan['equipment'] as List?)
+          ?.map((e) => e.toString().toLowerCase())
+          .toList() ??
+      [];
+  final hasGymWeight = rawEquipment
+      .any((item) => _kGymWeightKeywords.any((kw) => item.contains(kw)));
+  final sport = (plan['sport'] ?? plan['type'] ?? '').toString().toLowerCase();
+
+  switch (equipmentId) {
+    case 'gym_weights':
+      return hasGymWeight;
+    case 'outdoor':
+      return sport == 'cardio' && !hasGymWeight;
+    case 'bodyweight':
+      return rawEquipment.isEmpty;
+    case 'both':
+      return true; // Wildcard — user has access to everything.
+    default:
+      return false;
+  }
+}
+
+// users/{uid}.equipmentAvailable is a multi-select list (onboarding lets a
+// user pick more than one) — matches this plan if ANY selected category
+// matches. A selected 'both' anywhere in the list is an unconditional
+// wildcard, the same idea as _sport's own 'any' wildcard, just under
+// onboarding's own id for the equivalent concept.
+bool _userEquipmentMatchesPlan(
+    List<String> userEquipment, Map<String, dynamic> plan) {
+  if (userEquipment.isEmpty) return false;
+  return userEquipment.any((id) => _equipmentMatchesPlan(id, plan));
+}
+
+// Maps users/{uid}.sportPreference (set once during onboarding, lowercase
+// ids) to the equivalent Plan Match sport-survey label — used only as a
+// one-time initial default for a user's first-ever Plan Match visit (see
+// _loadSavedPrefs() below), never written back to sportPreference.
+// Recognizes both the current onboarding ids ('gym'/'cardio'/'combine')
+// and the pre-rename legacy values ('running'/'both') a user who onboarded
+// before onboarding_step2_screen.dart's own rename may still have stored,
+// so their default isn't silently dropped just because their doc predates
+// that fix.
+String? _sportFromOnboardingPreference(String? sportPreference) {
+  switch (sportPreference) {
+    case 'gym':
+      return 'Gym';
+    case 'cardio':
+      return 'Cardio';
+    case 'combine':
+      return 'Combine';
+    case 'any':
+      return 'Any';
+    case 'running': // legacy, pre-rename
+      return 'Cardio';
+    case 'both': // legacy, pre-rename
+      return 'Combine';
+    default:
+      return null;
+  }
+}
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -58,9 +203,13 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
 
   // Survey preferences
   String _goal = 'Build Muscle';
-  String _sport = 'Both';
+  String _sport = 'Any';
   String _level = 'Beginner';
-  final Set<String> _equipment = {'Gym with weights'};
+  // Read-only, borrowed directly from users/{uid}.equipmentAvailable
+  // (onboarding) every time this screen loads — no separate Plan-Match-
+  // side equipment survey/state anymore (see the removed Q4 in
+  // _buildSurveyForm() and the summary in _loadSavedPrefs() below).
+  List<String> _userEquipment = [];
   int _days = 3;
   bool _editingPrefs = false;
 
@@ -95,17 +244,39 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
       final goal = profile?['planMatchGoal'] as String?;
       final sport = profile?['planMatchSport'] as String?;
       final level = profile?['planMatchLevel'] as String?;
-      final equipmentRaw = profile?['planMatchEquipment'] as List<dynamic>?;
       final days = (profile?['planMatchDays'] as num?)?.toInt();
+
+      // Equipment has no Plan-Match-side survey/state of its own anymore —
+      // unlike sport (which keeps its own editable planMatchSport for a
+      // deliberate in-session override), equipment is read straight from
+      // onboarding's equipmentAvailable every time this screen loads, no
+      // "prior choice wins" branching needed since there's no separate
+      // prior choice to compare against.
+      _userEquipment = (profile?['equipmentAvailable'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          [];
+
+      // A user's own prior Plan Match choice (planMatchSport) always wins
+      // when one exists — unchanged from before. Only when Plan Match has
+      // never been used (no planMatchSport saved yet) do we borrow a
+      // one-time initial default from onboarding's sportPreference —
+      // read-only here, never written back to sportPreference by this
+      // screen. Runs regardless of whether the rest of the survey
+      // (planMatchGoal/Level/etc, gated below) has ever been saved, since
+      // this is specifically about seeding the sport chip's initial
+      // selection, not the "has this user used Plan Match before" state.
+      if (sport != null) {
+        _sport = sport;
+      } else {
+        final borrowed =
+            _sportFromOnboardingPreference(profile?['sportPreference'] as String?);
+        if (borrowed != null) _sport = borrowed;
+      }
 
       if (goal != null) {
         _goal = goal;
-        if (sport != null) _sport = sport;
         if (level != null) _level = level;
-        if (equipmentRaw != null && equipmentRaw.isNotEmpty) {
-          _equipment.clear();
-          _equipment.addAll(equipmentRaw.map((e) => e.toString()));
-        }
         if (days != null) _days = days;
         setState(() {
           _hasSavedPrefs = true;
@@ -127,7 +298,6 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
           'planMatchGoal': _goal,
           'planMatchSport': _sport,
           'planMatchLevel': _level,
-          'planMatchEquipment': _equipment.toList(),
           'planMatchDays': _days,
         });
       } catch (_) {}
@@ -156,6 +326,14 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
       Map<String, dynamic>? bestPlan;
 
       for (final plan in plans) {
+        // A deactivated official plan should never be recommendable, not
+        // just deprioritized — excluded outright rather than penalized.
+        // Only an EXPLICIT isActive == false skips a plan; a plan with no
+        // isActive field at all (custom/coach plans never have one) or
+        // isActive == true is unaffected, since absence isn't the same as
+        // an admin having actually turned it off.
+        if (plan['isActive'] == false) continue;
+
         int score = 0;
 
         // Level match is now worth 6 points (was 3) — most important factor
@@ -169,19 +347,32 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
                 .toList() ?? [];
         if (matchGoals.contains(_goal.toLowerCase())) score += 3;
 
-        // Sport match — fuzzy contains-based comparison, 3 points
+        // Sport match — fuzzy contains-based comparison, 3 points.
+        // userSport == 'any' is a user-side-only wildcard ("no
+        // preference — match everything"), replacing the old
+        // userSport == 'both' clause now that 'Combine' is its own
+        // exact-match category (see 'combine' below) rather than a
+        // stand-in wildcard. There is deliberately no matchSport == 'any'
+        // counterpart — a plan itself is never "any" type, only a user's
+        // preference can be.
         final matchSport = (plan['matchSport'] as String? ?? '').toLowerCase();
         final userSport = _sport.toLowerCase();
         final sportMatches = matchSport == userSport ||
             matchSport.contains(userSport.split(' ').first) ||
             userSport.contains(matchSport.split(' ').first) ||
-            matchSport == 'both' ||
-            userSport == 'both';
+            userSport == 'any';
         if (sportMatches) score += 3;
 
         // Days per week — within +/-1, 2 points
         final planDays = (plan['daysPerWeek'] as num?)?.toInt() ?? 3;
         if ((planDays - _days).abs() <= 1) score += 2;
+
+        // Equipment match — 2 points, same scale as days/week. Borrowed
+        // read-only from onboarding's equipmentAvailable (see
+        // _userEquipment's own doc comment) rather than a separate
+        // Plan-Match-side answer — see _userEquipmentMatchesPlan()/
+        // _equipmentMatchesPlan() above for the category-to-plan mapping.
+        if (_userEquipmentMatchesPlan(_userEquipment, plan)) score += 2;
 
         // Hard penalty: if level does not match at all, heavily
         // deprioritize this plan so a correct-level plan always wins
@@ -239,7 +430,12 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
     } catch (_) {}
   }
 
-  int get _matchPercent => ((_matchScore / 14) * 100).round().clamp(0, 100);
+  // Max possible raw score: level(6) + goal(3) + sport(3) + days(2) +
+  // equipment(2) = 16 — was 14 before equipment became a scored
+  // dimension; this denominator has to move in lockstep with the sum of
+  // every scoring clause in _runMatchAlgorithm() above, or this percentage
+  // silently misrepresents what fraction of the max a plan actually hit.
+  int get _matchPercent => ((_matchScore / 16) * 100).round().clamp(0, 100);
 
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -252,10 +448,24 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
   @override
   Widget build(BuildContext context) {
     if (_state == 1) {
+      // Lighter lavender gradient (was the dark WW.primaryDark/0xFF4A4EA8
+      // pairing) — both stops are existing WW tokens, no new hardcoded
+      // hex. Text/spinner colors switched from white/white70 to
+      // lavenderDark/lavenderText/lavender to stay legible against the
+      // now-light background — WW's own established dark-purple-on-
+      // light-lavender pairing (also used by, e.g., WW.lavenderDark/
+      // WW.lavenderText elsewhere in this app for text on WW.lavenderBg).
+      // decoration: TextDecoration.none is explicit on both lines — no
+      // TextDecoration was actually set anywhere in this file or in
+      // app_theme.dart/main.dart (grepped both), so this is a defensive,
+      // guaranteed-correct fix regardless of whatever was rendering an
+      // underline before (most likely an inherited/fallback-font
+      // rendering quirk from 'SF Pro Display' not being a bundled font,
+      // rather than an explicit style bug).
       return Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
-            colors: [WW.primaryDark, Color(0xFF4A4EA8)],
+            colors: [WW.lavenderBg, WW.lavender],
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
           ),
@@ -268,7 +478,7 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
                 width: 56,
                 height: 56,
                 child: CircularProgressIndicator(
-                  color: Colors.white,
+                  color: WW.lavenderDark,
                   strokeWidth: 3,
                 ),
               ),
@@ -278,13 +488,18 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
                 style: TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.w700,
-                  color: Colors.white,
+                  color: WW.lavenderDark,
+                  decoration: TextDecoration.none,
                 ),
               ),
               SizedBox(height: 8),
               Text(
                 'Analysing your goals and preferences',
-                style: TextStyle(fontSize: 13, color: Colors.white70),
+                style: TextStyle(
+                  fontSize: 13,
+                  color: WW.lavenderText,
+                  decoration: TextDecoration.none,
+                ),
               ),
             ],
           ),
@@ -408,7 +623,11 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
               const SizedBox(height: 12),
               _buildPrefItem(
                 'Equipment',
-                _equipment.isEmpty ? 'None' : _equipment.join(', '),
+                _userEquipment.isEmpty
+                    ? 'None set — see onboarding'
+                    : _userEquipment
+                        .map((id) => _kEquipmentLabels[id] ?? id)
+                        .join(', '),
               ),
             ],
           ),
@@ -489,33 +708,44 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
           crossAxisCount: 2,
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          crossAxisSpacing: 8,
-          mainAxisSpacing: 8,
-          childAspectRatio: 1.7,
+          crossAxisSpacing: 10,
+          mainAxisSpacing: 10,
+          childAspectRatio: 1.5,
           children: _kGoalOptions.map((g) {
             final active = _goal == g.id;
             return GestureDetector(
               onTap: () => setState(() => _goal = g.id),
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: active ? WW.chipBg : WW.card,
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(14),
                   border: Border.all(
                     color: active ? WW.primary : WW.border,
-                    width: 1.5,
+                    width: active ? 1.5 : 1.0,
                   ),
+                  boxShadow: WW.shadow,
                 ),
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Text(g.emoji, style: const TextStyle(fontSize: 20)),
-                    const SizedBox(height: 4),
+                    Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        color: active
+                            ? WW.primary.withValues(alpha: 0.14)
+                            : g.iconBg,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(g.icon, color: g.iconColor, size: 18),
+                    ),
+                    const SizedBox(height: 6),
                     Text(
                       g.label,
                       style: TextStyle(
-                        fontSize: 11,
+                        fontSize: 12,
                         fontWeight: FontWeight.w700,
                         color: active ? WW.primary : WW.text,
                       ),
@@ -630,46 +860,11 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
         }),
         const SizedBox(height: 12),
 
-        // Q4 — Equipment
-        _sectionLabel('Available equipment'),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: _kEquipmentOptions.map((e) {
-            final active = _equipment.contains(e);
-            return GestureDetector(
-              onTap: () => setState(() {
-                if (active) {
-                  _equipment.remove(e);
-                } else {
-                  _equipment.add(e);
-                }
-              }),
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                decoration: BoxDecoration(
-                  color: active ? WW.chipBg : Colors.transparent,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: active ? WW.primary : WW.border,
-                    width: 1.5,
-                  ),
-                ),
-                child: Text(
-                  e,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: active ? WW.primary : WW.textSec,
-                  ),
-                ),
-              ),
-            );
-          }).toList(),
-        ),
-        const SizedBox(height: 20),
+        // Equipment is no longer asked here — it's read straight from
+        // onboarding's "What equipment do you have?" answer instead (see
+        // _userEquipment/_loadSavedPrefs() above), so this survey no
+        // longer duplicates that question with a second, differently-
+        // shaped copy of the same 4 options.
 
         // Q5 — Days per week
         _sectionLabel('Days per week'),
@@ -821,8 +1016,6 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _buildMatchCard(name, type, level, daysPerWeek, durationWeeks),
-        const SizedBox(height: 12),
-        _buildExplanationCard(daysPerWeek),
         const SizedBox(height: 12),
         _buildPreviewSection(previewWeek),
         const SizedBox(height: 20),
@@ -1060,88 +1253,27 @@ class _PlanMatchScreenState extends State<PlanMatchScreen> {
     );
   }
 
-  Widget _buildExplanationCard(int daysPerWeek) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: WW.lavenderBg,
-        borderRadius: BorderRadius.circular(14),
-        border: const Border(left: BorderSide(color: WW.lavender, width: 3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 26,
-                height: 26,
-                decoration: const BoxDecoration(
-                  color: WW.lavender,
-                  shape: BoxShape.circle,
-                ),
-                child: const Center(
-                  child: Icon(Icons.auto_awesome_rounded,
-                      color: Colors.white, size: 13),
-                ),
-              ),
-              const SizedBox(width: 8),
-              const Text(
-                'Why this plan?',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: WW.lavenderDark,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          _bullet('Matches your $_goal goal'),
-          const SizedBox(height: 6),
-          _bullet('$daysPerWeek days/week fits your schedule'),
-          const SizedBox(height: 6),
-          _bullet('$_level level matches your experience'),
-        ],
-      ),
-    );
-  }
-
-  Widget _bullet(String text) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Icon(Icons.check_circle_rounded,
-            size: 14, color: WW.lavender),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Text(
-            text,
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-              color: WW.lavenderText,
-              height: 1.4,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
   // Derives a real "what a typical week looks like" preview directly from
   // the matched plan's own sessions[] — replaces the old hardcoded
   // _kPreviewGym/_kPreviewRun sample data entirely. Every non-rest session
-  // in the plan is included (not just the first one) so the preview shows
-  // the plan's actual real week, matching _buildPreviewSection's existing
-  // multi-card visual format (originally 3 cards of invented sample
-  // text — now however many real training days this specific plan
-  // actually has). Output shape matches exactly what _PreviewDayCard
-  // already expects ({day, session, exercises: List<String>}), so that
-  // widget itself needed no changes.
+  // in the plan's first week is included (not just the first one) so the
+  // preview shows the plan's actual real week, matching
+  // _buildPreviewSection's existing multi-card visual format (originally 3
+  // cards of invented sample text — now however many real training days
+  // this specific plan's repeating weekly pattern actually has). Output
+  // shape matches exactly what _PreviewDayCard already expects ({day,
+  // session, exercises: List<String>}), so that widget itself needed no
+  // changes.
+  //
+  // Sliced to the first 7 entries before filtering rest days — a plan's
+  // sessions[] is a flat, multi-week array for multi-week plans (14, 21+
+  // sessions, the days-per-week pattern repeating every 7 entries), and
+  // without this slice every training day across every week would render
+  // here as if it were one week. A no-op for a normal 7-session plan.
   List<Map<String, dynamic>> _buildRealPreviewWeek(Map<String, dynamic> plan) {
     final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
     return sessions
+        .take(7)
         .whereType<Map>()
         .where((s) => s['isRestDay'] != true)
         .map((s) {

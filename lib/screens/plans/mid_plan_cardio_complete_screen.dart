@@ -43,7 +43,7 @@ class MidPlanCardioCompleteScreen extends StatefulWidget {
 class _MidPlanCardioCompleteScreenState
     extends State<MidPlanCardioCompleteScreen> {
   String? _sessionRunId;
-  int? _blockIndex;
+  String? _blockId;
   Map<String, dynamic> _blockData = {};
 
   // planId/dayIndex — needed by "Next" to resume gym_session_screen.dart
@@ -79,7 +79,7 @@ class _MidPlanCardioCompleteScreenState
       final sessionRunId = extra?['sessionRunId'] as String?;
       setState(() {
         _sessionRunId = sessionRunId;
-        _blockIndex = extra?['blockIndex'] as int?;
+        _blockId = extra?['blockId'] as String?;
         _blockData = rawBlockData is Map
             ? Map<String, dynamic>.from(rawBlockData)
             : <String, dynamic>{};
@@ -286,12 +286,12 @@ class _MidPlanCardioCompleteScreenState
   // the stats (distance, calories, etc.) already written for this block.
   Future<void> _handleNext() async {
     final sessionRunId = _sessionRunId;
-    final blockIndex = _blockIndex;
+    final blockId = _blockId;
     final trimmedNotes = _notesController.text.trim();
     final photo = _pickedPhoto;
     final hasNewData = trimmedNotes.isNotEmpty || photo != null;
 
-    if (sessionRunId != null && blockIndex != null && hasNewData) {
+    if (sessionRunId != null && blockId != null && hasNewData) {
       setState(() => _isSaving = true);
       final uid = AuthService().getCurrentUser()?.uid;
       if (uid != null) {
@@ -303,7 +303,7 @@ class _MidPlanCardioCompleteScreenState
           'photoBase64': ?photoBase64,
         };
         await FirestoreService().updateInProgressSessionBlock(
-            uid, sessionRunId, blockIndex, mergedBlockData);
+            uid, sessionRunId, blockId, mergedBlockData);
       }
       if (!mounted) return;
       setState(() => _isSaving = false);

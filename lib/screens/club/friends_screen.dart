@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/user_avatar.dart';
@@ -719,41 +720,64 @@ class _FriendsScreenState extends State<FriendsScreen> {
     final level = (xp?['level'] as num?)?.toInt();
     final levelLabel = level != null ? 'Level $level' : '—';
     final weeklyXp = (xp?['weeklyXp'] as int?) ?? 0;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        border: isLast
-            ? null
-            : const Border(bottom: BorderSide(color: _kDivider, width: 0.5)),
-      ),
-      child: Row(
-        children: [
-          _avatar(initial, photoBase64: photoBase64),
-          const SizedBox(width: 12),
-          // Name, username · level
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    // Friends are, by definition, never the current user themselves — no
+    // "own row" case to exclude here (unlike club_screen.dart's
+    // leaderboard, which always includes the viewer's own row). No
+    // existing tap targets on this row (no accept/decline/remove
+    // buttons), so the whole row is safe to wrap.
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _openFriendProfile(f),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          border: isLast
+              ? null
+              : const Border(bottom: BorderSide(color: _kDivider, width: 0.5)),
+        ),
+        child: Row(
+          children: [
+            _avatar(initial, photoBase64: photoBase64),
+            const SizedBox(width: 12),
+            // Name, username · level
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(name, style: WW.rowName),
+                  const SizedBox(height: 2),
+                  Text(
+                    username.isNotEmpty ? '@$username · $levelLabel' : levelLabel,
+                    style: WW.rowSecondary,
+                  ),
+                ],
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text(name, style: WW.rowName),
+                Text('${_fmtXp(weeklyXp)} XP', style: WW.rowStat),
                 const SizedBox(height: 2),
-                Text(
-                  username.isNotEmpty ? '@$username · $levelLabel' : levelLabel,
-                  style: WW.rowSecondary,
-                ),
+                const Text('Weekly XP', style: WW.rowSecondary),
               ],
             ),
-          ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text('${_fmtXp(weeklyXp)} XP', style: WW.rowStat),
-              const SizedBox(height: 2),
-              const Text('Weekly XP', style: WW.rowSecondary),
-            ],
-          ),
-        ],
+          ],
+        ),
       ),
+    );
+  }
+
+  // Same navigation FeedPostCard's avatar/name already uses (see its own
+  // _openProfile()) — Routes.userProfile with uid/authorName via `extra`.
+  void _openFriendProfile(Map<String, dynamic> f) {
+    final uid = f['uid'] as String?;
+    if (uid == null || uid.isEmpty) return;
+    context.push(
+      Routes.userProfile,
+      extra: {
+        'uid': uid,
+        'authorName': f['displayName'] as String?,
+      },
     );
   }
 }
