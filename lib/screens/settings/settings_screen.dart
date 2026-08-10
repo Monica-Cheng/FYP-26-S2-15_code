@@ -36,6 +36,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _aiPersonalizationConsent = false;
   bool _leaderboardVisible = true;
   bool _calorieGoalActive = false;
+  bool _isPremium = false;
   bool _prefsLoading = true;
 
   String? _userEmail;
@@ -68,6 +69,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             profile?['aiPersonalizationConsent'] as bool? ?? false;
         _leaderboardVisible = profile?['leaderboardVisible'] as bool? ?? true;
         _calorieGoalActive = healthData['calorieGoalActive'] as bool? ?? false;
+        // Same read pattern as coach_screen.dart's _loadWiseCoachState() —
+        // no dedicated FirestoreService method for this field, just pulled
+        // off the already-fetched profile map.
+        _isPremium = profile?['isPremium'] as bool? ?? false;
         final savedHour = profile?['reminderHour'] as int?;
         final savedMinute = profile?['reminderMinute'] as int?;
         if (savedHour != null && savedMinute != null) {
@@ -466,8 +471,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         iconBg: WW.gold,
                         title: 'Your Plan',
                         first: true,
-                        right: _freeBadge(),
-                        onTap: () => _snack('Upgrade coming soon'),
+                        right: _planBadge(),
+                        onTap: () => _isPremium
+                            ? _snack("You're on Premium!")
+                            : context.push(Routes.upgrade),
                       ),
                       _row(
                         icon: Icons.help_outline_rounded,
@@ -728,19 +735,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _freeBadge() {
+  // Was hardcoded 'Free' regardless of real state — now reflects the
+  // isPremium loaded in _loadPrefs() above.
+  Widget _planBadge() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: WW.chipBg,
+        color: _isPremium ? WW.gold.withValues(alpha: 0.15) : WW.chipBg,
         borderRadius: BorderRadius.circular(6),
       ),
-      child: const Text(
-        'Free',
+      child: Text(
+        _isPremium ? 'Premium' : 'Free',
         style: TextStyle(
           fontSize: 11,
           fontWeight: FontWeight.w700,
-          color: WW.primary,
+          color: _isPremium ? WW.gold : WW.primary,
         ),
       ),
     );

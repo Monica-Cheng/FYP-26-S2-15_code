@@ -955,7 +955,16 @@ class _FeaturedCard extends StatelessWidget {
                     children: [
                       if (level.isNotEmpty)
                         _FeaturedChip(level),
-                      if (days > 0) ...[
+                      // This card is shared by the Featured section (real
+                      // official plans only, via _allPlans' isCustom
+                      // filter) AND _coachPlans — coach-assigned custom
+                      // routines fetched separately, bypassing that
+                      // filter, so `days` here can genuinely be a custom
+                      // plan's exercise-day count rather than a real
+                      // weekly constraint. Gate on the plan's own
+                      // isCustom field (badgeLabel == 'COACH' would work
+                      // too, but this reads directly off the actual data).
+                      if (days > 0 && plan['isCustom'] != true) ...[
                         const SizedBox(width: 5),
                         _FeaturedChip('$days d/wk'),
                       ],

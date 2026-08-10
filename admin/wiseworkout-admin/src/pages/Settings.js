@@ -18,6 +18,7 @@ const adminUpdateSettings = httpsCallable(
 const defaultSubscription = {
   freeTierAIMessages: 10,
   premiumPrice: 9.99,
+  premiumPriceAnnual: 79.99,
 };
 
 // Fallback shape only — used to fill in genuinely missing fields from
@@ -267,6 +268,10 @@ function Settings() {
             Number.isFinite(Number(subscription?.premiumPrice))
               ? Number(subscription.premiumPrice)
               : defaultSubscription.premiumPrice,
+          premiumPriceAnnual:
+            Number.isFinite(Number(subscription?.premiumPriceAnnual))
+              ? Number(subscription.premiumPriceAnnual)
+              : defaultSubscription.premiumPriceAnnual,
         };
         
         setSubscription(loadedSubscriptionData);
@@ -307,6 +312,14 @@ function Settings() {
     ) {
       errors['subscription.premiumPrice'] =
         'Premium price must be a non-negative number.';
+    }
+
+    if (
+      !Number.isFinite(subscription.premiumPriceAnnual) ||
+      subscription.premiumPriceAnnual < 0
+    ) {
+      errors['subscription.premiumPriceAnnual'] =
+        'Annual premium price must be a non-negative number.';
     }
     setFieldErrors(errors);
     setSaveError('');
@@ -735,6 +748,42 @@ function Settings() {
           }}
         >
           {fieldErrors['subscription.premiumPrice']}
+        </div>
+      )}
+    </div>
+  </SettingRow>
+
+  <SettingRow
+    label="Premium price (USD/year)"
+    sub="Annual subscription price"
+  >
+    <div>
+      <input
+        type="number"
+        min="0"
+        step="0.01"
+        className="wwa-input wwa-input-sm"
+        value={subscription.premiumPriceAnnual}
+        onChange={e =>
+          setSubscription(prev => ({
+            ...prev,
+            premiumPriceAnnual:
+              e.target.value === ''
+                ? 0
+                : Number(e.target.value),
+          }))
+        }
+      />
+
+      {fieldErrors['subscription.premiumPriceAnnual'] && (
+        <div
+          style={{
+            color: '#cc3333',
+            fontSize: 12,
+            marginTop: 4,
+          }}
+        >
+          {fieldErrors['subscription.premiumPriceAnnual']}
         </div>
       )}
     </div>

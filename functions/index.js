@@ -3425,6 +3425,7 @@ function normalizeAdminSubscription(rawSubscription) {
 
   const freeTierAIMessages = Number(data.freeTierAIMessages);
   const premiumPrice = Number(data.premiumPrice);
+  const premiumPriceAnnual = Number(data.premiumPriceAnnual);
 
   if (
     !Number.isInteger(freeTierAIMessages) ||
@@ -3446,9 +3447,20 @@ function normalizeAdminSubscription(rawSubscription) {
     );
   }
 
+  if (
+    !Number.isFinite(premiumPriceAnnual) ||
+    premiumPriceAnnual < 0
+  ) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Annual premium price must be a valid non-negative number.",
+    );
+  }
+
   return {
     freeTierAIMessages,
     premiumPrice,
+    premiumPriceAnnual,
   };
 }
 
@@ -3616,6 +3628,7 @@ exports.adminGetSettingsDashboard = onCall(async (request) => {
       {
         freeTierAIMessages: 10,
         premiumPrice: 9.99,
+        premiumPriceAnnual: 79.99,
       },
   };
 });

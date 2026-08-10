@@ -135,6 +135,17 @@ class _MissedCheckinScreenState extends State<MissedCheckinScreen> {
 
     final advice = _adviceFor(_selectedReason!);
     _snack(advice);
+    // Same short delay build_routine_screen.dart's _saveRoutine() already
+    // uses between showing a confirmation and popping — both of this
+    // screen's callers (home_screen.dart's banner, and progress_screen
+    // .dart's "Change reason" link on its live-streamed Check-Ins list)
+    // already show the just-logged data the instant the write above
+    // resolves, since that caller is still mounted underneath this screen.
+    // Popping immediately therefore reads as an in-place refresh rather
+    // than a real navigation — this beat gives the return trip enough time
+    // to register as an intentional action.
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (!mounted) return;
     context.pop();
   }
 

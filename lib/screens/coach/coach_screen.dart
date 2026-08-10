@@ -1021,36 +1021,44 @@ class _CoachScreenState extends State<CoachScreen> {
   // (!_isPremium && remaining != null, evaluated by _buildBannerArea()).
   // No close button by design: this is the user's remaining credit, not a
   // dismissible hint.
+  // Tappable only while blocked (!_canSend) — otherwise this is just an
+  // informational credit counter, not an upgrade prompt. Previously had no
+  // tap handler at all; the disabled input's hint text ("Message limit
+  // reached — upgrade for unlimited access") has none either, so this card
+  // is the one surface that now opens the full-page Upgrade screen.
   Widget _buildFreeMessagesCard(int remaining) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-      decoration: BoxDecoration(
-        color: WW.chipBg,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.bolt_rounded, size: 14, color: WW.primary),
-          const SizedBox(width: 8),
-          const Expanded(
-            child: Text(
-              'Free messages this month',
-              style: TextStyle(
-                fontSize: 11.5,
-                fontWeight: FontWeight.w600,
-                color: WW.primaryDark,
+    return GestureDetector(
+      onTap: _canSend ? null : () => context.push(Routes.upgrade),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: WW.chipBg,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.bolt_rounded, size: 14, color: WW.primary),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text(
+                'Free messages this month',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: WW.primaryDark,
+                ),
               ),
             ),
-          ),
-          Text(
-            '$remaining / ${AppConstants.freeMessageLimit}',
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w800,
-              color: WW.primary,
+            Text(
+              '$remaining / ${AppConstants.freeMessageLimit}',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                color: WW.primary,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

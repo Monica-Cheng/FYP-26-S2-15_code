@@ -139,9 +139,7 @@ class _HomeScreenState extends State<HomeScreen> {
           iconBg: WW.lavenderBg,
           title: 'Scan Food',
           subtitle: 'Snap a photo for instant calories',
-          onTap: () => context
-              .push(Routes.nutritionScan)
-              .then((_) => _homeTabKey.currentState?._loadUserData()),
+          onTap: () => _handleNutritionQuickAddTap(null),
         ),
         QuickAddOption(
           icon: Icons.edit_note_rounded,
@@ -149,9 +147,7 @@ class _HomeScreenState extends State<HomeScreen> {
           iconBg: WW.tealBg,
           title: 'Describe a Meal',
           subtitle: 'Type what you ate instead',
-          onTap: () => context
-              .push(Routes.nutritionScan, extra: 'describe')
-              .then((_) => _homeTabKey.currentState?._loadUserData()),
+          onTap: () => _handleNutritionQuickAddTap('describe'),
         ),
         QuickAddOption(
           icon: Icons.fitness_center_rounded,
@@ -167,6 +163,28 @@ class _HomeScreenState extends State<HomeScreen> {
       title: 'Quick Add',
       subtitle: 'What would you like to log?',
     );
+  }
+
+  // Gated on isPremium — 'Log Activity' above stays ungated. QuickAddOption
+  // .onTap already fires after the sheet has closed (see quick_add_sheet
+  // .dart's own doc comment), so it's safe to await here and only navigate
+  // into the real scanner once isPremium is confirmed true; free users are
+  // sent to the full-page Upgrade screen (Routes.upgrade) instead and
+  // never reach Routes.nutritionScan at all.
+  Future<void> _handleNutritionQuickAddTap(String? extra) async {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    final profile = await _firestoreService.getUserProfile(uid);
+    final isPremium = profile?['isPremium'] as bool? ?? false;
+    if (!isPremium) {
+      if (mounted) {
+        await context.push(Routes.upgrade);
+      }
+      return;
+    }
+    if (!mounted) return;
+    await context.push(Routes.nutritionScan, extra: extra);
+    _homeTabKey.currentState?._loadUserData();
   }
 
   @override
@@ -361,7 +379,16 @@ class _HomeTabState extends State<_HomeTab> {
     _progressStreamSub = _firestoreService
         .getPlanProgressStream(uid, planId)
         .listen((progress) async {
-      if (progress == null || !mounted) return;
+      if (!mounted) return;
+      if (progress == null) {
+        // Progress doc is gone (e.g. the tracked plan was deleted — see
+        // FirestoreService.deleteCustomPlan()) — clear the stale
+        // "Completed today!" state instead of leaving whatever was last
+        // set, which otherwise persisted indefinitely since this listener
+        // previously just returned here without touching _todayCompleted.
+        setState(() => _todayCompleted = false);
+        return;
+      }
       final newDayIndex =
           (progress['currentDayIndex'] as num?)?.toInt() ?? 1;
       // Matches plan_detail_screen.dart/plan_schedule_screen.dart's
@@ -405,7 +432,16 @@ class _HomeTabState extends State<_HomeTab> {
   Future<void> _loadTodaySession(String uid, int currentDayIndex) async {
     try {
       final plan = await _firestoreService.getTrackedPlan(uid);
-      if (plan == null || !mounted) return;
+      if (!mounted) return;
+      if (plan == null) {
+        // Plan doc is gone (e.g. deleted while tracked — see
+        // FirestoreService.deleteCustomPlan()) — clear the stale session
+        // instead of leaving whatever exercises were last loaded, which
+        // otherwise persisted indefinitely since this previously just
+        // returned here without touching _todaySession.
+        setState(() => _todaySession = null);
+        return;
+      }
       final planId = plan['id'] as String? ?? '';
       if (planId.isEmpty) return;
       final sessions = (plan['sessions'] as List<dynamic>?) ?? [];
@@ -505,6 +541,27 @@ class _HomeTabState extends State<_HomeTab> {
       final hasMissedDoc =
           await _firestoreService.hasMissedSessionForDate(uid, yesterday);
       if (hasMissedDoc) return;
+
+      // A rest day is never a "missed workout" — check the session that was
+      // actually scheduled for currentDayIndex on the plan that was
+      // actually tracked (trackedPlanId, already resolved above; not
+      // whatever plan the user might be viewing right now) before flagging
+      // anything. Fails safe in every direction: if the plan was deleted,
+      // or currentDayIndex no longer maps to a real entry in its current
+      // sessions[] (e.g. the plan was edited/shortened since this progress
+      // was last advanced), we can't positively confirm this was a real
+      // workout day — and a false-positive nag is worse than occasionally
+      // staying silent, so "can't determine" is treated the same as "was a
+      // rest day", not the same as "wasn't one".
+      final trackedPlan = await _firestoreService.getPlan(trackedPlanId);
+      final missedSessions = trackedPlan?['sessions'] as List<dynamic>?;
+      if (missedSessions == null || missedSessions.isEmpty) return;
+      final missedSessionIdx = currentDayIndex - 1;
+      if (missedSessionIdx < 0 || missedSessionIdx >= missedSessions.length) {
+        return;
+      }
+      final missedSession = missedSessions[missedSessionIdx];
+      if (missedSession is! Map || missedSession['isRestDay'] == true) return;
 
       if (!mounted) return;
       setState(() {

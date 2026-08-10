@@ -241,6 +241,36 @@ class FirestoreService {
     return _configNumList(config, ['levelThresholds'], fallback);
   }
 
+  // ---------------------------------------------------------------------------
+  // Subscription/pricing config — adminSettings/global (admin-edited
+  // through Settings.js's "Subscription" panel, via the adminUpdateSettings
+  // Cloud Function). Exact same pattern as getGamificationConfig() above:
+  // static cache (FirestoreService() isn't a singleton, so only a static
+  // field actually persists "fetch once per session" across every call
+  // site), lazily fetched on first use, returns {} on missing/malformed/
+  // error and never throws — every caller does its own field-level
+  // fallback when reading a specific value (see upgrade_screen.dart).
+  //
+  // adminSettings/global already held premiumPrice/freeTierAIMessages
+  // (written correctly by adminUpdateSettings) but had no corresponding
+  // client-side read anywhere, and no Firestore rule even permitted one —
+  // both fixed alongside this method (see firestore.rules' adminSettings
+  // match block).
+  // ---------------------------------------------------------------------------
+  static Map<String, dynamic>? _subscriptionConfigCache;
+
+  Future<Map<String, dynamic>> getSubscriptionConfig() async {
+    final cached = _subscriptionConfigCache;
+    if (cached != null) return cached;
+    try {
+      final doc = await _db.collection('adminSettings').doc('global').get();
+      _subscriptionConfigCache = doc.exists ? (doc.data() ?? {}) : {};
+    } catch (_) {
+      _subscriptionConfigCache = {};
+    }
+    return _subscriptionConfigCache!;
+  }
+
   // Shared by saveGymSession() and finalizeInProgressSession() — the one
   // place gym XP is now actually computed, collapsing what used to be two
   // separately-hardcoded `totalSets * 15` copies into a single source read
@@ -427,7 +457,15 @@ class FirestoreService {
       // all), this just makes it explicit going forward. bodyProfile is
       // spread after so it could still override this if a caller ever
       // needed to (none do today).
-      {'role': 'user', ...bodyProfile},
+      //
+      // 'isPremium' defaults to false for the same reason — previously
+      // absent entirely on a brand-new account (every read already falls
+      // back to `?? false`, so this alone was never the cause of a crash;
+      // see getCreatedChallengeCount()'s own fix for the actual bug this
+      // was investigated alongside). Explicit false here just makes the
+      // field's existence match every other account-level flag instead of
+      // being undefined until an admin sets it once.
+      {'role': 'user', 'isPremium': false, ...bodyProfile},
       SetOptions(merge: true),
     );
     if (publicUpdates.isNotEmpty) {
@@ -2238,6 +2276,24 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Whether uid already has at least one of their OWN personal custom
+  // routines (isCustom:true, createdBy:uid) — coach-authored plans
+  // (isCoachPlan:true, saved via the same saveCustomRoutine()) are excluded,
+  // since those aren't the user's personal free-tier routine slot. Filters
+  // client-side over getPlans()'s full catalog rather than a new server-side
+  // query shape, matching plans_screen.dart's own existing "my custom
+  // plans" filter (isCustom==true && createdBy==uid) exactly. Used to gate
+  // new personal-routine creation on the free tier.
+  // ---------------------------------------------------------------------------
+  Future<bool> hasExistingCustomRoutine(String uid) async {
+    final allPlans = await getPlans();
+    return allPlans.any((p) =>
+        p['isCustom'] == true &&
+        (p['createdBy'] as String?) == uid &&
+        p['isCoachPlan'] != true);
+  }
+
+  // ---------------------------------------------------------------------------
   // planProgress subcollection helpers — per-plan progress isolation.
   // ---------------------------------------------------------------------------
 
@@ -2577,7 +2633,16 @@ class FirestoreService {
     await _db.collection(Collections.plans).add({
       'name': routineName,
       'level': 'Custom',
-      'type': 'Gym',
+      // Custom/coach-built routines are intentionally free-form — they may
+      // mix strength exercises and cardio blocks on any day — so they're
+      // never really "Gym" specifically, regardless of what the user
+      // happened to add first. 'Combine' matches how official plans that
+      // mix both are already categorized (see explore_screen.dart's
+      // _gymPlans/_cardioPlans/_combinePlans sport filters and
+      // _accentColor()). This is shared by both a normal personal routine
+      // and a coach-authored one (isCoachPlan above) — same builder, same
+      // free-form schema, so both get the same type here.
+      'type': 'Combine',
       'daysPerWeek': daysPerWeek,
       'description': 'Custom routine created by user',
       'isCustom': true,
@@ -2605,9 +2670,25 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
   // Deletes a custom plan from plans/{planId}, matching customRoutines docs
   // by name, and planProgress/{planId} if it exists.
+  //
+  // If planId is also the user's currently-tracked plan, clears
+  // trackedPlanId/trackedPlanName too (empty string, not FieldValue.delete()
+  // — matches getTrackedPlan()'s own null-handling, which treats an empty
+  // trackedPlanId the same as a missing one, and matches home_screen.dart's/
+  // plans_screen.dart's own "no tracked plan" defaults). Without this,
+  // deleting a tracked plan left users/{uid}.trackedPlanId pointing at a
+  // now-nonexistent plans/{} doc — Plans tab's getTrackedPlan() correctly
+  // returned null and showed "No tracked plan", but Home still had a
+  // non-empty trackedPlanName to render a stale "Today's Plan" card with
+  // (that field isn't derived from the plan doc at all, so it never
+  // reflected the deletion on its own).
   // ---------------------------------------------------------------------------
   Future<void> deleteCustomPlan(
       String uid, String planId, String planName) async {
+    final userDoc =
+        await _db.collection(Collections.users).doc(uid).get();
+    final isTracked = (userDoc.data()?['trackedPlanId'] as String?) == planId;
+
     await _db.collection(Collections.plans).doc(planId).delete();
 
     final snapshot = await _db
@@ -2628,6 +2709,13 @@ class FirestoreService {
           .doc(planId)
           .delete();
     } catch (_) {}
+
+    if (isTracked) {
+      await _db.collection(Collections.users).doc(uid).update({
+        'trackedPlanId': '',
+        'trackedPlanName': '',
+      });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -4963,6 +5051,41 @@ class FirestoreService {
     return challengeRef.id;
   }
 
+  /// Count of challenges [uid] has created (createdBy == uid). Used to gate
+  /// new challenge creation on the free tier (see AppConstants
+  /// .freeChallengeLimit).
+  ///
+  /// Deliberately queries participantUids arrayContains uid (same shape as
+  /// getMyChallengesStream() above, filtering createdBy client-side)
+  /// instead of where('createdBy', isEqualTo: uid) directly. The original
+  /// createdBy-only query was rejected outright by firestore.rules'
+  /// /challenges/{challengeId} read rule (`isGlobal==true || uid in
+  /// participantUids || uid in invitedUids`) — Firestore denies an ENTIRE
+  /// list query, not just individual result docs, whenever the rule can't
+  /// be proven to hold for every possible matching document from the
+  /// query's own where-clauses alone; createdBy==uid alone doesn't
+  /// constrain participantUids/invitedUids/isGlobal at all, even though
+  /// every real result would in fact satisfy the rule (the creator is
+  /// always auto-added to participantUids at creation). That
+  /// PERMISSION_DENIED was getting silently swallowed by
+  /// create_challenge_screen.dart's generic `catch (_)`, surfacing only as
+  /// "Something went wrong" for every non-premium user on their very
+  /// first challenge (0 existing challenges, so this method's result was
+  /// needed either way) — confirmed via this exact rule text and the
+  /// query's where-clause shape, not by guessing. participantUids
+  /// arrayContains uid IS provable against that rule's middle clause
+  /// directly, so it isn't rejected; it also needs no new composite index
+  /// (a single arrayContains filter with no orderBy uses Firestore's
+  /// automatic single-field indexing) and is covered by the same index
+  /// getMyChallengesStream() already relies on regardless.
+  Future<int> getCreatedChallengeCount(String uid) async {
+    final snapshot = await _db
+        .collection(Collections.challenges)
+        .where('participantUids', arrayContains: uid)
+        .get();
+    return snapshot.docs.where((d) => d.data()['createdBy'] == uid).length;
+  }
+
   /// Shared notification-writing shape for a challenge_invite — one entry
   /// per invited uid, added to [batch] (not committed here). Used by both
   /// createChallenge() (invites sent at creation time) and
@@ -5102,6 +5225,30 @@ class FirestoreService {
   Future<void> joinChallenge(String uid, String challengeId) async {
     await _db.collection(Collections.challenges).doc(challengeId).update({
       'participantUids': FieldValue.arrayUnion([uid]),
+    });
+  }
+
+  /// Permanently deletes a challenge — creator-only in practice (enforced
+  /// by firestore.rules' `allow delete`, which requires resource.data
+  /// .createdBy == request.auth.uid). No subcollection cleanup
+  /// (progressCache/progressNotifications) — matches
+  /// adminDeleteChallenge()'s own precedent in functions/index.js of not
+  /// chasing orphaned subcollection docs; nothing ever reads them once
+  /// this challengeId is gone (getChallengeLeaderboard() only reads
+  /// progressCache for uids in a challenge's own still-current
+  /// participantUids array).
+  Future<void> deleteChallenge(String challengeId) async {
+    await _db.collection(Collections.challenges).doc(challengeId).delete();
+  }
+
+  /// Removes [uid] from a challenge's participantUids — self-only in
+  /// practice (enforced by firestore.rules' leave-a-private-challenge
+  /// update branch, plus the pre-existing isGlobal branch that already
+  /// covered public challenges). Mirrors declineChallengeInvite()'s shape:
+  /// a single arrayRemove, no other side effect.
+  Future<void> leaveChallenge(String challengeId, String uid) async {
+    await _db.collection(Collections.challenges).doc(challengeId).update({
+      'participantUids': FieldValue.arrayRemove([uid]),
     });
   }
 

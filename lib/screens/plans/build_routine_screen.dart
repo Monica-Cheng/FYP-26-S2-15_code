@@ -1034,6 +1034,24 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           daysPerWeek: activeDays,
         );
       } else {
+        // Free-tier gate — coach plans (_isCoachPlan) are exempt entirely,
+        // no profile/count read even attempted for them. Edit-mode saves
+        // above are never gated (not a NEW routine). Threshold is a flat
+        // "1 existing personal routine" check, deliberately not tied to
+        // the still-unused AppConstants.freeRoutineLimit (=3) — see this
+        // gate's own investigation, that constant's intended scope was
+        // never documented and nothing else references it.
+        if (!_isCoachPlan) {
+          final profile = await FirestoreService().getUserProfile(uid);
+          final isPremium = profile?['isPremium'] as bool? ?? false;
+          if (!isPremium &&
+              await FirestoreService().hasExistingCustomRoutine(uid)) {
+            if (mounted) {
+              await context.push(Routes.upgrade);
+            }
+            return;
+          }
+        }
         await FirestoreService().saveCustomRoutine(
           uid: uid,
           routineName: _routineName.trim(),
@@ -1233,6 +1251,17 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
           return Padding(
             padding: const EdgeInsets.only(right: 8),
             child: _DayTab(
+              // Stable per-day identity across rebuilds — without this,
+              // any state-changing menu action (Rename, Mark/Unmark Rest
+              // Day) that runs _BuildRoutineScreenState.setState() could
+              // cause this tab's own State object (and the LayerLink/
+              // OverlayEntry its popup menu depends on) to be torn down
+              // and recreated instead of updated in place, orphaning the
+              // just-closed popup's overlay and leaving a full-screen,
+              // invisible scrim absorbing all further taps — this is what
+              // was actually behind the reported "stuck screen" bug, not
+              // just the RenderFlex overflow.
+              key: ValueKey(_days[i]['id']),
               label: _days[i]['label'] as String,
               active: active,
               isRestDay: _days[i]['isRestDay'] == true,
@@ -1375,21 +1404,44 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
   Widget _buildFooter() {
     final isActiveDayRest = _days[_activeDay]['isRestDay'] == true;
     if (isActiveDayRest) {
+      // Deliberately mirrors the non-rest footer's Row/Expanded/48px-tall
+      // shape below instead of swapping to a structurally different
+      // subtree (e.g. a bare Center+Text) — this was the actual root
+      // cause of the "stuck screen" bug: swapping bottomNavigationBar to
+      // a differently-shaped widget in the same rebuild as the day-tab
+      // and exercise-list content changing elsewhere left the day tab's
+      // popup-menu button unable to register taps afterward (confirmed by
+      // reproducing/fixing it in isolation — a Scaffold/hit-test framework
+      // interaction, not anything wrong with the day-tab menu code
+      // itself). Keep this shape-matching intact rather than
+      // "simplifying" it back to a plain Center+Text.
       return Container(
         color: WW.card,
         child: SafeArea(
           top: false,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
-            child: Center(
-              child: Text(
-                'Rest day — no exercises to add',
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: WW.textSec,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Container(
+                    height: 48,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: WW.elevated,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Text(
+                      'Rest day — no exercises to add',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: WW.textSec,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
           ),
         ),
@@ -1483,6 +1535,7 @@ class _DayTab extends StatefulWidget {
   final VoidCallback onToggleRest;
 
   const _DayTab({
+    super.key,
     required this.label,
     required this.active,
     required this.isRestDay,
@@ -1508,7 +1561,14 @@ class _DayTabState extends State<_DayTab> {
   }
 
   void _openMenu() {
-    const menuWidth = 170.0;
+    // Widened from the original 170 — that fit "Rename Day"/"Delete Day"
+    // but overflowed "Mark as Rest Day"/"Unmark Rest Day" (RenderFlex
+    // overflow inside _menuItem's Row, ~170px minus its own 28px of
+    // horizontal padding left too little room for the longer label plus
+    // icon). _menuItem's Text is also wrapped in Expanded+ellipsis below
+    // as a second line of defense (e.g. larger system text-scale settings),
+    // not just a wider fixed number.
+    const menuWidth = 200.0;
     // The old fixed Offset(-130, 28) was copied from _ExerciseCard's "⋮"
     // menu below, whose CompositedTransformTarget wraps only a small icon
     // near the right edge of a wide card — subtracting 130px there still
@@ -1619,12 +1679,22 @@ class _DayTabState extends State<_DayTab> {
           children: [
             Icon(icon, size: 15, color: color),
             const SizedBox(width: 10),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: color,
+            // Expanded + ellipsis (not a bare Text) — a fixed-width popup
+            // combined with an unclipped label is exactly what caused the
+            // RenderFlex overflow bug for "Mark as Rest Day"/"Unmark Rest
+            // Day"; this keeps any future/longer label (or larger system
+            // text-scale) from doing the same instead of only fitting
+            // today's specific strings.
+            Expanded(
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: color,
+                ),
               ),
             ),
           ],
@@ -1644,16 +1714,23 @@ class _DayTabState extends State<_DayTab> {
           height: 36,
           padding: const EdgeInsets.only(left: 14, right: 4),
           decoration: BoxDecoration(
-            color: widget.active ? WW.primary : WW.elevated,
+            // Muted fill for an inactive rest day (vs. WW.elevated for an
+            // inactive workout day) — the icon alone read too subtle on
+            // its own at this small size, so the tab itself dims too.
+            // Active-state fill is left as WW.primary either way, since
+            // that state already carries the icon + suffix label.
+            color: widget.active
+                ? WW.primary
+                : (widget.isRestDay
+                    ? WW.elevated.withValues(alpha: 0.6)
+                    : WW.elevated),
             borderRadius: BorderRadius.circular(10),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               // Same nightlight_round icon plan_schedule_screen.dart's
-              // _ScheduleDayCard already uses for its rest-day badge — kept
-              // to just an icon here (no separate pill/background) since
-              // this tab is already a compact, self-contained pill.
+              // _ScheduleDayCard already uses for its rest-day badge.
               if (widget.isRestDay) ...[
                 Icon(
                   Icons.nightlight_round,
@@ -1663,7 +1740,10 @@ class _DayTabState extends State<_DayTab> {
                 const SizedBox(width: 5),
               ],
               Text(
-                widget.label,
+                // Icon alone was too subtle to read as "rest" at this
+                // size — an explicit suffix makes it unambiguous without
+                // needing a separate badge/pill.
+                widget.isRestDay ? '${widget.label} · Rest' : widget.label,
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w700,
@@ -1722,9 +1802,20 @@ class _ExerciseCardState extends State<_ExerciseCard> {
   OverlayEntry? _overlayEntry;
   final LayerLink _layerLink = LayerLink();
 
+  // Deliberately NOT _closeMenu() — that calls setState(), which is illegal
+  // from within dispose() (State.mounted is still true for the entire
+  // duration of dispose() itself, only flipping false once it returns, so
+  // the `if (mounted)` guard inside _closeMenu() doesn't actually protect
+  // against this). Confirmed via a real crash: converting a day with an
+  // exercise on it to a rest day unmounts every _ExerciseCard on that day
+  // at once, and dispose() calling _closeMenu() threw
+  // "'_lifecycleState != _ElementLifecycle.defunct': is not true" here.
+  // Only the overlay entry itself needs cleanup on dispose — the
+  // _menuOpen flag is irrelevant once this widget no longer exists.
   @override
   void dispose() {
-    _closeMenu();
+    _overlayEntry?.remove();
+    _overlayEntry = null;
     super.dispose();
   }
 

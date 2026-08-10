@@ -675,6 +675,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
     final daysPerWeek = (_plan?['daysPerWeek'] as num?)?.toInt() ?? 0;
     final level = _plan?['level'] as String? ?? '';
     final type = _plan?['type'] as String? ?? '';
+    final isCustom = _plan?['isCustom'] == true;
 
     final progress = totalSessions > 0 ? (_currentDayIndex - 1) / totalSessions : 0.0;
     final percent = (progress * 100).round();
@@ -713,7 +714,14 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
             spacing: 6,
             runSpacing: 6,
             children: [
-              if (daysPerWeek > 0) _InfoChip('$daysPerWeek days/wk'),
+              // daysPerWeek is a real, enforced repeating-weekly-pattern
+              // constraint for admin plans (used by Plan Match scoring) —
+              // for custom/coach routines it's just a count of days with
+              // exercises, which reads as a misleading weekly rate for a
+              // multi-week routine (e.g. "8 days/wk" on a 13-day routine).
+              // Hidden for custom plans only; daysPerWeek itself is
+              // unchanged, still saved/read exactly as before.
+              if (daysPerWeek > 0 && !isCustom) _InfoChip('$daysPerWeek days/wk'),
               if (level.isNotEmpty) _InfoChip(level),
               if (type.isNotEmpty) _InfoChip(type),
             ],

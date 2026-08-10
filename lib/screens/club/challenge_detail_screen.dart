@@ -157,6 +157,104 @@ class _ChallengeDetailScreenState extends State<ChallengeDetailScreen> {
     );
   }
 
+  // Same AlertDialog shape as plan_detail_screen.dart's own delete
+  // confirmation (WW.card background, 16-radius, Cancel/destructive-red
+  // TextButton pair) — the established confirm-dialog style in this app.
+  Future<void> _confirmDeleteChallenge() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Delete this challenge?',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: WW.text),
+        ),
+        content: const Text(
+          'This removes it for everyone who joined.',
+          style: TextStyle(fontSize: 14, color: WW.textSec),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Delete',
+              style: TextStyle(color: Color(0xFFEF4444), fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
+    try {
+      await _firestoreService.deleteChallenge(widget.challengeId);
+    } catch (_) {
+      if (mounted) _snack('Failed to delete challenge. Please try again.');
+      return;
+    }
+    if (!mounted) return;
+    _snack('Challenge deleted');
+    // Same short delay plan_detail_screen.dart's own delete flow uses
+    // between showing a SnackBar and popping — popping immediately tears
+    // the route down before the SnackBar has actually rendered, so it
+    // would never be visible at all.
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (!mounted) return;
+    context.pop();
+  }
+
+  Future<void> _confirmLeaveChallenge() async {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WW.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Leave this challenge?',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: WW.text),
+        ),
+        content: const Text(
+          "You'll be removed from this challenge and its leaderboard.",
+          style: TextStyle(fontSize: 14, color: WW.textSec),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: WW.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Leave',
+              style: TextStyle(color: Color(0xFFEF4444), fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
+    try {
+      await _firestoreService.leaveChallenge(widget.challengeId, uid);
+    } catch (_) {
+      if (mounted) _snack('Failed to leave challenge. Please try again.');
+      return;
+    }
+    if (!mounted) return;
+    _snack('Left challenge');
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (!mounted) return;
+    context.pop();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -242,7 +340,6 @@ class _ChallengeDetailScreenState extends State<ChallengeDetailScreen> {
     final color = _categoryColor(metricType);
     final participantUids =
         (challenge['participantUids'] as List?)?.cast<String>() ?? [];
-    final isGlobal = challenge['isGlobal'] == true;
     final isParticipant = participantUids.contains(uid);
     final isCreator = challenge['createdBy'] == uid;
 
@@ -338,9 +435,17 @@ class _ChallengeDetailScreenState extends State<ChallengeDetailScreen> {
               extra: {'challengeId': widget.challengeId},
             ),
           ),
-          if (!isGlobal && isParticipant) ...[
+          // Was `!isGlobal && isParticipant` — Invite Friends only ever
+          // makes sense for a private challenge, but that's already
+          // guaranteed by `isCreator` below (a regular user is never the
+          // creator of an isGlobal:true challenge — those are always
+          // createdBy:adminUid), so dropping !isGlobal here doesn't change
+          // Invite Friends' visibility. It DOES matter for Leave Challenge
+          // below, which — per spec — must be offered for both private and
+          // global challenges, not just private ones.
+          if (isParticipant) ...[
             const SizedBox(height: 24),
-            if (isCreator)
+            if (isCreator) ...[
               GestureDetector(
                 onTap: _showInviteSheet,
                 child: Container(
@@ -367,19 +472,63 @@ class _ChallengeDetailScreenState extends State<ChallengeDetailScreen> {
                     ),
                   ),
                 ),
-              )
-            else
-              // Explains the absent Invite Friends button rather than
-              // leaving a silent gap — only the creator can invite for a
-              // private challenge; a non-creator participant would
-              // otherwise have no way to know why the button isn't there.
-              const Center(
-                child: Padding(
-                  padding: EdgeInsets.symmetric(vertical: 4),
-                  child: Text(
-                    'Only the challenge creator can invite friends',
-                    style: TextStyle(fontSize: 12, color: WW.textSec),
-                    textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              GestureDetector(
+                onTap: _confirmDeleteChallenge,
+                child: Container(
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEF4444).withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFEF4444), width: 1),
+                  ),
+                  child: const Center(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.delete_outline_rounded,
+                            color: Color(0xFFEF4444), size: 18),
+                        SizedBox(width: 8),
+                        Text(
+                          'Delete Challenge',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFFEF4444),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ] else
+              GestureDetector(
+                onTap: _confirmLeaveChallenge,
+                child: Container(
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEF4444).withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFEF4444), width: 1),
+                  ),
+                  child: const Center(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.logout_rounded, color: Color(0xFFEF4444), size: 18),
+                        SizedBox(width: 8),
+                        Text(
+                          'Leave Challenge',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFFEF4444),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),

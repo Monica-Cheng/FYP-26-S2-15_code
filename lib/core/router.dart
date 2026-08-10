@@ -48,6 +48,7 @@ import '../screens/cardio/cardio_setup_screen.dart';
 import '../screens/cardio/cardio_session_screen.dart';
 import '../screens/cardio/outdoor_cardio_screen.dart';
 import '../screens/nutrition/nutrition_scan_screen.dart';
+import '../screens/premium/upgrade_screen.dart';
 import '../screens/splash_screen.dart';
 
 // Route path constants — use these instead of hardcoding strings
@@ -104,6 +105,7 @@ class Routes {
   static const String midPlanCardioComplete = '/mid-plan-cardio-complete';
   static const String coachRegister = '/coach-register';
   static const String coachDashboard = '/coach-dashboard';
+  static const String upgrade = '/upgrade';
 }
 
 // Cache for gymSession's pageBuilder key — see that GoRoute's own doc
@@ -501,6 +503,10 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => NutritionScanScreen(
           startInDescribeMode: state.extra == 'describe',
         ),
+      ),
+      GoRoute(
+        path: Routes.upgrade,
+        builder: (context, state) => const UpgradeScreen(),
       ),
       // Temporary/scaffolding — see the Routes.outdoorCardioTest comment.
       GoRoute(
