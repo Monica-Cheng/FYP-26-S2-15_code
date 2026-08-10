@@ -1919,6 +1919,7 @@ function normalizeAdminDesignedBy(value) {
 // 'rest'/'cardio'/'combined' type fields on plan.sessions[] entries or on
 // sessions/{id} docs (logged workouts) — those are separate namespaces.
 const VALID_PLAN_TYPES = ["Gym", "Cardio", "Combine"];
+const OFFICIAL_PLAN_WEEK_LENGTH = 7;
 
 function requireValidPlanType(value, fieldName) {
   const normalized = requireNonEmptyAdminString(value, fieldName);
@@ -1958,16 +1959,33 @@ function normalizeOfficialPlanData(rawData) {
   }
 
   const sessions = normalizeAdminPlanSessions(data.sessions);
+  const requiredDays = durationWeeks * OFFICIAL_PLAN_WEEK_LENGTH;
 
-  const actualTrainingDays =
-    sessions.filter((session) => session.isRestDay !== true).length;
-
-  if (actualTrainingDays !== daysPerWeek) {
+  if (sessions.length !== requiredDays) {
     throw new HttpsError(
         "invalid-argument",
-        `Days per week (${daysPerWeek}) must match the number of ` +
-        `training sessions (${actualTrainingDays}).`,
+        `This ${durationWeeks}-week plan requires exactly ` +
+        `${requiredDays} days. Currently ${sessions.length}.`,
     );
+  }
+
+  for (let weekIndex = 0; weekIndex < durationWeeks; weekIndex += 1) {
+    const workoutsThisWeek = sessions
+        .slice(
+            weekIndex * OFFICIAL_PLAN_WEEK_LENGTH,
+            (weekIndex + 1) * OFFICIAL_PLAN_WEEK_LENGTH,
+        )
+        .filter((session) => session.isRestDay !== true)
+        .length;
+
+    if (workoutsThisWeek !== daysPerWeek) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Week ${weekIndex + 1} must contain exactly ${daysPerWeek} ` +
+          `workout day${daysPerWeek === 1 ? "" : "s"}. ` +
+          `Currently ${workoutsThisWeek}.`,
+      );
+    }
   }
 
   const normalized = {

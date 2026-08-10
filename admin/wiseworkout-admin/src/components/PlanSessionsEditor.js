@@ -1,9 +1,15 @@
 import React from 'react';
 import { Clock3, Dumbbell, MoonStar, Plus, Trash2 } from 'lucide-react';
 import Badge from './ui/Badge';
-import { CARDIO_ACTIVITIES } from '../utils/planUtils';
+import {
+  CARDIO_ACTIVITIES,
+  OFFICIAL_PLAN_WEEK_LENGTH,
+  getRequiredOfficialDayCount,
+  groupOfficialSessionsByWeek,
+  validateOfficialWeeklySchedule,
+} from '../utils/planUtils';
 
-const DAYS_IN_WEEK = 7;
+const DAYS_IN_WEEK = OFFICIAL_PLAN_WEEK_LENGTH;
 
 const TAG_OPTIONS = ['Primary', 'Accessory'];
 const SET_TYPE_OPTIONS = [
@@ -24,8 +30,14 @@ function findCatalogExercise(exerciseCatalog, name) {
   return exerciseCatalog.find((exercise) => (exercise?.name || '').trim().toLowerCase() === normalizedName) || null;
 }
 
-function hasCatalogMuscle(exercise) {
-  return typeof exercise?.muscle === 'string' && exercise.muscle.trim() !== '';
+function getCatalogPrimaryMuscle(exercise) {
+  return typeof exercise?.muscle === 'string' ? exercise.muscle.trim() : '';
+}
+
+function resolveStrengthMuscle(catalogExercise, existingMuscle = '') {
+  const catalogMuscle = getCatalogPrimaryMuscle(catalogExercise);
+  if (catalogMuscle) return catalogMuscle;
+  return typeof existingMuscle === 'string' ? existingMuscle.trim() : '';
 }
 
 function cardioEditorFromPlanExercise(exercise) {
@@ -41,6 +53,32 @@ function cardioEditorFromPlanExercise(exercise) {
   };
 }
 
+function createOfficialTrainingSession(planType) {
+  const allowedKinds = getAllowedBlockKinds(planType);
+  return {
+    name: '',
+    isRestDay: false,
+    estimatedMinutes: '45',
+    exercises: allowedKinds.cardio && !allowedKinds.strength ? [emptyCardioBlock()] : [emptyExercise()],
+  };
+}
+
+function createOfficialRestSession() {
+  return {
+    name: 'Rest',
+    isRestDay: true,
+    estimatedMinutes: '0',
+    exercises: [],
+  };
+}
+
+function sessionHasMeaningfulContent(session) {
+  if (!session || session.isRestDay === true) return false;
+  if ((session.name || '').trim()) return true;
+  const exercises = Array.isArray(session.exercises) ? session.exercises : [];
+  return exercises.length > 0;
+}
+
 export function emptyExercise() {
   return { name: '', muscle: '', tag: 'Primary', sets: '3', reps: '10', restTime: '60', note: '', isCardio: false };
 }
@@ -49,17 +87,38 @@ export function emptyCardioBlock() {
   return { isCardio: true, cardioActivity: CARDIO_ACTIVITIES[0], cardioMinutes: '15' };
 }
 
-export function buildDefaultSessions(daysPerWeek) {
+export function buildDefaultSessions(daysPerWeek, durationWeeks = 1, planType = '') {
   const trainingCount = Math.min(Math.max(Number(daysPerWeek) || 3, 1), DAYS_IN_WEEK);
-  return Array.from({ length: DAYS_IN_WEEK }, (_, index) => {
-    const isTraining = index < trainingCount;
-    return {
-      name: isTraining ? '' : 'Rest',
-      isRestDay: !isTraining,
-      estimatedMinutes: isTraining ? '45' : '0',
-      exercises: isTraining ? [emptyExercise()] : [],
-    };
+  const requiredDays = getRequiredOfficialDayCount(durationWeeks);
+  return Array.from({ length: requiredDays }, (_, index) => {
+    const weekdayIndex = index % DAYS_IN_WEEK;
+    return weekdayIndex < trainingCount ? createOfficialTrainingSession(planType) : createOfficialRestSession();
   });
+}
+
+export function resizeOfficialSessions(sessions, durationWeeks) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  const requiredDays = getRequiredOfficialDayCount(durationWeeks);
+
+  if (list.length === requiredDays) {
+    return { sessions: list, removedSessions: [] };
+  }
+
+  if (list.length > requiredDays) {
+    return {
+      sessions: list.slice(0, requiredDays),
+      removedSessions: list.slice(requiredDays),
+    };
+  }
+
+  return {
+    sessions: [...list, ...Array.from({ length: requiredDays - list.length }, () => createOfficialRestSession())],
+    removedSessions: [],
+  };
+}
+
+export function officialSessionsNeedTruncationConfirm(sessions) {
+  return (Array.isArray(sessions) ? sessions : []).some(sessionHasMeaningfulContent);
 }
 
 export function sessionsFromPlan(rawSessions) {
@@ -110,12 +169,10 @@ export function sessionsFromPlan(rawSessions) {
   });
 }
 
-export function buildAndValidateSessions(sessions, expectedDaysPerWeek, planType, exerciseCatalog) {
-  if (sessions.length !== DAYS_IN_WEEK) {
-    return { error: `Exactly 7 sessions (one per day of the week) are required — currently ${sessions.length}.` };
-  }
-  if (!sessions.some((session) => !session.isRestDay)) {
-    return { error: 'A plan cannot consist of 7 rest days — at least one training session is required.' };
+export function buildAndValidateSessions(sessions, expectedDaysPerWeek, planType, exerciseCatalog, durationWeeks) {
+  const scheduleError = validateOfficialWeeklySchedule(sessions, expectedDaysPerWeek, durationWeeks);
+  if (scheduleError) {
+    return { error: scheduleError };
   }
 
   const allowedKinds = getAllowedBlockKinds(planType);
@@ -176,8 +233,9 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek, planType
       if (!catalogExercise) {
         return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Select an exercise from the catalog before saving.` };
       }
-      if (!hasCatalogMuscle(catalogExercise)) {
-        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: The selected catalog exercise is missing a target muscle.` };
+      const resolvedMuscle = resolveStrengthMuscle(catalogExercise, exercise.muscle);
+      if (!resolvedMuscle) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: The selected catalog exercise is missing primary muscle metadata.` };
       }
       const sets = Number(exercise.sets);
       const reps = Number(exercise.reps);
@@ -194,7 +252,7 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek, planType
       const builtExercise = {
         ...exercise._extra,
         name: catalogExercise.name,
-        muscle: catalogExercise.muscle || '',
+        muscle: resolvedMuscle,
         tag: exercise.tag,
         sets,
         reps,
@@ -214,16 +272,6 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek, planType
       estimatedMinutes: Number.isInteger(estimatedMinutes) && estimatedMinutes >= 0 ? estimatedMinutes : 0,
       exercises,
     });
-  }
-
-  const actualDays = built.filter((session) => !session.isRestDay).length;
-  const expected = Number(expectedDaysPerWeek);
-  if (expected !== actualDays) {
-    return {
-      error:
-        `Days per Week (${expectedDaysPerWeek}) does not match the number of non-rest sessions (${actualDays}). ` +
-        'Update Days per Week or adjust which days are marked as rest.',
-    };
   }
 
   return { sessions: built, error: null };
@@ -361,8 +409,9 @@ export function buildAndValidateCustomSessions(sessions, planType, exerciseCatal
       if (!catalogExercise) {
         return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Select an exercise from the catalog before saving.` };
       }
-      if (!hasCatalogMuscle(catalogExercise)) {
-        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: The selected catalog exercise is missing a target muscle.` };
+      const resolvedMuscle = resolveStrengthMuscle(catalogExercise, exercise.muscle);
+      if (!resolvedMuscle) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: The selected catalog exercise is missing primary muscle metadata.` };
       }
       if (!exercise.sets || exercise.sets.length === 0) {
         return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: at least one set is required.` };
@@ -384,7 +433,7 @@ export function buildAndValidateCustomSessions(sessions, planType, exerciseCatal
       const restTime = Number(exercise.restTime);
       exercises.push({
         name: catalogExercise.name,
-        muscle: catalogExercise.muscle || '',
+        muscle: resolvedMuscle,
         tag: exercise.tag,
         restTime: Number.isInteger(restTime) && restTime >= 0 ? restTime : 90,
         note: exercise.note ? exercise.note.trim() : '',
@@ -418,6 +467,18 @@ function PlanSessionsEditorStyles() {
         border-radius: 14px;
         background: var(--ww-card);
         overflow: hidden;
+      }
+      .wwpse__week {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .wwpse__week-heading {
+        font-size: var(--ww-type-table-header-size);
+        font-weight: var(--ww-type-table-header-weight);
+        color: var(--ww-primary-dark);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
       }
       .wwpse__day-header {
         display: flex;
@@ -603,6 +664,9 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
   const makeEmptyExercise = () => (isCustomMode ? emptyCustomExercise() : emptyExercise());
   const allowedKinds = getAllowedBlockKinds(planType);
   const makeDefaultTrainingExercises = () => (allowedKinds.cardio && !allowedKinds.strength ? [emptyCardioBlock()] : [makeEmptyExercise()]);
+  const sessionGroups = isCustomMode
+    ? [{ weekNumber: null, items: sessions.map((session, dayIndex) => ({ session, dayIndex })) }]
+    : groupOfficialSessionsByWeek(sessions);
 
   const updateSession = (index, changes) => {
     onChange(sessions.map((session, sessionIndex) => (sessionIndex === index ? { ...session, ...changes } : session)));
@@ -661,8 +725,17 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
   };
 
   const handleExerciseNameChange = (dayIndex, exerciseIndex, name) => {
+    const currentExercise = sessions[dayIndex]?.exercises?.[exerciseIndex];
     const match = findCatalogExercise(exerciseCatalog, name);
-    updateExercise(dayIndex, exerciseIndex, match ? { name: match.name, muscle: match.muscle || '' } : { name, muscle: '' });
+    if (match) {
+      updateExercise(dayIndex, exerciseIndex, {
+        name: match.name,
+        muscle: resolveStrengthMuscle(match, currentExercise?.muscle),
+      });
+      return;
+    }
+
+    updateExercise(dayIndex, exerciseIndex, { name, muscle: '' });
   };
 
   const updateSet = (dayIndex, exerciseIndex, setIndex, changes) => {
@@ -688,7 +761,10 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
     <div className="wwpse">
       <PlanSessionsEditorStyles />
 
-      {sessions.map((session, dayIndex) => (
+      {sessionGroups.map((group) => (
+        <div key={group.weekNumber || 'custom'} className="wwpse__week">
+          {!isCustomMode ? <div className="wwpse__week-heading">Week {group.weekNumber}</div> : null}
+          {group.items.map(({ session, dayIndex }) => (
         <div key={dayIndex} className="wwpse__day">
           <div className="wwpse__day-header">
             <div className="wwpse__day-main">
@@ -725,12 +801,14 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
               </div>
             </div>
 
-            <div className="wwpse__day-actions">
-              <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => removeDay(dayIndex)}>
-                <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
-                Remove Day
-              </button>
-            </div>
+            {isCustomMode ? (
+              <div className="wwpse__day-actions">
+                <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => removeDay(dayIndex)}>
+                  <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
+                  Remove Day
+                </button>
+              </div>
+            ) : null}
           </div>
 
           {session.isRestDay ? (
@@ -976,6 +1054,8 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
           )}
         </div>
       ))}
+        </div>
+      ))}
 
       <datalist id="wwa-exercise-catalog">
         {exerciseCatalog.map((exercise) => (
@@ -983,12 +1063,14 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
         ))}
       </datalist>
 
-      <div className="wwpse__footer">
-        <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={addDay}>
-          <Plus aria-hidden="true" size={14} strokeWidth={2} />
-          Add Day
-        </button>
-      </div>
+      {isCustomMode ? (
+        <div className="wwpse__footer">
+          <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={addDay}>
+            <Plus aria-hidden="true" size={14} strokeWidth={2} />
+            Add Day
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

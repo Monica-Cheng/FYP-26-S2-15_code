@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
+import { collection, getDocs } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
 import { Download, Eye, Plus } from 'lucide-react';
-import { functions } from '../firebase';
+import { db, functions } from '../firebase';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import Badge from '../components/ui/Badge';
@@ -10,6 +11,8 @@ import PlanDetailPanel from '../components/PlanDetailPanel';
 import PlanSessionsEditor, {
   buildDefaultSessions,
   buildAndValidateSessions,
+  resizeOfficialSessions,
+  officialSessionsNeedTruncationConfirm,
 } from '../components/PlanSessionsEditor';
 import FilterBar from '../components/ui/FilterBar';
 import SearchInput from '../components/ui/SearchInput';
@@ -49,6 +52,9 @@ const emptyAddForm = {
   designedByCredential: '',
   designedByQuote: '',
 };
+
+const buildOfficialDurationReductionWarning = (oldWeeks, newWeeks) =>
+  `Reducing duration from ${oldWeeks} week${oldWeeks === 1 ? '' : 's'} to ${newWeeks} week${newWeeks === 1 ? '' : 's'} will remove day entries from the end of the plan. Continue?`;
 
 function PlansStyles() {
   return (
@@ -144,7 +150,7 @@ function Plans() {
   const [selectedPlanId, setSelectedPlanId] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [addForm, setAddForm] = useState(emptyAddForm);
-  const [addSessions, setAddSessions] = useState(() => buildDefaultSessions(emptyAddForm.daysPerWeek));
+  const [addSessions, setAddSessions] = useState(() => buildDefaultSessions(emptyAddForm.daysPerWeek, emptyAddForm.durationWeeks, emptyAddForm.type));
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
@@ -156,7 +162,10 @@ function Plans() {
 
     try {
       const adminListPlansDashboard = httpsCallable(functions, 'adminListPlansDashboard');
-      const result = await adminListPlansDashboard();
+      const [result, exercisesSnapshot] = await Promise.all([
+        adminListPlansDashboard(),
+        getDocs(collection(db, 'exercises')),
+      ]);
       const data = result.data || {};
 
       const loadedPlans = Array.isArray(data.plans) ? data.plans : [];
@@ -169,14 +178,14 @@ function Plans() {
       });
       setUsersById(byId);
 
-      const catalog = Array.isArray(data.exercises)
-        ? data.exercises
-            .filter((exercise) => exercise.name)
-            .map((exercise) => ({
-              name: exercise.name,
-              muscle: exercise.muscleGroup || '',
-            }))
-        : [];
+      const catalog = exercisesSnapshot.docs
+        .map((doc) => ({ id: doc.id, ...doc.data() }))
+        .filter((exercise) => exercise.name)
+        .map((exercise) => ({
+          name: exercise.name,
+          muscle: typeof exercise.muscle === 'string' ? exercise.muscle.trim() : '',
+          muscleGroup: typeof exercise.muscleGroup === 'string' ? exercise.muscleGroup.trim() : '',
+        }));
 
       setExerciseCatalog(catalog);
     } catch (err) {
@@ -236,7 +245,13 @@ function Plans() {
       return;
     }
 
-    const { sessions, error: sessionsError } = buildAndValidateSessions(addSessions, days, addForm.type, exerciseCatalog);
+    const { sessions, error: sessionsError } = buildAndValidateSessions(
+      addSessions,
+      days,
+      addForm.type,
+      exerciseCatalog,
+      durationWeeks
+    );
     if (sessionsError) {
       setAddError(sessionsError);
       return;
@@ -289,7 +304,7 @@ function Plans() {
       ]);
       setShowAddForm(false);
       setAddForm(emptyAddForm);
-      setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek));
+      setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek, emptyAddForm.durationWeeks, emptyAddForm.type));
       setSuccessMsg('Plan created successfully');
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
@@ -484,7 +499,29 @@ function Plans() {
     setShowAddForm(true);
     setAddError('');
     setAddForm(emptyAddForm);
-    setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek));
+    setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek, emptyAddForm.durationWeeks, emptyAddForm.type));
+  };
+
+  const handleAddDurationWeeksChange = (value) => {
+    const currentWeeks = Number(addForm.durationWeeks) || 1;
+    const requestedWeeks = Number(value);
+
+    if (!Number.isInteger(requestedWeeks) || requestedWeeks <= 0) {
+      setAddForm((prev) => ({ ...prev, durationWeeks: value }));
+      return;
+    }
+
+    const { sessions: resizedSessions, removedSessions } = resizeOfficialSessions(addSessions, requestedWeeks);
+    if (
+      requestedWeeks < currentWeeks &&
+      officialSessionsNeedTruncationConfirm(removedSessions) &&
+      !window.confirm(buildOfficialDurationReductionWarning(currentWeeks, requestedWeeks))
+    ) {
+      return;
+    }
+
+    setAddSessions(resizedSessions);
+    setAddForm((prev) => ({ ...prev, durationWeeks: value }));
   };
 
   return (
@@ -579,7 +616,7 @@ function Plans() {
                     min="1"
                     className="wwa-input"
                     value={addForm.durationWeeks}
-                    onChange={(event) => setAddForm((prev) => ({ ...prev, durationWeeks: event.target.value }))}
+                    onChange={(event) => handleAddDurationWeeksChange(event.target.value)}
                     placeholder="e.g. 8"
                   />
                 </FormField>
@@ -718,7 +755,7 @@ function Plans() {
                 </FormField>
               </FormSection>
 
-              <FormSection title="Training Schedule" description="Official plans retain the existing fixed weekly session structure." columns={1}>
+              <FormSection title="Training Schedule" description="Official plans use explicit day entries grouped by week across the full duration." columns={1}>
                 <PlanSessionsEditor
                   sessions={addSessions}
                   onChange={setAddSessions}

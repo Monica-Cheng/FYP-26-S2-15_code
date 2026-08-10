@@ -12,6 +12,8 @@ import PlanSessionsEditor, {
   buildDefaultCustomSessions,
   buildAndValidateCustomSessions,
   customSessionsFromPlan,
+  resizeOfficialSessions,
+  officialSessionsNeedTruncationConfirm,
 } from './PlanSessionsEditor';
 import { formatDate } from '../utils/dateUtils';
 import { formatEquipment } from '../utils/formatUtils';
@@ -35,6 +37,8 @@ const levelTone = (level) =>
   level === 'Advanced' ? 'danger' : level === 'Intermediate' ? 'warning' : 'success';
 
 const isValidImageUrl = (url) => /^https?:\/\//i.test((url || '').trim());
+const buildOfficialDurationReductionWarning = (oldWeeks, newWeeks) =>
+  `Reducing duration from ${oldWeeks} week${oldWeeks === 1 ? '' : 's'} to ${newWeeks} week${newWeeks === 1 ? '' : 's'} will remove day entries from the end of the plan. Continue?`;
 
 function PlanDetailStyles() {
   return (
@@ -521,7 +525,9 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       designedByCredential: designedBy?.credential || '',
       designedByQuote: designedBy?.quote || '',
     });
-    setOfficialSessions(sessions.length > 0 ? sessionsFromPlan(sessions) : buildDefaultSessions(plan.daysPerWeek));
+    setOfficialSessions(
+      sessions.length > 0 ? sessionsFromPlan(sessions) : buildDefaultSessions(plan.daysPerWeek, plan.durationWeeks, plan.type)
+    );
     setError('');
     setSuccessMsg('');
     setIsEditingOfficial(true);
@@ -561,7 +567,8 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       officialSessions,
       days,
       officialForm.type,
-      exerciseCatalog || []
+      exerciseCatalog || [],
+      durationWeeks
     );
     if (sessionsError) {
       setError(sessionsError);
@@ -639,6 +646,28 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
       setError('Failed to delete plan. Please try again.');
       setDeleting(false);
     }
+  };
+
+  const handleOfficialDurationWeeksChange = (value) => {
+    const currentWeeks = Number(officialForm.durationWeeks) || 1;
+    const requestedWeeks = Number(value);
+
+    if (!Number.isInteger(requestedWeeks) || requestedWeeks <= 0) {
+      setOfficialForm((prev) => ({ ...prev, durationWeeks: value }));
+      return;
+    }
+
+    const { sessions: resizedSessions, removedSessions } = resizeOfficialSessions(officialSessions, requestedWeeks);
+    if (
+      requestedWeeks < currentWeeks &&
+      officialSessionsNeedTruncationConfirm(removedSessions) &&
+      !window.confirm(buildOfficialDurationReductionWarning(currentWeeks, requestedWeeks))
+    ) {
+      return;
+    }
+
+    setOfficialSessions(resizedSessions);
+    setOfficialForm((prev) => ({ ...prev, durationWeeks: value }));
   };
 
   const summary = (
@@ -843,7 +872,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
                   min="1"
                   className="wwa-input"
                   value={officialForm.durationWeeks}
-                  onChange={(event) => setOfficialForm((prev) => ({ ...prev, durationWeeks: event.target.value }))}
+                  onChange={(event) => handleOfficialDurationWeeksChange(event.target.value)}
                 />
               </FormField>
               <FormField label="Status" labelFor="official-plan-status" fullWidth>
@@ -970,7 +999,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
               </FormField>
             </FormSection>
 
-            <FormSection title="Training Schedule" columns={1}>
+            <FormSection title="Training Schedule" description="Official plans are grouped into full weeks and must repeat the weekly workout-day count." columns={1}>
               <PlanSessionsEditor
                 sessions={officialSessions}
                 onChange={setOfficialSessions}
