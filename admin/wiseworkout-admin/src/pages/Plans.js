@@ -24,6 +24,7 @@ import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
 import TableActions from '../components/ui/TableActions';
 import ModalDialog from '../components/ui/ModalDialog';
+import { formatDate } from '../utils/dateUtils';
 import {
   parseCommaList,
   buildDesignedBy,
@@ -40,6 +41,30 @@ const getPlanSource = (plan) => {
   if (plan.isCoachPlan === true) return 'coach';
   if (plan.isCustom === true) return 'custom';
   return 'official';
+};
+
+const exportValue = (value) => {
+  if (value === undefined || value === null || value === '') return '';
+  return value;
+};
+
+const flattenStringArray = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => (item || '').trim()).filter(Boolean).join(', ');
+  }
+  if (typeof value === 'string') return value.trim();
+  return '';
+};
+
+const joinSetValues = (sets, key) => {
+  if (!Array.isArray(sets) || sets.length === 0) return '';
+  return sets
+    .map((set) => {
+      const value = set?.[key];
+      return value === undefined || value === null || value === '' ? '' : String(value);
+    })
+    .filter(Boolean)
+    .join(', ');
 };
 
 const emptyAddForm = {
@@ -577,30 +602,153 @@ function Plans() {
   };
 
   const handleExport = () => {
-    const rows = filtered.map((plan) => {
+    const planRows = filtered.map((plan) => {
       const creator = getCreatorLabel(plan);
+      const designedBy = plan.designedBy && typeof plan.designedBy === 'object' ? plan.designedBy : null;
+      const matchSport = getPlanSource(plan) === 'custom' ? exportValue(plan.matchSport) : exportValue(deriveOfficialMatchSport(plan.type));
+
       return {
-        'Plan Name': plan.title || plan.name || '-',
-        Level: plan.level || '-',
-        Duration: plan.durationWeeks ? `${plan.durationWeeks}w` : '-',
-        'Days/Week': plan.daysPerWeek ? `${plan.daysPerWeek} days` : '-',
-        Equipment: Array.isArray(plan.equipment)
-          ? plan.equipment.length > 0
-            ? plan.equipment.join(', ')
-            : '-'
-          : plan.equipment || '-',
-        Type: plan.type || plan.category || '-',
+        'Plan ID': exportValue(plan.id),
+        'Plan Name': exportValue(plan.title || plan.name),
+        Description: exportValue(plan.description),
         Source: sourceLabel(plan),
-        Creator: creator === '—' ? '-' : creator,
+        Type: exportValue(plan.type || plan.category),
+        Level: exportValue(plan.level),
+        'Days Per Week': plan.daysPerWeek ?? '',
+        'Duration Weeks': plan.durationWeeks ?? '',
+        Status: plan.isActive !== false ? 'Active' : 'Inactive',
+        Featured: plan.featured === true ? 'Yes' : 'No',
+        Goals: flattenStringArray(plan.goals),
+        Equipment: flattenStringArray(plan.equipment),
+        'Match Sport': matchSport,
+        'Match Level': exportValue(plan.matchLevel),
+        'Match Goals': flattenStringArray(plan.matchGoals),
+        Creator: creator === '—' ? '' : creator,
+        'Creator UID': exportValue(plan.createdBy),
+        'Image URL': exportValue(plan.imageUrl),
+        'Designed By Name': exportValue(designedBy?.name),
+        'Designed By Title': exportValue(designedBy?.title),
+        'Designed By Credential': exportValue(designedBy?.credential),
+        'Designed By Quote': exportValue(designedBy?.quote),
+        'Created At': plan.createdAt ? formatDate(plan.createdAt) : '',
+        'Updated At': plan.updatedAt ? formatDate(plan.updatedAt) : '',
       };
     });
 
-    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const sessionRows = [];
+    filtered.forEach((plan) => {
+      const planSessions = Array.isArray(plan.sessions) ? plan.sessions : [];
+      const planName = exportValue(plan.title || plan.name);
+      const source = sourceLabel(plan);
+
+      if (planSessions.length === 0) {
+        sessionRows.push({
+          'Plan ID': exportValue(plan.id),
+          'Plan Name': planName,
+          Source: source,
+          Week: '',
+          Day: '',
+          'Session Name': '',
+          'Rest Day': '',
+          'Exercise Order': '',
+          'Exercise Name': '',
+          'Exercise Type': '',
+          'Is Cardio': '',
+          'Cardio Activity': '',
+          'Cardio Minutes': '',
+          Sets: '',
+          Reps: '',
+          'Weight / KG': '',
+          'Rest Time Seconds': '',
+          'Estimated Time Per Set Seconds': '',
+          Muscle: '',
+          Tag: '',
+          Note: '',
+        });
+        return;
+      }
+
+      planSessions.forEach((session, sessionIndex) => {
+        const week = Math.floor(sessionIndex / 7) + 1;
+        const day = (sessionIndex % 7) + 1;
+        const sessionName = exportValue(session?.name || session?.day);
+        const isRestDay = session?.isRestDay === true;
+        const exercises = Array.isArray(session?.exercises) ? session.exercises : [];
+
+        if (isRestDay || exercises.length === 0) {
+          sessionRows.push({
+            'Plan ID': exportValue(plan.id),
+            'Plan Name': planName,
+            Source: source,
+            Week: week,
+            Day: day,
+            'Session Name': sessionName,
+            'Rest Day': isRestDay ? 'Yes' : 'No',
+            'Exercise Order': '',
+            'Exercise Name': '',
+            'Exercise Type': isRestDay ? 'Rest' : exportValue(session?.type),
+            'Is Cardio': '',
+            'Cardio Activity': '',
+            'Cardio Minutes': '',
+            Sets: '',
+            Reps: '',
+            'Weight / KG': '',
+            'Rest Time Seconds': '',
+            'Estimated Time Per Set Seconds': '',
+            Muscle: '',
+            Tag: '',
+            Note: '',
+          });
+          return;
+        }
+
+        exercises.forEach((exercise, exerciseIndex) => {
+          const setArray = Array.isArray(exercise?.sets) ? exercise.sets : null;
+
+          sessionRows.push({
+            'Plan ID': exportValue(plan.id),
+            'Plan Name': planName,
+            Source: source,
+            Week: week,
+            Day: day,
+            'Session Name': sessionName,
+            'Rest Day': isRestDay ? 'Yes' : 'No',
+            'Exercise Order': exerciseIndex + 1,
+            'Exercise Name': exportValue(exercise?.name),
+            'Exercise Type': exercise?.isCardio ? 'Cardio' : 'Strength',
+            'Is Cardio': exercise?.isCardio ? 'Yes' : 'No',
+            'Cardio Activity': exportValue(exercise?.cardioActivity),
+            'Cardio Minutes': exercise?.cardioMinutes ?? '',
+            Sets: setArray ? setArray.length : exercise?.sets ?? '',
+            Reps: setArray ? joinSetValues(setArray, 'reps') : exercise?.reps ?? '',
+            'Weight / KG': setArray ? joinSetValues(setArray, 'kg') : '',
+            'Rest Time Seconds': exercise?.restTime ?? '',
+            'Estimated Time Per Set Seconds': exercise?.estTimePerSet ?? '',
+            Muscle: exportValue(exercise?.muscle),
+            Tag: exportValue(exercise?.tag),
+            Note: exportValue(exercise?.note),
+          });
+        });
+      });
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(planRows);
     worksheet['!cols'] = [
-      { wch: 26 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 30 }, { wch: 10 }, { wch: 10 }, { wch: 22 },
+      { wch: 22 }, { wch: 28 }, { wch: 36 }, { wch: 16 }, { wch: 12 }, { wch: 14 },
+      { wch: 14 }, { wch: 16 }, { wch: 12 }, { wch: 10 }, { wch: 26 }, { wch: 28 },
+      { wch: 16 }, { wch: 16 }, { wch: 26 }, { wch: 22 }, { wch: 22 }, { wch: 30 },
+      { wch: 20 }, { wch: 20 }, { wch: 24 }, { wch: 36 }, { wch: 20 }, { wch: 20 },
+    ];
+    const sessionsSheet = XLSX.utils.json_to_sheet(sessionRows);
+    sessionsSheet['!cols'] = [
+      { wch: 22 }, { wch: 28 }, { wch: 16 }, { wch: 8 }, { wch: 8 }, { wch: 28 },
+      { wch: 10 }, { wch: 14 }, { wch: 28 }, { wch: 14 }, { wch: 10 }, { wch: 18 },
+      { wch: 16 }, { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 18 }, { wch: 28 },
+      { wch: 16 }, { wch: 14 }, { wch: 30 },
     ];
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Plans');
+    XLSX.utils.book_append_sheet(workbook, sessionsSheet, 'Plan Sessions');
     XLSX.writeFile(workbook, 'WiseWorkout_Plans.xlsx');
   };
 

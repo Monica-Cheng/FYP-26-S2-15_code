@@ -17,6 +17,23 @@ import TableActions from '../components/ui/TableActions';
 import ModalDialog from '../components/ui/ModalDialog';
 import FormSection from '../components/ui/FormSection';
 import FormField from '../components/ui/FormField';
+import { formatDate } from '../utils/dateUtils';
+
+const exportValue = (value) => {
+  if (value === undefined || value === null || value === '') return '—';
+  return value;
+};
+
+const exportYesNo = (value) => (value ? 'Yes' : 'No');
+
+const flattenEquipment = (value) => {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => (item || '').trim()).filter(Boolean);
+    return items.length > 0 ? items.join(', ') : '—';
+  }
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  return '—';
+};
 
 function UsersStyles() {
   return (
@@ -342,29 +359,54 @@ function Users() {
   };
 
   const handleExport = () => {
-    const rows = filtered.map((user) => ({
-      'Display Name': user.displayName || '—',
-      Username: user.username || '—',
-      'User ID': user.id,
-      Level: `Level ${user.level || 1}`,
-      Onboarded: user.onboardingComplete ? 'Yes' : 'No',
-      'Health Connected': user.healthConnected ? 'Connected' : 'Not Connected',
-      'Wearable Connected': user.wearableConnected ? 'Connected' : 'Not Connected',
-      'Premium Status': user.isPremium ? 'Premium' : 'Free',
-      Status: user.accountStatus === 'suspended' ? 'Suspended' : 'Active',
-      'Primary Goal': user.planMatchGoal || '—',
-      Hometown: user.hometown || '—',
-      'Total XP': user.totalXp ?? 0,
-      'Weekly XP': user.weeklyXp ?? 0,
-      'Tracked Plan': user.trackedPlanName || '—',
-      'Saved Plans Count': Array.isArray(user.savedPlanIds) ? user.savedPlanIds.length : 0,
-    }));
+    const includeCreatedAt = users.some((user) => user.createdAt);
+    const includeUpdatedAt = users.some((user) => user.updatedAt);
+
+    const rows = filtered.map((user) => {
+      const row = {
+        'User ID': exportValue(user.id),
+        'Display Name': exportValue(user.displayName),
+        Username: exportValue(user.username),
+        Email: exportValue(user.email),
+        Status: user.accountStatus === 'suspended' ? 'Suspended' : 'Active',
+        'Premium Status': user.isPremium ? 'Premium' : 'Free',
+        Level: user.level ?? 1,
+        'Total XP': user.totalXp ?? 0,
+        'Weekly XP': user.weeklyXp ?? 0,
+        Onboarded: exportYesNo(!!user.onboardingComplete),
+        'Health Connected': exportYesNo(!!user.healthConnected),
+        'Wearable Connected': exportYesNo(!!user.wearableConnected),
+        'Primary Goal': exportValue(user.planMatchGoal),
+        'Plan Match Level': exportValue(user.planMatchLevel),
+        'Plan Match Sport': exportValue(user.planMatchSport),
+        'Plan Match Days': exportValue(user.planMatchDays),
+        'Plan Match Equipment': flattenEquipment(user.planMatchEquipment),
+        'Tracked Plan': exportValue(user.trackedPlanName),
+        'Tracked Plan ID': exportValue(user.trackedPlanId),
+        'Saved Plans Count': Array.isArray(user.savedPlanIds) ? user.savedPlanIds.length : 0,
+        Hometown: exportValue(user.hometown),
+        Bio: exportValue(user.bio),
+      };
+
+      if (includeCreatedAt) {
+        row['Created At'] = user.createdAt ? formatDate(user.createdAt) : '—';
+      }
+      if (includeUpdatedAt) {
+        row['Updated At'] = user.updatedAt ? formatDate(user.updatedAt) : '—';
+      }
+
+      return row;
+    });
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
     worksheet['!cols'] = [
-      { wch: 22 }, { wch: 18 }, { wch: 24 }, { wch: 9 }, { wch: 10 },
-      { wch: 16 }, { wch: 17 }, { wch: 14 }, { wch: 11 }, { wch: 18 },
-      { wch: 16 }, { wch: 10 }, { wch: 10 }, { wch: 22 }, { wch: 16 },
+      { wch: 24 }, { wch: 22 }, { wch: 18 }, { wch: 28 }, { wch: 12 },
+      { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+      { wch: 18 }, { wch: 20 }, { wch: 18 }, { wch: 18 }, { wch: 18 },
+      { wch: 16 }, { wch: 24 }, { wch: 22 }, { wch: 24 }, { wch: 16 },
+      { wch: 18 }, { wch: 32 },
+      ...(includeCreatedAt ? [{ wch: 20 }] : []),
+      ...(includeUpdatedAt ? [{ wch: 20 }] : []),
     ];
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Users');

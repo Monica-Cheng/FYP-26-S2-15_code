@@ -28,6 +28,7 @@ import {
   cleanInstructionSteps,
   validateInstructionSteps,
   normalizeSecondaryMuscles,
+  resolveInjuryRiskLabel,
 } from '../utils/exerciseUtils';
 
 const emptyForm = {
@@ -52,6 +53,11 @@ const difficultyTone = (difficulty) =>
 const DELETE_CONFIRMATION = 'DELETE';
 
 const normalizeExerciseName = (value) => (value || '').trim().toLowerCase();
+
+const exportValue = (value) => {
+  if (value === undefined || value === null || value === '') return '—';
+  return value;
+};
 
 function ExercisesStyles() {
   return (
@@ -509,15 +515,16 @@ function Exercises() {
 
   const handleExport = () => {
     const rows = filtered.map((exercise) => ({
-      'Exercise Name': exercise.name || '—',
-      Difficulty: exercise.difficulty || 'Beginner',
-      Equipment: exercise.equipment || '—',
-      'Primary Muscle': exercise.muscle || '—',
-      'Muscle Group': exercise.muscleGroup || '—',
+      'Exercise ID': exportValue(exercise.id),
+      'Exercise Name': exportValue(exercise.name),
+      Difficulty: exportValue(exercise.difficulty || 'Beginner'),
+      Equipment: exportValue(exercise.equipment),
+      'Primary Muscle': exportValue(exercise.muscle),
+      'Muscle Group': exportValue(exercise.muscleGroup),
       'Secondary Muscles': Array.isArray(exercise.secondaryMuscles) && exercise.secondaryMuscles.length > 0 ? exercise.secondaryMuscles.join(', ') : '—',
       'Injury Risk':
         Array.isArray(exercise.injuryRisk) && exercise.injuryRisk.length > 0
-          ? exercise.injuryRisk.join(', ')
+          ? exercise.injuryRisk.map((risk) => resolveInjuryRiskLabel(risk, injuryCategories)).filter(Boolean).join(', ')
           : '—',
       'Minimum Reps': exercise.minReps ?? '—',
       'Maximum Reps': exercise.maxReps ?? '—',
@@ -525,13 +532,15 @@ function Exercises() {
       'Maximum Weight (kg)': exercise.maxKg ?? '—',
       Instructions:
         Array.isArray(exercise.instructionSteps) && exercise.instructionSteps.length > 0
-          ? exercise.instructionSteps.map((step, index) => `${index + 1}. ${step}`).join('\n')
+          ? cleanInstructionSteps(exercise.instructionSteps).join(' | ')
           : '—',
-      'GIF URL': exercise.gifUrl || '—',
+      'GIF URL': exportValue(exercise.gifUrl),
+      'Legacy Image URL': exportValue(exercise.imageUrl),
     }));
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
     worksheet['!cols'] = [
+      { wch: 22 },
       { wch: 26 },
       { wch: 12 },
       { wch: 16 },
@@ -544,6 +553,7 @@ function Exercises() {
       { wch: 16 },
       { wch: 16 },
       { wch: 50 },
+      { wch: 30 },
       { wch: 30 },
     ];
     const workbook = XLSX.utils.book_new();

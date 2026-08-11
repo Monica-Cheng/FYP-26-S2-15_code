@@ -20,6 +20,11 @@ import { getCallableErrorMessage } from '../utils/planUtils';
 
 const DELETE_CONFIRMATION = 'DELETE POST';
 
+const exportValue = (value) => {
+  if (value === undefined || value === null || value === '') return '—';
+  return value;
+};
+
 function PostsStyles() {
   return (
     <style>{`
@@ -413,28 +418,39 @@ function Posts() {
   const handleExport = () => {
     const rows = filtered.map((post) => ({
       'Post ID': post.id,
-      Author: post.authorName || '—',
-      'User UID': post.uid || '—',
-      Title: postTitle(post),
-      Caption: post.caption || '—',
-      Type: post.type || '—',
-      'Food Name': isWorkoutPost(post) ? '—' : (post.foodName || '—'),
-      'Session Name': isWorkoutPost(post) ? (post.sessionName || '—') : '—',
+      Author: exportValue(post.authorName),
+      'Author UID': exportValue(post.uid),
+      Type: exportValue(post.type),
+      Status: post.isHidden ? 'Hidden' : 'Visible',
+      'Created At': formatDate(post.createdAt),
+      Caption: exportValue(post.caption),
+      'Food Name': isWorkoutPost(post) ? '—' : exportValue(post.foodName),
+      'Session Name': isWorkoutPost(post) ? exportValue(post.sessionName) : '—',
+      'Is Cardio': isWorkoutPost(post) ? (post.isCardio ? 'Yes' : 'No') : '—',
+      'Cardio Activity': isWorkoutPost(post) ? exportValue(post.cardioActivity) : '—',
+      'Elapsed Seconds': isWorkoutPost(post) ? (post.elapsedSeconds ?? '—') : '—',
+      'Total Sets': isWorkoutPost(post) && !post.isCardio ? (post.totalSets ?? '—') : '—',
+      Volume: isWorkoutPost(post) && !post.isCardio ? (post.volume ?? '—') : '—',
       Calories: post.calories ?? '—',
       'Protein (g)': post.proteinG ?? '—',
       'Carbs (g)': post.carbsG ?? '—',
       'Fat (g)': post.fatG ?? '—',
       Reactions: post.reactionCount ?? 0,
       Comments: post.commentCount ?? 0,
-      Status: post.isHidden ? 'Hidden' : 'Active',
-      'Created Date': formatDate(post.createdAt),
+      'Moderated At': formatDate(post.moderationUpdatedAt),
+      'Moderated By': exportValue(post.moderatedByAdminUid),
+      'Admin Updated At': formatDate(post.adminUpdatedAt),
+      'Admin Updated By': exportValue(post.updatedByAdminUid),
+      'Has Image': post.imageBase64 ? 'Yes' : 'No',
     }));
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
     worksheet['!cols'] = [
-      { wch: 22 }, { wch: 20 }, { wch: 22 }, { wch: 22 }, { wch: 30 }, { wch: 12 },
-      { wch: 20 }, { wch: 22 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 },
-      { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 20 },
+      { wch: 22 }, { wch: 20 }, { wch: 22 }, { wch: 12 }, { wch: 12 }, { wch: 20 },
+      { wch: 30 }, { wch: 20 }, { wch: 22 }, { wch: 10 }, { wch: 18 }, { wch: 16 },
+      { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 },
+      { wch: 10 }, { wch: 10 }, { wch: 20 }, { wch: 24 }, { wch: 20 }, { wch: 24 },
+      { wch: 10 },
     ];
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Posts');
