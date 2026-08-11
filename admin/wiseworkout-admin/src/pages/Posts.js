@@ -14,7 +14,11 @@ import DataTable from '../components/ui/DataTable';
 import TableActions from '../components/ui/TableActions';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
+import ModalDialog from '../components/ui/ModalDialog';
 import { toDate, formatDate } from '../utils/dateUtils';
+import { getCallableErrorMessage } from '../utils/planUtils';
+
+const DELETE_CONFIRMATION = 'DELETE POST';
 
 function PostsStyles() {
   return (
@@ -49,15 +53,12 @@ function PostsStyles() {
         color: var(--ww-text);
         line-height: 1.35;
       }
-      .wwpo-title-cell__meta,
-      .wwpo-author-cell__meta {
+      .wwpo-title-cell__meta {
         margin-top: 3px;
         font-size: var(--ww-type-secondary-size);
         font-weight: var(--ww-type-secondary-weight);
         color: var(--ww-text-sec);
         line-height: 1.4;
-      }
-      .wwpo-title-cell__meta {
         display: -webkit-box;
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
@@ -73,6 +74,23 @@ function PostsStyles() {
         justify-content: flex-end;
         gap: 8px;
         white-space: nowrap;
+      }
+      .wwpo-feedback-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      .wwpo-modal-copy {
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text);
+        line-height: 1.6;
+      }
+      .wwpo-modal-note {
+        margin-top: 10px;
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-text-sec);
+        line-height: 1.55;
       }
       @media (max-width: 1160px) {
         .wwpo-layout.has-detail {
@@ -92,7 +110,26 @@ const typeTone = (type) => {
 
 const statusTone = (isHidden) => (isHidden ? 'warning' : 'success');
 
-const postTitle = (post) => post.foodName || post.caption || 'Untitled post';
+const isWorkoutPost = (post) => (post?.type || '').toLowerCase() === 'workout';
+
+const postTitle = (post) => {
+  if (isWorkoutPost(post)) {
+    return post?.sessionName || post?.caption || 'Workout session';
+  }
+
+  return post?.foodName || post?.caption || 'Untitled post';
+};
+
+const postSecondaryText = (post) => {
+  const caption = (post?.caption || '').trim();
+  const primary = postTitle(post);
+
+  if (!caption || caption === primary) {
+    return null;
+  }
+
+  return caption;
+};
 
 function Posts() {
   const [posts, setPosts] = useState([]);
@@ -104,6 +141,13 @@ function Posts() {
   const [dateFilter, setDateFilter] = useState('all');
   const [selectedPostId, setSelectedPostId] = useState(null);
   const [editNonce, setEditNonce] = useState(0);
+  const [actionError, setActionError] = useState('');
+  const [actionSuccess, setActionSuccess] = useState('');
+  const [deletePostId, setDeletePostId] = useState(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [moderationTarget, setModerationTarget] = useState(null);
+  const [moderating, setModerating] = useState(false);
 
   const fetchPosts = async () => {
     setLoading(true);
@@ -116,9 +160,7 @@ function Posts() {
       setPosts(Array.isArray(data.posts) ? data.posts : []);
     } catch (err) {
       console.error('Failed to load posts dashboard:', err);
-      const detail = err?.code ? ` (${err.code})` : '';
-      setLoadError(`Failed to load posts dashboard.${detail}`);
-      window.alert(`Failed to load posts dashboard.${detail}`);
+      setLoadError(getCallableErrorMessage(err, 'Failed to load posts dashboard.'));
     } finally {
       setLoading(false);
     }
@@ -130,74 +172,127 @@ function Posts() {
 
   const openPostDetails = (postId) => {
     setSelectedPostId(postId);
+    setActionError('');
   };
 
   const openPostEditor = (postId) => {
     setSelectedPostId(postId);
     setEditNonce((value) => value + 1);
+    setActionError('');
   };
 
-  // Missing isHidden is treated as Active — matches the mobile app's own
-  // absence-as-default convention (e.g. onboardingComplete, healthConnected).
-  const toggleHidden = async (postId, currentlyHidden) => {
-    const isHidden = !currentlyHidden;
+  const openModerationModal = (postId, nextHidden) => {
+    setModerationTarget({ postId, nextHidden });
+    setActionError('');
+  };
+
+  const closeModerationModal = () => {
+    if (moderating) return;
+    setModerationTarget(null);
+  };
+
+  const openDeleteModal = (postId) => {
+    setDeletePostId(postId);
+    setDeleteConfirmation('');
+    setActionError('');
+  };
+
+  const closeDeleteModal = () => {
+    if (deleting) return;
+    setDeletePostId(null);
+    setDeleteConfirmation('');
+  };
+
+  const toggleHidden = async (postId, nextHidden) => {
     const adminSetPostHidden = httpsCallable(functions, 'adminSetPostHidden');
 
-    await adminSetPostHidden({
-      postId,
-      isHidden,
-    });
+    try {
+      setModerating(true);
+      setActionError('');
+      setActionSuccess('');
 
-    setPosts((prev) =>
-      prev.map((post) =>
-        post.id === postId
-          ? { ...post, isHidden }
-          : post
-      )
-    );
+      await adminSetPostHidden({
+        postId,
+        isHidden: nextHidden,
+      });
+
+      setPosts((prev) =>
+        prev.map((post) =>
+          post.id === postId
+            ? { ...post, isHidden: nextHidden }
+            : post
+        )
+      );
+
+      setModerationTarget(null);
+      setActionSuccess(nextHidden ? 'Post hidden successfully.' : 'Post visibility restored.');
+    } catch (err) {
+      console.error('Failed to update post visibility:', err);
+      const message = getCallableErrorMessage(err, 'Failed to update post visibility. Please try again.');
+      setActionError(message);
+      throw new Error(message);
+    } finally {
+      setModerating(false);
+    }
   };
 
   const handleDelete = async (postId) => {
-    const post = posts.find((item) => item.id === postId);
-    const label = post?.foodName || post?.caption || postId;
-
-    const confirmation = window.prompt(
-      `Permanently delete this post?\n\n` +
-      `"${label}"\n\n` +
-      'Its reactions and comments will also be removed.\n\n' +
-      'Type DELETE POST exactly to continue:'
-    );
-
-    if (confirmation !== 'DELETE POST') return;
-
     const adminDeletePost = httpsCallable(functions, 'adminDeletePost');
 
-    await adminDeletePost({
-      postId,
-      confirmation,
-    });
+    try {
+      setDeleting(true);
+      setActionError('');
+      setActionSuccess('');
 
-    setPosts((prev) => prev.filter((postItem) => postItem.id !== postId));
-    setSelectedPostId((prev) => (prev === postId ? null : prev));
+      await adminDeletePost({
+        postId,
+        confirmation: DELETE_CONFIRMATION,
+      });
+
+      setPosts((prev) => prev.filter((postItem) => postItem.id !== postId));
+      setSelectedPostId((prev) => (prev === postId ? null : prev));
+      setDeletePostId(null);
+      setDeleteConfirmation('');
+      setActionSuccess('Post deleted successfully.');
+    } catch (err) {
+      console.error('Failed to delete post:', err);
+      const message = getCallableErrorMessage(err, 'Failed to delete post. Please try again.');
+      setActionError(message);
+      throw new Error(message);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const handleSavePost = async (postId, changes) => {
     const adminUpdatePost = httpsCallable(functions, 'adminUpdatePost');
 
-    const result = await adminUpdatePost({
-      postId,
-      changes,
-    });
+    try {
+      setActionError('');
+      setActionSuccess('');
 
-    const savedChanges = result.data?.changes || changes;
+      const result = await adminUpdatePost({
+        postId,
+        changes,
+      });
 
-    setPosts((prev) =>
-      prev.map((post) =>
-        post.id === postId
-          ? { ...post, ...savedChanges }
-          : post
-      )
-    );
+      const savedChanges = result.data?.changes || changes;
+
+      setPosts((prev) =>
+        prev.map((post) =>
+          post.id === postId
+            ? { ...post, ...savedChanges }
+            : post
+        )
+      );
+
+      setActionSuccess('Post updated successfully.');
+    } catch (err) {
+      console.error('Failed to update post:', err);
+      const message = getCallableErrorMessage(err, 'Failed to update post. Please try again.');
+      setActionError(message);
+      throw new Error(message);
+    }
   };
 
   const types = Array.from(new Set(posts.map((post) => post.type).filter(Boolean))).sort();
@@ -236,6 +331,7 @@ function Posts() {
       !query ||
       (post.authorName || '').toLowerCase().includes(query) ||
       (post.foodName || '').toLowerCase().includes(query) ||
+      (post.sessionName || '').toLowerCase().includes(query) ||
       (post.caption || '').toLowerCase().includes(query);
     const matchesType = typeFilter === 'all' || post.type === typeFilter;
     const isHidden = !!post.isHidden;
@@ -247,15 +343,18 @@ function Posts() {
   });
 
   const selectedPost = posts.find((post) => post.id === selectedPostId) || null;
+  const moderationPostTarget = posts.find((post) => post.id === moderationTarget?.postId) || null;
 
   const handleExport = () => {
     const rows = filtered.map((post) => ({
       'Post ID': post.id,
       Author: post.authorName || '—',
       'User UID': post.uid || '—',
-      'Food Name': post.foodName || '—',
+      Title: postTitle(post),
       Caption: post.caption || '—',
       Type: post.type || '—',
+      'Food Name': isWorkoutPost(post) ? '—' : (post.foodName || '—'),
+      'Session Name': isWorkoutPost(post) ? (post.sessionName || '—') : '—',
       Calories: post.calories ?? '—',
       'Protein (g)': post.proteinG ?? '—',
       'Carbs (g)': post.carbsG ?? '—',
@@ -268,9 +367,9 @@ function Posts() {
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
     worksheet['!cols'] = [
-      { wch: 22 }, { wch: 20 }, { wch: 22 }, { wch: 20 }, { wch: 30 }, { wch: 12 },
-      { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 },
-      { wch: 10 }, { wch: 20 },
+      { wch: 22 }, { wch: 20 }, { wch: 22 }, { wch: 22 }, { wch: 30 }, { wch: 12 },
+      { wch: 20 }, { wch: 22 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 },
+      { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 20 },
     ];
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Posts');
@@ -283,10 +382,7 @@ function Posts() {
       header: 'Post',
       render: (post) => {
         const title = postTitle(post);
-        const secondary =
-          post.foodName && post.caption
-            ? post.caption
-            : null;
+        const secondary = postSecondaryText(post);
 
         return (
           <div className="wwpo-title-cell">
@@ -302,7 +398,6 @@ function Posts() {
       render: (post) => (
         <div className="wwpo-author-cell">
           <div className="wwpo-author-cell__name">{post.authorName || '—'}</div>
-          {post.uid ? <div className="wwpo-author-cell__meta">{post.uid}</div> : null}
         </div>
       ),
     },
@@ -327,7 +422,7 @@ function Posts() {
         const isHidden = !!post.isHidden;
         return (
           <Badge tone={statusTone(isHidden)}>
-            {isHidden ? 'Hidden' : 'Active'}
+            {isHidden ? 'Hidden' : 'Visible'}
           </Badge>
         );
       },
@@ -374,13 +469,25 @@ function Posts() {
       ) : (
         <div className={`wwpo-layout ${selectedPost ? 'has-detail' : ''}`}>
           <div>
+            {(actionSuccess || actionError) ? (
+              <div className="wwpo-feedback-stack">
+                {actionSuccess ? (
+                  <div className="wwa-status-pill">
+                    <span className="wwa-status-dot" />
+                    {actionSuccess}
+                  </div>
+                ) : null}
+                {actionError ? <div className="wwa-alert-error">{actionError}</div> : null}
+              </div>
+            ) : null}
+
             <FilterBar
               search={
                 <SearchInput
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
                   onClear={() => setSearch('')}
-                  placeholder="Search by author, food name, or caption…"
+                  placeholder="Search by author, food name, session name, or caption…"
                   label="Search posts"
                 />
               }
@@ -397,7 +504,7 @@ function Posts() {
                     onChange={(event) => setStatusFilter(event.target.value)}
                     options={[
                       { value: 'all', label: 'Status: All' },
-                      { value: 'active', label: 'Status: Active' },
+                      { value: 'active', label: 'Status: Visible' },
                       { value: 'hidden', label: 'Status: Hidden' },
                     ]}
                     aria-label="Filter posts by status"
@@ -428,6 +535,7 @@ function Posts() {
               rows={filtered}
               getRowKey={(post) => post.id}
               selectedRowKey={selectedPostId}
+              onRowClick={(post) => openPostDetails(post.id)}
               minWidth={920}
               emptyIcon={null}
               emptyTitle="No posts found"
@@ -440,7 +548,10 @@ function Posts() {
                     <button
                       type="button"
                       className="wwa-btn wwa-btn-sm wwa-btn-secondary"
-                      onClick={() => openPostDetails(post.id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openPostDetails(post.id);
+                      }}
                       aria-label={`View ${postTitle(post)}`}
                     >
                       <Eye aria-hidden="true" size={14} strokeWidth={2} />
@@ -459,7 +570,7 @@ function Posts() {
                           key: 'toggle-hidden',
                           label: isHidden ? 'Unhide' : 'Hide',
                           icon: <EyeOff aria-hidden="true" size={14} strokeWidth={2} />,
-                          onSelect: () => toggleHidden(post.id, isHidden),
+                          onSelect: () => openModerationModal(post.id, !isHidden),
                         },
                         { type: 'divider' },
                         {
@@ -467,7 +578,7 @@ function Posts() {
                           label: 'Delete',
                           tone: 'danger',
                           icon: <Trash2 aria-hidden="true" size={14} strokeWidth={2} />,
-                          onSelect: () => handleDelete(post.id),
+                          onSelect: () => openDeleteModal(post.id),
                         },
                       ]}
                     />
@@ -483,12 +594,78 @@ function Posts() {
               editNonce={editNonce}
               onClose={() => setSelectedPostId(null)}
               onSave={handleSavePost}
-              onToggleHidden={toggleHidden}
-              onDelete={handleDelete}
+              onRequestToggleHidden={(postId, nextHidden) => openModerationModal(postId, nextHidden)}
+              onRequestDelete={openDeleteModal}
             />
           ) : null}
         </div>
       )}
+
+      <ModalDialog
+        open={Boolean(moderationTarget)}
+        title={moderationTarget?.nextHidden ? 'Hide Post' : 'Restore Post Visibility'}
+        description={
+          moderationTarget?.nextHidden
+            ? 'This post will no longer appear in user-facing feeds.'
+            : 'This post will become visible in user-facing feeds again.'
+        }
+        onClose={closeModerationModal}
+        footer={(
+          <>
+            <button type="button" className="wwa-btn wwa-btn-secondary" onClick={closeModerationModal} disabled={moderating}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className={`wwa-btn ${moderationTarget?.nextHidden ? 'wwa-btn-danger' : 'wwa-btn-primary'}`}
+              onClick={() => toggleHidden(moderationTarget.postId, moderationTarget.nextHidden)}
+              disabled={moderating}
+            >
+              {moderating
+                ? (moderationTarget?.nextHidden ? 'Hiding...' : 'Updating...')
+                : (moderationTarget?.nextHidden ? 'Hide Post' : 'Unhide Post')}
+            </button>
+          </>
+        )}
+      >
+        <div className="wwpo-modal-copy">
+          {moderationPostTarget ? `Update "${postTitle(moderationPostTarget)}"?` : ''}
+        </div>
+      </ModalDialog>
+
+      <ModalDialog
+        open={Boolean(deletePostId)}
+        title="Delete Post"
+        description="This permanently removes the post, including its comments and reactions."
+        onClose={closeDeleteModal}
+        footer={(
+          <>
+            <button type="button" className="wwa-btn wwa-btn-secondary" onClick={closeDeleteModal} disabled={deleting}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="wwa-btn wwa-btn-danger"
+              onClick={() => handleDelete(deletePostId)}
+              disabled={deleting || deleteConfirmation !== DELETE_CONFIRMATION}
+            >
+              {deleting ? 'Deleting...' : 'Delete Post'}
+            </button>
+          </>
+        )}
+      >
+        <div className="wwpo-modal-copy">
+          Delete this post permanently?
+        </div>
+        <div className="wwpo-modal-note">Confirmation</div>
+        <input
+          className="wwa-input"
+          value={deleteConfirmation}
+          onChange={(event) => setDeleteConfirmation(event.target.value)}
+          placeholder={DELETE_CONFIRMATION}
+          autoFocus
+        />
+      </ModalDialog>
     </div>
   );
 }

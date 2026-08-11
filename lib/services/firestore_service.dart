@@ -4353,6 +4353,10 @@ class FirestoreService {
     await _db.collection(Collections.posts).add(postData);
   }
 
+  bool _isVisibleFeedPost(Map<String, dynamic> data) {
+    return data['isHidden'] != true;
+  }
+
   // ---------------------------------------------------------------------------
   // Live stream of the most recent feed posts, newest first.
   // ---------------------------------------------------------------------------
@@ -4362,8 +4366,10 @@ class FirestoreService {
         .orderBy('createdAt', descending: true)
         .limit(limit)
         .snapshots()
-        .map((snapshot) =>
-            snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+        .map((snapshot) => snapshot.docs
+            .map((doc) => {'id': doc.id, ...doc.data()})
+            .where(_isVisibleFeedPost)
+            .toList());
   }
 
   // ---------------------------------------------------------------------------
@@ -4475,8 +4481,10 @@ class FirestoreService {
         .orderBy('createdAt', descending: true)
         .limit(limit)
         .snapshots()
-        .map((snapshot) =>
-            snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+        .map((snapshot) => snapshot.docs
+            .map((doc) => {'id': doc.id, ...doc.data()})
+            .where(_isVisibleFeedPost)
+            .toList());
   }
 
   // ═══════════════════════════════════════════════════════════════════════

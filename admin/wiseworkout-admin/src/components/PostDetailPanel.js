@@ -6,7 +6,7 @@ import FormSection from './ui/FormSection';
 import FormField from './ui/FormField';
 import { formatDate } from '../utils/dateUtils';
 
-const NUMERIC_FIELDS = [
+const NUTRITION_FIELDS = [
   { key: 'calories', label: 'Calories', suffix: '' },
   { key: 'proteinG', label: 'Protein', suffix: ' g' },
   { key: 'carbsG', label: 'Carbs', suffix: ' g' },
@@ -21,6 +21,16 @@ const typeTone = (type) => {
 };
 
 const statusTone = (isHidden) => (isHidden ? 'warning' : 'success');
+
+const isWorkoutPost = (post) => (post?.type || '').toLowerCase() === 'workout';
+
+const postTitle = (post) => {
+  if (isWorkoutPost(post)) {
+    return post?.sessionName || post?.caption || 'Workout session';
+  }
+
+  return post?.foodName || post?.caption || 'Untitled post';
+};
 
 function PostDetailStyles() {
   return (
@@ -92,6 +102,18 @@ function PostDetailStyles() {
       .wwpd-message-stack .wwa-alert-error {
         margin: 0;
       }
+      .wwpd-media-preview {
+        margin-top: 12px;
+        border-radius: 14px;
+        overflow: hidden;
+        border: 1px solid var(--ww-divider);
+        background: var(--ww-elevated);
+      }
+      .wwpd-media-preview img {
+        width: 100%;
+        display: block;
+        object-fit: cover;
+      }
       @media (max-width: 640px) {
         .wwpd-summary {
           flex-direction: column;
@@ -122,7 +144,23 @@ function toImageSrc(imageBase64) {
   return `data:image/jpeg;base64,${imageBase64}`;
 }
 
-function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden, onDelete }) {
+function formatElapsedSeconds(value) {
+  if (!Number.isFinite(Number(value))) return null;
+  const totalSeconds = Math.max(0, Number(value));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes > 0 && seconds > 0) return `${minutes} min ${seconds} sec`;
+  if (minutes > 0) return `${minutes} min`;
+  return `${seconds} sec`;
+}
+
+function formatVolume(value) {
+  if (!Number.isFinite(Number(value))) return null;
+  return `${Number(value)} kg`;
+}
+
+function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onRequestToggleHidden, onRequestDelete }) {
   const [isEditing, setIsEditing] = useState(false);
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -172,13 +210,12 @@ function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden,
 
   if (!post) return null;
 
+  const workoutPost = isWorkoutPost(post);
   const isHidden = !!post.isHidden;
   const imageSrc = toImageSrc(post.imageBase64);
   const showImage = Boolean(imageSrc && !imageFailed);
-  const title = post.foodName || post.caption || 'Untitled post';
-  const nutritionFields = NUMERIC_FIELDS.filter((field) => post[field.key] !== undefined && post[field.key] !== null);
-  const hasNutrition = nutritionFields.length > 0;
-  const hasSystemInfo = Boolean(post.id || post.uid);
+  const title = postTitle(post);
+  const nutritionFields = NUTRITION_FIELDS.filter((field) => post[field.key] !== undefined && post[field.key] !== null);
 
   const cancelEdit = () => {
     setIsEditing(false);
@@ -187,7 +224,7 @@ function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden,
   };
 
   const handleSave = async () => {
-    for (const field of NUMERIC_FIELDS) {
+    for (const field of NUTRITION_FIELDS) {
       const raw = form[field.key];
       if (raw !== '' && Number(raw) < 0) {
         setError(`${field.label} cannot be negative.`);
@@ -197,15 +234,31 @@ function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden,
 
     const changes = {};
 
-    if (form.foodName.trim() !== (post.foodName || '')) changes.foodName = form.foodName.trim();
-    if (form.caption.trim() !== (post.caption || '')) changes.caption = form.caption.trim();
+    if (!workoutPost && form.foodName.trim() !== (post.foodName || '')) {
+      changes.foodName = form.foodName.trim();
+    }
+    if (form.caption.trim() !== (post.caption || '')) {
+      changes.caption = form.caption.trim();
+    }
 
-    NUMERIC_FIELDS.forEach((field) => {
-      const raw = form[field.key];
-      const newValue = raw === '' ? null : Number(raw);
-      const oldValue = post[field.key] ?? null;
-      if (newValue !== oldValue) changes[field.key] = newValue;
-    });
+    if (form.calories !== '' || post.calories !== undefined) {
+      const newCalories = form.calories === '' ? null : Number(form.calories);
+      const oldCalories = post.calories ?? null;
+      if (newCalories !== oldCalories) {
+        changes.calories = newCalories;
+      }
+    }
+
+    if (!workoutPost) {
+      ['proteinG', 'carbsG', 'fatG'].forEach((field) => {
+        const raw = form[field];
+        const newValue = raw === '' ? null : Number(raw);
+        const oldValue = post[field] ?? null;
+        if (newValue !== oldValue) {
+          changes[field] = newValue;
+        }
+      });
+    }
 
     if (Object.keys(changes).length === 0) {
       setIsEditing(false);
@@ -223,21 +276,9 @@ function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden,
       setSuccessMsg('Post updated successfully');
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
-      console.error(err);
-      setError('Failed to update post. Please try again.');
-    }
-
-    setSaving(false);
-  };
-
-  const handleToggleHidden = async () => {
-    setError('');
-
-    try {
-      await onToggleHidden(post.id, isHidden);
-    } catch (err) {
-      console.error(err);
-      setError('Failed to update post status. Please try again.');
+      setError(err instanceof Error ? err.message : 'Failed to update post. Please try again.');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -260,7 +301,7 @@ function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden,
         </div>
         <div className="wwpd-summary__badges">
           <Badge tone={typeTone(post.type)}>{post.type || 'Post'}</Badge>
-          <Badge tone={statusTone(isHidden)}>{isHidden ? 'Hidden' : 'Active'}</Badge>
+          <Badge tone={statusTone(isHidden)}>{isHidden ? 'Hidden' : 'Visible'}</Badge>
         </div>
       </div>
     </div>
@@ -287,12 +328,12 @@ function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden,
       <button
         type="button"
         className={`wwa-btn ${isHidden ? 'wwa-btn-secondary' : 'wwa-btn-ghost'}`}
-        onClick={handleToggleHidden}
+        onClick={() => onRequestToggleHidden(post.id, !isHidden)}
       >
         <EyeOff aria-hidden="true" size={16} strokeWidth={2} />
         {isHidden ? 'Unhide' : 'Hide'}
       </button>
-      <button type="button" className="wwa-btn wwa-btn-danger" onClick={() => onDelete(post.id)}>
+      <button type="button" className="wwa-btn wwa-btn-danger" onClick={() => onRequestDelete(post.id)}>
         <Trash2 aria-hidden="true" size={16} strokeWidth={2} />
         Delete
       </button>
@@ -323,16 +364,26 @@ function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden,
         ) : null}
 
         {isEditing ? (
-          <FormSection title="Edit Post" description="Update existing post content and nutrition values." columns={2}>
-            <FormField label="Food Name" labelFor="post-food-name">
-              <input
-                id="post-food-name"
-                className="wwa-input"
-                value={form.foodName}
-                onChange={(event) => setForm((prev) => ({ ...prev, foodName: event.target.value }))}
-                placeholder="Food name"
-              />
-            </FormField>
+          <FormSection
+            title="Edit Post"
+            description={
+              workoutPost
+                ? 'Update the fields currently supported by the backend for workout posts.'
+                : 'Update existing meal post content and nutrition values.'
+            }
+            columns={2}
+          >
+            {!workoutPost ? (
+              <FormField label="Food Name" labelFor="post-food-name">
+                <input
+                  id="post-food-name"
+                  className="wwa-input"
+                  value={form.foodName}
+                  onChange={(event) => setForm((prev) => ({ ...prev, foodName: event.target.value }))}
+                  placeholder="Food name"
+                />
+              </FormField>
+            ) : null}
 
             <FormField label="Calories" labelFor="post-calories">
               <input
@@ -356,55 +407,64 @@ function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden,
               />
             </FormField>
 
-            <FormField label="Protein (g)" labelFor="post-protein">
-              <input
-                id="post-protein"
-                type="number"
-                min="0"
-                className="wwa-input"
-                value={form.proteinG}
-                onChange={(event) => setForm((prev) => ({ ...prev, proteinG: event.target.value }))}
-              />
-            </FormField>
+            {!workoutPost ? (
+              <>
+                <FormField label="Protein (g)" labelFor="post-protein">
+                  <input
+                    id="post-protein"
+                    type="number"
+                    min="0"
+                    className="wwa-input"
+                    value={form.proteinG}
+                    onChange={(event) => setForm((prev) => ({ ...prev, proteinG: event.target.value }))}
+                  />
+                </FormField>
 
-            <FormField label="Carbs (g)" labelFor="post-carbs">
-              <input
-                id="post-carbs"
-                type="number"
-                min="0"
-                className="wwa-input"
-                value={form.carbsG}
-                onChange={(event) => setForm((prev) => ({ ...prev, carbsG: event.target.value }))}
-              />
-            </FormField>
+                <FormField label="Carbs (g)" labelFor="post-carbs">
+                  <input
+                    id="post-carbs"
+                    type="number"
+                    min="0"
+                    className="wwa-input"
+                    value={form.carbsG}
+                    onChange={(event) => setForm((prev) => ({ ...prev, carbsG: event.target.value }))}
+                  />
+                </FormField>
 
-            <FormField label="Fat (g)" labelFor="post-fat">
-              <input
-                id="post-fat"
-                type="number"
-                min="0"
-                className="wwa-input"
-                value={form.fatG}
-                onChange={(event) => setForm((prev) => ({ ...prev, fatG: event.target.value }))}
-              />
-            </FormField>
+                <FormField label="Fat (g)" labelFor="post-fat">
+                  <input
+                    id="post-fat"
+                    type="number"
+                    min="0"
+                    className="wwa-input"
+                    value={form.fatG}
+                    onChange={(event) => setForm((prev) => ({ ...prev, fatG: event.target.value }))}
+                  />
+                </FormField>
+              </>
+            ) : null}
           </FormSection>
         ) : (
           <>
             <section className="wwa-detail-section">
               <div className="wwa-detail-section__title">Content</div>
-              {post.foodName ? <DetailRow label="Food Name" value={post.foodName} /> : null}
               {post.caption ? (
                 <div className="wwa-detail-row">
                   <span className="wwa-detail-label">Caption</span>
                   <div className="wwpd-text-block">{post.caption}</div>
                 </div>
               ) : null}
+              {showImage ? (
+                <div className="wwpd-media-preview">
+                  <img src={imageSrc} alt={title} onError={() => setImageFailed(true)} />
+                </div>
+              ) : null}
             </section>
 
-            {hasNutrition ? (
+            {!workoutPost ? (
               <section className="wwa-detail-section">
                 <div className="wwa-detail-section__title">Nutrition</div>
+                {post.foodName ? <DetailRow label="Food Name" value={post.foodName} /> : null}
                 {nutritionFields.map((field) => (
                   <DetailRow
                     key={field.key}
@@ -413,7 +473,18 @@ function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden,
                   />
                 ))}
               </section>
-            ) : null}
+            ) : (
+              <section className="wwa-detail-section">
+                <div className="wwa-detail-section__title">Workout Details</div>
+                {post.sessionName ? <DetailRow label="Session Name" value={post.sessionName} /> : null}
+                <DetailRow label="Workout Style" value={post.isCardio ? 'Cardio' : 'Strength'} />
+                {post.isCardio ? <DetailRow label="Cardio Activity" value={post.cardioActivity} /> : null}
+                <DetailRow label="Elapsed Time" value={formatElapsedSeconds(post.elapsedSeconds)} />
+                {!post.isCardio ? <DetailRow label="Total Sets" value={post.totalSets} /> : null}
+                {!post.isCardio ? <DetailRow label="Volume" value={formatVolume(post.volume)} /> : null}
+                <DetailRow label="Calories" value={post.calories} />
+              </section>
+            )}
 
             <section className="wwa-detail-section">
               <div className="wwa-detail-section__title">Engagement</div>
@@ -421,13 +492,31 @@ function PostDetailPanel({ post, editNonce = 0, onClose, onSave, onToggleHidden,
               <DetailRow label="Comments" value={post.commentCount ?? 0} />
             </section>
 
-            {hasSystemInfo ? (
-              <section className="wwa-detail-section">
-                <div className="wwa-detail-section__title">System</div>
-                {post.id ? <DetailRow label="Post ID" value={<span className="wwpd-identifier">{post.id}</span>} /> : null}
-                {post.uid ? <DetailRow label="Author UID" value={<span className="wwpd-identifier">{post.uid}</span>} /> : null}
-              </section>
-            ) : null}
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Author</div>
+              <DetailRow label="Name" value={post.authorName || 'Unknown author'} />
+            </section>
+
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Moderation</div>
+              <DetailRow label="Status" value={isHidden ? 'Hidden' : 'Visible'} />
+              <DetailRow label="Moderated At" value={formatDate(post.moderationUpdatedAt)} />
+              <DetailRow
+                label="Moderated By Admin UID"
+                value={post.moderatedByAdminUid ? <span className="wwpd-identifier">{post.moderatedByAdminUid}</span> : null}
+              />
+              <DetailRow label="Admin Updated At" value={formatDate(post.adminUpdatedAt)} />
+              <DetailRow
+                label="Updated By Admin UID"
+                value={post.updatedByAdminUid ? <span className="wwpd-identifier">{post.updatedByAdminUid}</span> : null}
+              />
+            </section>
+
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Technical</div>
+              {post.id ? <DetailRow label="Post ID" value={<span className="wwpd-identifier">{post.id}</span>} /> : null}
+              {post.uid ? <DetailRow label="Author UID" value={<span className="wwpd-identifier">{post.uid}</span>} /> : null}
+            </section>
           </>
         )}
       </DetailDrawer>
