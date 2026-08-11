@@ -294,6 +294,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
     super.didUpdateWidget(oldWidget);
     if (widget.isVisible && !oldWidget.isVisible) {
       _loadGoalWeight();
+      _loadNutritionLogs();
     }
   }
 

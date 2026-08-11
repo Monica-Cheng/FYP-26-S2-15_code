@@ -1302,6 +1302,18 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
             exercise: ex,
             getCtrl: _ctrl,
             onChanged: () => setState(() => _hasChanges = true),
+            // High-frequency path (every kg/reps/time keystroke) — must NOT
+            // setState, or every character typed rebuilds the top bar, day
+            // tabs, and every visible exercise card (see _buildSetRow's own
+            // comment on this). The typed character itself already shows up
+            // via the cached TextEditingController with no rebuild needed;
+            // this only needs to flip _hasChanges for the close-button's
+            // discard-dialog check, which reads the field live at tap time,
+            // not from a captured build-time value — so a silent mutation is
+            // enough, unlike onChanged above (still setState-backed, used
+            // only for structural/low-frequency actions like add/delete set
+            // or cycling a set's type, which do need to repaint).
+            markDirty: () => _hasChanges = true,
             onDelete: () => _deleteExercise(exIdx),
             onReplace: () => _replaceExercise(exIdx),
             onDeleteSet: (set) {
@@ -1775,6 +1787,9 @@ class _ExerciseCard extends StatefulWidget {
   final Map<String, dynamic> exercise;
   final TextEditingController Function(String key, String initial) getCtrl;
   final VoidCallback onChanged;
+  // Separate from onChanged above on purpose — see the call site in
+  // _buildExerciseList() for why kg/reps/time fields use this instead.
+  final VoidCallback markDirty;
   final VoidCallback onDelete;
   final VoidCallback onReplace;
   final void Function(Map<String, dynamic> set) onDeleteSet;
@@ -1786,6 +1801,7 @@ class _ExerciseCard extends StatefulWidget {
     required this.exercise,
     required this.getCtrl,
     required this.onChanged,
+    required this.markDirty,
     required this.onDelete,
     required this.onReplace,
     required this.onDeleteSet,
@@ -2208,7 +2224,7 @@ class _ExerciseCardState extends State<_ExerciseCard> {
                       textAlign: TextAlign.center,
                       onChanged: (v) {
                         _ex['estTimePerSet'] = v;
-                        widget.onChanged();
+                        widget.markDirty();
                       },
                       decoration: InputDecoration(
                         isDense: true,
@@ -2389,7 +2405,7 @@ class _ExerciseCardState extends State<_ExerciseCard> {
               textAlign: TextAlign.center,
               onChanged: (v) {
                 set['kg'] = v;
-                widget.onChanged();
+                widget.markDirty();
               },
               decoration: InputDecoration(
                 hintText: '—',
@@ -2425,7 +2441,7 @@ class _ExerciseCardState extends State<_ExerciseCard> {
               textAlign: TextAlign.center,
               onChanged: (v) {
                 set['reps'] = v;
-                widget.onChanged();
+                widget.markDirty();
               },
               decoration: InputDecoration(
                 hintText: '—',
