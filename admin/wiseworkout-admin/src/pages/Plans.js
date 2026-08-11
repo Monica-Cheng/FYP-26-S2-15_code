@@ -1,28 +1,37 @@
-import React, { useState, useEffect } from 'react';
-import { functions } from '../firebase';
+import React, { useEffect, useState } from 'react';
+import { collection, getDocs } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
+import { Download, Eye, Plus } from 'lucide-react';
+import { db, functions } from '../firebase';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import Badge from '../components/ui/Badge';
-import EmptyState from '../components/ui/EmptyState';
-import SkeletonBlock from '../components/ui/SkeletonBlock';
 import PlanDetailPanel from '../components/PlanDetailPanel';
 import PlanSessionsEditor, {
-  buildDefaultSessions, buildAndValidateSessions,
+  buildDefaultSessions,
+  buildAndValidateSessions,
+  resizeOfficialSessions,
+  officialSessionsNeedTruncationConfirm,
 } from '../components/PlanSessionsEditor';
-import ImageThumb from '../components/ui/ImageThumb';
-import { formatEquipment } from '../utils/formatUtils';
-import { parseCommaList, buildDesignedBy } from '../utils/planUtils';
+import FilterBar from '../components/ui/FilterBar';
+import SearchInput from '../components/ui/SearchInput';
+import SelectField from '../components/ui/SelectField';
+import DataTable from '../components/ui/DataTable';
+import FormSection from '../components/ui/FormSection';
+import FormField from '../components/ui/FormField';
+import LoadingState from '../components/ui/LoadingState';
+import ErrorState from '../components/ui/ErrorState';
+import {
+  parseCommaList,
+  buildDesignedBy,
+  CANONICAL_PLAN_TYPES,
+  deriveOfficialMatchSport,
+  getCallableErrorMessage,
+} from '../utils/planUtils';
 
-// Canonical values already established elsewhere in the codebase (Badge tones
-// in Plans.js/plan_detail_screen.dart's level styling, the app's Gym/Running
-// catalog sports) — offered first, then unioned with whatever real distinct
-// values the loaded data already contains. 'Custom' is excluded here since
-// it's reserved for user-created plans and is never a valid choice when
-// adding a new *official* plan.
 const CANONICAL_LEVELS = ['Beginner', 'Intermediate', 'Advanced'];
-const CANONICAL_TYPES = ['Gym', 'Running'];
+const CANONICAL_TYPES = CANONICAL_PLAN_TYPES;
 
 const getPlanSource = (plan) => {
   if (plan.isCoachPlan === true) return 'coach';
@@ -31,15 +40,113 @@ const getPlanSource = (plan) => {
 };
 
 const emptyAddForm = {
-  name: '', level: 'Beginner', type: 'Gym', durationWeeks: '', daysPerWeek: '', equipment: '', description: '',
-  goals: '', matchGoals: '', matchSport: 'Gym', matchLevel: 'Beginner', isActive: true, imageUrl: '',
-  designedByName: '', designedByTitle: '', designedByCredential: '', designedByQuote: '',
+  name: '',
+  level: 'Beginner',
+  type: 'Gym',
+  durationWeeks: '',
+  daysPerWeek: '',
+  equipment: '',
+  description: '',
+  goals: '',
+  matchGoals: '',
+  matchLevel: 'Beginner',
+  isActive: true,
+  featured: false,
+  imageUrl: '',
+  designedByName: '',
+  designedByTitle: '',
+  designedByCredential: '',
+  designedByQuote: '',
 };
+
+const buildOfficialDurationReductionWarning = (oldWeeks, newWeeks) =>
+  `Reducing duration from ${oldWeeks} week${oldWeeks === 1 ? '' : 's'} to ${newWeeks} week${newWeeks === 1 ? '' : 's'} will remove day entries from the end of the plan. Continue?`;
+
+function PlansStyles() {
+  return (
+    <style>{`
+      .wwpl-page {
+        display: flex;
+        flex-direction: column;
+        gap: var(--ww-space-5);
+      }
+      .wwpl-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: var(--ww-space-5);
+      }
+      .wwpl-layout.has-detail {
+        grid-template-columns: minmax(0, 1fr) minmax(400px, var(--ww-drawer-width-wide));
+        align-items: start;
+      }
+      .wwpl-form {
+        display: flex;
+        flex-direction: column;
+        gap: var(--ww-space-5);
+      }
+      .wwpl-form-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .wwpl-table .wwa-table th:last-child,
+      .wwpl-table .wwa-table td:last-child {
+        width: 1%;
+        white-space: nowrap;
+      }
+      .wwpl-plan-cell,
+      .wwpl-creator-cell,
+      .wwpl-schedule-cell {
+        min-width: 0;
+      }
+      .wwpl-plan-cell__title,
+      .wwpl-creator-cell__title,
+      .wwpl-schedule-cell__title {
+        font-size: var(--ww-type-body-size);
+        font-weight: 600;
+        color: var(--ww-text);
+        line-height: 1.35;
+      }
+      .wwpl-plan-cell__meta,
+      .wwpl-creator-cell__meta,
+      .wwpl-schedule-cell__meta {
+        margin-top: 3px;
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        color: var(--ww-text-sec);
+        line-height: 1.45;
+      }
+      .wwpl-plan-cell__meta {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .wwpl-actions {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        white-space: nowrap;
+      }
+      .wwpl-status-badge {
+        white-space: nowrap;
+      }
+      @media (max-width: 1240px) {
+        .wwpl-layout.has-detail {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+    `}</style>
+  );
+}
 
 function Plans() {
   const [plans, setPlans] = useState([]);
   const [usersById, setUsersById] = useState({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [search, setSearch] = useState('');
   const [levelFilter, setLevelFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
@@ -49,73 +156,58 @@ function Plans() {
   const [selectedPlanId, setSelectedPlanId] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [addForm, setAddForm] = useState(emptyAddForm);
-  const [addSessions, setAddSessions] = useState(() => buildDefaultSessions(emptyAddForm.daysPerWeek));
+  const [addSessions, setAddSessions] = useState(() => buildDefaultSessions(emptyAddForm.daysPerWeek, emptyAddForm.durationWeeks, emptyAddForm.type));
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [exerciseCatalog, setExerciseCatalog] = useState([]);
 
+  const fetchData = async () => {
+    setLoading(true);
+    setLoadError('');
+
+    try {
+      const adminListPlansDashboard = httpsCallable(functions, 'adminListPlansDashboard');
+      const [result, exercisesSnapshot] = await Promise.all([
+        adminListPlansDashboard(),
+        getDocs(collection(db, 'exercises')),
+      ]);
+      const data = result.data || {};
+
+      const loadedPlans = Array.isArray(data.plans) ? data.plans : [];
+      setPlans(loadedPlans);
+
+      const byId = {};
+      const loadedUsers = Array.isArray(data.users) ? data.users : [];
+      loadedUsers.forEach((user) => {
+        byId[user.id] = user;
+      });
+      setUsersById(byId);
+
+      const catalog = exercisesSnapshot.docs
+        .map((doc) => ({ id: doc.id, ...doc.data() }))
+        .filter((exercise) => exercise.name)
+        .map((exercise) => ({
+          name: exercise.name,
+          muscle: typeof exercise.muscle === 'string' ? exercise.muscle.trim() : '',
+          muscleGroup: typeof exercise.muscleGroup === 'string' ? exercise.muscleGroup.trim() : '',
+        }));
+
+      setExerciseCatalog(catalog);
+    } catch (err) {
+      console.error('Failed to load plans dashboard:', err);
+      const detail = err?.code ? ` (${err.code})` : '';
+      setLoadError(`Failed to load plans dashboard.${detail}`);
+      window.alert(`Failed to load plans dashboard.${detail}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-  
-      try {
-        const adminListPlansDashboard = httpsCallable(
-          functions,
-          'adminListPlansDashboard'
-        );
-  
-        const result = await adminListPlansDashboard();
-        const data = result.data || {};
-  
-        const loadedPlans = Array.isArray(data.plans)
-          ? data.plans
-          : [];
-  
-        setPlans(loadedPlans);
-  
-        const byId = {};
-        const loadedUsers = Array.isArray(data.users)
-          ? data.users
-          : [];
-  
-        loadedUsers.forEach(user => {
-          byId[user.id] = user;
-        });
-  
-        setUsersById(byId);
-  
-        const catalog = Array.isArray(data.exercises)
-          ? data.exercises
-              .filter(exercise => exercise.name)
-              .map(exercise => ({
-                name: exercise.name,
-                muscle: exercise.muscleGroup || '',
-              }))
-          : [];
-  
-        setExerciseCatalog(catalog);
-      } catch (err) {
-        console.error('Failed to load plans dashboard:', err);
-  
-        window.alert(
-          `Failed to load plans dashboard.${
-            err?.code ? ` (${err.code})` : ''
-          }`
-        );
-      } finally {
-        setLoading(false);
-      }
-    };
-  
     fetchData();
   }, []);
 
-  // For custom plans, resolves createdBy against the already-loaded users
-  // map (name, then email, then the raw UID as a last resort). Official/
-  // system plans aren't attributed to any admin-managed creator flow, so
-  // they're labelled with the app's own catalog attribution ("WiseWorkout",
-  // matching plan_detail_screen.dart's "WiseWorkout Certified" plans).
   const getCreatorLabel = (plan) => {
     if (!plan.isCustom) return (plan.designedBy && plan.designedBy.name) || 'WiseWorkout';
     const uid = plan.createdBy;
@@ -124,42 +216,52 @@ function Plans() {
     return (user && (user.displayName || user.email)) || uid;
   };
 
-  // Distinct values actually present in the loaded data — no hardcoded lists.
-  const levels = Array.from(new Set(plans.map(p => p.level).filter(Boolean))).sort();
-  const types = Array.from(new Set(plans.map(p => p.type).filter(Boolean))).sort();
-  const daysOptions = Array.from(new Set(plans.map(p => p.daysPerWeek).filter(d => d !== undefined && d !== null)))
-    .sort((a, b) => a - b);
+  const levels = Array.from(new Set(plans.map((plan) => plan.level).filter(Boolean))).sort();
+  const types = Array.from(new Set(plans.map((plan) => plan.type).filter(Boolean))).sort();
+  const daysOptions = Array.from(
+    new Set(plans.map((plan) => plan.daysPerWeek).filter((days) => days !== undefined && days !== null))
+  ).sort((a, b) => a - b);
 
-  const levelOptions = Array.from(new Set([...CANONICAL_LEVELS, ...levels]))
-    .filter(l => l.toLowerCase() !== 'custom');
-  const typeOptions = Array.from(new Set([...CANONICAL_TYPES, ...types]));
+  const levelOptions = Array.from(new Set([...CANONICAL_LEVELS, ...levels])).filter((level) => level.toLowerCase() !== 'custom');
+  const officialTypeOptions = CANONICAL_TYPES;
 
-  // Creates a new official/system plan matching the real official-plan
-  // schema found in Firestore: no `isCustom` field at all (official plans
-  // simply omit it — they aren't marked isCustom: false), no `createdBy`,
-  // no `createdAt`/serverTimestamp (existing official plans have neither).
-  // `sessions` must be fully populated — every consumer in the mobile app
-  // (plan_detail_screen.dart, plan_schedule_screen.dart, gym_session_screen.dart,
-  // home_screen.dart) expects real session/exercise data, and an empty
-  // sessions: [] plan renders as blank/broken there.
   const handleAddPlan = async () => {
-    if (!addForm.name.trim()) { setAddError('Plan Name is required.'); return; }
-    if (!addForm.level) { setAddError('Level is required.'); return; }
-    if (!addForm.type) { setAddError('Type is required.'); return; }
+    if (!addForm.name.trim()) {
+      setAddError('Plan Name is required.');
+      return;
+    }
+    if (!addForm.level) {
+      setAddError('Level is required.');
+      return;
+    }
+    if (!addForm.type) {
+      setAddError('Type is required.');
+      return;
+    }
+
     const days = Number(addForm.daysPerWeek);
     if (!Number.isInteger(days) || days <= 0) {
       setAddError('Days per Week must be a valid positive integer.');
       return;
     }
+
     const durationWeeks = Number(addForm.durationWeeks);
     if (!Number.isInteger(durationWeeks) || durationWeeks <= 0) {
       setAddError('Duration (weeks) must be a valid positive integer.');
       return;
     }
-    // Cross-checks daysPerWeek against the actual number of non-rest
-    // sessions built and blocks saving on mismatch — see buildAndValidateSessions.
-    const { sessions, error: sessionsError } = buildAndValidateSessions(addSessions, days);
-    if (sessionsError) { setAddError(sessionsError); return; }
+
+    const { sessions, error: sessionsError } = buildAndValidateSessions(
+      addSessions,
+      days,
+      addForm.type,
+      exerciseCatalog,
+      durationWeeks
+    );
+    if (sessionsError) {
+      setAddError(sessionsError);
+      return;
+    }
 
     const equipmentList = parseCommaList(addForm.equipment);
     const goalsList = parseCommaList(addForm.goals);
@@ -173,6 +275,7 @@ function Plans() {
 
     setAddSaving(true);
     setAddError('');
+
     try {
       const payload = {
         name: addForm.name.trim(),
@@ -185,23 +288,20 @@ function Plans() {
         goals: goalsList,
         sessions,
         isActive: addForm.isActive,
+        featured: addForm.featured === true,
         matchGoals: matchGoalsList,
         matchLevel: addForm.matchLevel || addForm.level,
-        matchSport: addForm.matchSport || addForm.type,
+        matchSport: deriveOfficialMatchSport(addForm.type),
         imageUrl: addForm.imageUrl.trim(),
       };
       if (designedBy) payload.designedBy = designedBy;
 
-      const adminCreateOfficialPlan = httpsCallable(
-        functions,
-        'adminCreateOfficialPlan'
-      );
-      
+      const adminCreateOfficialPlan = httpsCallable(functions, 'adminCreateOfficialPlan');
       const result = await adminCreateOfficialPlan({
         plan: payload,
       });
-      
-      setPlans(prev => [
+
+      setPlans((prev) => [
         ...prev,
         {
           id: result.data.planId,
@@ -210,61 +310,47 @@ function Plans() {
       ]);
       setShowAddForm(false);
       setAddForm(emptyAddForm);
-      setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek));
+      setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek, emptyAddForm.durationWeeks, emptyAddForm.type));
       setSuccessMsg('Plan created successfully');
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error(err);
-      setAddError('Failed to create plan. Please try again.');
+      setAddError(getCallableErrorMessage(err, 'Failed to create plan. Please try again.'));
     }
+
     setAddSaving(false);
   };
 
-  // Used for both custom-plan edits (PlanDetailPanel enforces which fields are
-  // editable there) and official-plan edits — writes only the changed fields
-  // plus updatedAt. Official plans don't have isCustom/createdBy/createdAt
-  // (see handleAddPlan above), but stamping updatedAt on edit is harmless
-  // additive bookkeeping nothing in the app depends on being absent.
   const handleSavePlan = async (planId, changes) => {
-    const adminUpdatePlan = httpsCallable(
-      functions,
-      'adminUpdatePlan'
-    );
-  
-    const result = await adminUpdatePlan({
-      planId,
-      changes,
-    });
-  
-    const savedPlan = result.data.plan || changes;
-  
-    setPlans(prev =>
-      prev.map(plan =>
-        plan.id === planId
-          ? {
-              ...plan,
-              ...savedPlan,
-              updatedAt: new Date().toISOString(),
-            }
-          : plan
-      )
-    );
+    try {
+      const adminUpdatePlan = httpsCallable(functions, 'adminUpdatePlan');
+      const result = await adminUpdatePlan({
+        planId,
+        changes,
+      });
+
+      const savedPlan = result.data.plan || changes;
+
+      setPlans((prev) =>
+        prev.map((plan) =>
+          plan.id === planId
+            ? {
+                ...plan,
+                ...savedPlan,
+                updatedAt: new Date().toISOString(),
+              }
+            : plan
+        )
+      );
+    } catch (err) {
+      console.error(err);
+      throw new Error(getCallableErrorMessage(err, 'Failed to update plan. Please try again.'));
+    }
   };
 
-  // Mirrors FirestoreService.deleteCustomPlan exactly for custom plans:
-  // deletes the plan doc, the creator's matching customRoutines doc(s), and
-  // the creator's own planProgress entry (guarded by plan.createdBy, which
-  // official plans never have — so this already no-ops safely for them).
-  // Does not touch trackedPlanId/trackedPlanName/savedPlanIds on OTHER users
-  // anywhere — the app itself never cleans those up either. A stale reference
-  // left on some other user's document is not a crash: getTrackedPlan() checks
-  // planDoc.exists() and returns null, and the Saved-plans list cross-references
-  // live getPlans() results, so a deleted plan just silently drops out of view.
-  // Doing a full users-collection scan/rewrite to purge those references would
-  // be a much larger, riskier operation than this delete button implies.
   const handleDeletePlan = async (plan) => {
     const planName = plan.name || plan.title || plan.id;
-  
+
     const confirmation = window.prompt(
       `Permanently delete "${planName}"?\n\n` +
       `${
@@ -274,34 +360,27 @@ function Plans() {
       }\n\n` +
       'Type DELETE to continue:'
     );
-  
+
     if (confirmation !== 'DELETE') return;
-  
-    const adminDeletePlan = httpsCallable(
-      functions,
-      'adminDeletePlan'
-    );
-  
-    await adminDeletePlan({
-      planId: plan.id,
-    });
-  
-    setPlans(prev =>
-      prev.filter(existing => existing.id !== plan.id)
-    );
-  
+
+    try {
+      const adminDeletePlan = httpsCallable(functions, 'adminDeletePlan');
+      await adminDeletePlan({
+        planId: plan.id,
+      });
+    } catch (err) {
+      console.error(err);
+      throw new Error(getCallableErrorMessage(err, 'Failed to delete plan. Please try again.'));
+    }
+
+    setPlans((prev) => prev.filter((existing) => existing.id !== plan.id));
     setSelectedPlanId(null);
-  
-    setSuccessMsg(
-      `${plan.isCustom ? 'Custom' : 'Official'} plan deleted successfully`
-    );
-  
+    setSuccessMsg(`${sourceLabel(plan)} plan deleted successfully`);
     setTimeout(() => setSuccessMsg(''), 3000);
   };
 
   const hasActiveFilters = Boolean(
-    search || levelFilter !== 'all' || typeFilter !== 'all' ||
-    sourceFilter !== 'all' || daysFilter !== 'all' || statusFilter !== 'all'
+    search || levelFilter !== 'all' || typeFilter !== 'all' || sourceFilter !== 'all' || daysFilter !== 'all' || statusFilter !== 'all'
   );
 
   const resetFilters = () => {
@@ -313,45 +392,60 @@ function Plans() {
     setStatusFilter('all');
   };
 
-  const filtered = plans.filter(p => {
-    const q = search.toLowerCase();
-    const matchesSearch = !q ||
-      (p.title || p.name || '').toLowerCase().includes(q) ||
-      (p.level || '').toLowerCase().includes(q);
-    const matchesLevel = levelFilter === 'all' || p.level === levelFilter;
-    const matchesType = typeFilter === 'all' || p.type === typeFilter;
-    const matchesSource =
-      sourceFilter === 'all' ||
-      getPlanSource(p) === sourceFilter;
-    const matchesDays = daysFilter === 'all' || p.daysPerWeek === Number(daysFilter);
-    const matchesStatus = statusFilter === 'all' ||
-      (statusFilter === 'active' ? p.isActive !== false : p.isActive === false);
+  const filtered = plans.filter((plan) => {
+    const query = search.toLowerCase();
+    const matchesSearch =
+      !query ||
+      (plan.title || plan.name || '').toLowerCase().includes(query) ||
+      (plan.level || '').toLowerCase().includes(query);
+    const matchesLevel = levelFilter === 'all' || plan.level === levelFilter;
+    const matchesType = typeFilter === 'all' || plan.type === typeFilter;
+    const matchesSource = sourceFilter === 'all' || getPlanSource(plan) === sourceFilter;
+    const matchesDays = daysFilter === 'all' || plan.daysPerWeek === Number(daysFilter);
+    const matchesStatus =
+      statusFilter === 'all' ||
+      (statusFilter === 'active' ? plan.isActive !== false : plan.isActive === false);
+
     return matchesSearch && matchesLevel && matchesType && matchesSource && matchesDays && matchesStatus;
   });
 
-  const selectedPlan = plans.find(p => p.id === selectedPlanId) || null;
+  const selectedPlan = plans.find((plan) => plan.id === selectedPlanId) || null;
 
   const levelTone = (level) =>
     level === 'Advanced' ? 'danger' : level === 'Intermediate' ? 'warning' : 'success';
 
-  // Exports exactly the rows currently matching search + filters. Missing
-  // values use "-" per spec (distinct from the "—" used elsewhere on-screen).
+  const sourceTone = (plan) =>
+    getPlanSource(plan) === 'coach' ? 'warning' : getPlanSource(plan) === 'custom' ? 'brand' : 'neutral';
+
+  const sourceLabel = (plan) =>
+    getPlanSource(plan) === 'coach' ? 'Coach' : getPlanSource(plan) === 'custom' ? 'Custom' : 'Official/System';
+
+  const scheduleLabel = (plan) => {
+    const parts = [];
+    if (plan.daysPerWeek) parts.push(`${plan.daysPerWeek} days/week`);
+    if (plan.durationWeeks) parts.push(`${plan.durationWeeks} weeks`);
+    return parts.length > 0 ? parts.join(' · ') : '—';
+  };
+
   const handleExport = () => {
-    const rows = filtered.map(p => {
-      const creator = getCreatorLabel(p);
+    const rows = filtered.map((plan) => {
+      const creator = getCreatorLabel(plan);
       return {
-        'Plan Name': p.title || p.name || '-',
-        Level: p.level || '-',
-        Duration: p.durationWeeks ? `${p.durationWeeks}w` : '-',
-        'Days/Week': p.daysPerWeek ? `${p.daysPerWeek} days` : '-',
-        Equipment: Array.isArray(p.equipment)
-          ? (p.equipment.length > 0 ? p.equipment.join(', ') : '-')
-          : (p.equipment || '-'),
-        Type: p.type || p.category || '-',
-        Source: p.isCustom ? 'Custom' : 'Official',
+        'Plan Name': plan.title || plan.name || '-',
+        Level: plan.level || '-',
+        Duration: plan.durationWeeks ? `${plan.durationWeeks}w` : '-',
+        'Days/Week': plan.daysPerWeek ? `${plan.daysPerWeek} days` : '-',
+        Equipment: Array.isArray(plan.equipment)
+          ? plan.equipment.length > 0
+            ? plan.equipment.join(', ')
+            : '-'
+          : plan.equipment || '-',
+        Type: plan.type || plan.category || '-',
+        Source: sourceLabel(plan),
         Creator: creator === '—' ? '-' : creator,
       };
     });
+
     const worksheet = XLSX.utils.json_to_sheet(rows);
     worksheet['!cols'] = [
       { wch: 26 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 30 }, { wch: 10 }, { wch: 10 }, { wch: 22 },
@@ -361,402 +455,455 @@ function Plans() {
     XLSX.writeFile(workbook, 'WiseWorkout_Plans.xlsx');
   };
 
+  const columns = [
+    {
+      key: 'plan',
+      header: 'Plan',
+      render: (plan) => (
+        <div className="wwpl-plan-cell">
+          <div className="wwpl-plan-cell__title">{plan.title || plan.name || '—'}</div>
+          {plan.description ? <div className="wwpl-plan-cell__meta">{plan.description}</div> : null}
+        </div>
+      ),
+    },
+    {
+      key: 'level',
+      header: 'Level',
+      render: (plan) => <Badge tone={levelTone(plan.level)}>{plan.level || 'Beginner'}</Badge>,
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      render: (plan) => <Badge tone="brand">{plan.type || plan.category || 'General'}</Badge>,
+    },
+    {
+      key: 'schedule',
+      header: 'Schedule',
+      render: (plan) => (
+        <div className="wwpl-schedule-cell">
+          <div className="wwpl-schedule-cell__title">{scheduleLabel(plan)}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'source',
+      header: 'Source',
+      render: (plan) => <Badge tone={sourceTone(plan)}>{sourceLabel(plan)}</Badge>,
+    },
+    {
+      key: 'creator',
+      header: 'Creator',
+      render: (plan) => (
+        <div className="wwpl-creator-cell">
+          <div className="wwpl-creator-cell__title">{getCreatorLabel(plan)}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      render: (plan) => (
+        <Badge tone={plan.isActive !== false ? 'success' : 'danger'} className="wwpl-status-badge">
+          {plan.isActive !== false ? 'Active' : 'Inactive'}
+        </Badge>
+      ),
+    },
+  ];
+
+  const openAddForm = () => {
+    setSelectedPlanId(null);
+    setShowAddForm(true);
+    setAddError('');
+    setAddForm(emptyAddForm);
+    setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek, emptyAddForm.durationWeeks, emptyAddForm.type));
+  };
+
+  const handleAddDurationWeeksChange = (value) => {
+    const currentWeeks = Number(addForm.durationWeeks) || 1;
+    const requestedWeeks = Number(value);
+
+    if (!Number.isInteger(requestedWeeks) || requestedWeeks <= 0) {
+      setAddForm((prev) => ({ ...prev, durationWeeks: value }));
+      return;
+    }
+
+    const { sessions: resizedSessions, removedSessions } = resizeOfficialSessions(addSessions, requestedWeeks);
+    if (
+      requestedWeeks < currentWeeks &&
+      officialSessionsNeedTruncationConfirm(removedSessions) &&
+      !window.confirm(buildOfficialDurationReductionWarning(currentWeeks, requestedWeeks))
+    ) {
+      return;
+    }
+
+    setAddSessions(resizedSessions);
+    setAddForm((prev) => ({ ...prev, durationWeeks: value }));
+  };
+
   return (
-    <div>
+    <div className="wwpl-page">
       <AdminStyles />
+      <PlansStyles />
+
       <PageHeader
         title="Plans"
-        subtitle={loading ? 'Loading plans…' : `${plans.length} plans in the library`}
-        actions={!loading && (
-          <>
-            {successMsg && (
-              <span className="wwa-status-pill">
-                <span className="wwa-status-dot" />
-                {successMsg}
-              </span>
-            )}
-            <button
-              className="wwa-btn wwa-btn-primary"
-              onClick={() => {
-                setShowAddForm(!showAddForm);
-                setAddError('');
-                setAddForm(emptyAddForm);
-                setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek));
-              }}
-            >
-              + Add Plan
-            </button>
-            <button
-              className="wwa-btn wwa-btn-sm wwa-btn-success"
-              onClick={handleExport}
-              disabled={filtered.length === 0}
-            >
-              📤 Export to Excel
-            </button>
-          </>
-        )}
+        description="Manage official, coach, and custom plans"
+        count={loading ? undefined : `${plans.length} plans in the library`}
+        actions={
+          !loading ? (
+            <>
+              {successMsg ? (
+                <span className="wwa-status-pill">
+                  <span className="wwa-status-dot" />
+                  {successMsg}
+                </span>
+              ) : null}
+              <button type="button" className="wwa-btn wwa-btn-secondary" onClick={handleExport} disabled={filtered.length === 0}>
+                <Download aria-hidden="true" size={16} strokeWidth={2} />
+                Export to Excel
+              </button>
+              <button type="button" className="wwa-btn wwa-btn-primary" onClick={openAddForm}>
+                <Plus aria-hidden="true" size={16} strokeWidth={2} />
+                Add Plan
+              </button>
+            </>
+          ) : null
+        }
       />
 
       {loading ? (
-        <SkeletonBlock height={320} />
+        <LoadingState rows={6} />
+      ) : loadError ? (
+        <ErrorState title="Failed to load plans" message={loadError} onRetry={fetchData} />
       ) : (
         <>
-          {showAddForm && (
-            <div className="wwa-panel">
-              <div className="wwa-panel-title">New Official Plan</div>
-              <div className="wwa-panel-subtitle">Creates a system plan — not attributed to any user</div>
+          {showAddForm ? (
+            <div className="wwa-panel wwpl-form">
+              <div>
+                <div className="wwa-panel-title">New Official Plan</div>
+                <div className="wwa-panel-subtitle">Creates a system plan and preserves the existing official plan schema.</div>
+              </div>
 
-              {addError && <div className="wwa-alert-error" style={{ marginBottom: 16 }}>{addError}</div>}
+              {addError ? <div className="wwa-alert-error">{addError}</div> : null}
 
-              <div className="wwa-form-grid">
-                <div>
-                  <label className="wwa-field-label">Plan Name</label>
+              <FormSection title="Basic Information" columns={2}>
+                <FormField label="Plan Name" labelFor="plan-name" required>
                   <input
+                    id="plan-name"
                     className="wwa-input"
                     value={addForm.name}
-                    onChange={e => setAddForm(prev => ({ ...prev, name: e.target.value }))}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, name: event.target.value }))}
                     placeholder="e.g. Fat Loss Circuit"
                   />
-                </div>
-                <div>
-                  <label className="wwa-field-label">Level</label>
-                  <select
-                    className="wwa-select"
-                    value={addForm.level}
-                    onChange={e => setAddForm(prev => ({ ...prev, level: e.target.value, matchLevel: e.target.value }))}
-                  >
-                    {levelOptions.map(l => <option key={l} value={l}>{l}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="wwa-field-label">Type</label>
-                  <select
-                    className="wwa-select"
-                    value={addForm.type}
-                    onChange={e => setAddForm(prev => ({ ...prev, type: e.target.value, matchSport: e.target.value }))}
-                  >
-                    {typeOptions.map(t => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="wwa-field-label">Days per Week</label>
+                </FormField>
+
+                <SelectField
+                  id="plan-level"
+                  label="Level"
+                  value={addForm.level}
+                  onChange={(event) => setAddForm((prev) => ({ ...prev, level: event.target.value, matchLevel: event.target.value }))}
+                  options={levelOptions}
+                />
+
+                <SelectField
+                  id="plan-type"
+                  label="Type"
+                  value={addForm.type}
+                  onChange={(event) => setAddForm((prev) => ({ ...prev, type: event.target.value }))}
+                  options={officialTypeOptions}
+                />
+
+                <FormField label="Days per Week" labelFor="plan-days" required>
                   <input
+                    id="plan-days"
                     type="number"
                     min="1"
                     className="wwa-input"
                     value={addForm.daysPerWeek}
-                    onChange={e => setAddForm(prev => ({ ...prev, daysPerWeek: e.target.value }))}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, daysPerWeek: event.target.value }))}
                     placeholder="e.g. 3"
                   />
-                </div>
-                <div>
-                  <label className="wwa-field-label">Duration (weeks)</label>
+                </FormField>
+
+                <FormField label="Duration (weeks)" labelFor="plan-duration" required>
                   <input
+                    id="plan-duration"
                     type="number"
                     min="1"
                     className="wwa-input"
                     value={addForm.durationWeeks}
-                    onChange={e => setAddForm(prev => ({ ...prev, durationWeeks: e.target.value }))}
+                    onChange={(event) => handleAddDurationWeeksChange(event.target.value)}
                     placeholder="e.g. 8"
                   />
-                </div>
-                <div>
-                  <label className="wwa-field-label">Equipment</label>
+                </FormField>
+
+                <FormField label="Status" labelFor="plan-status" fullWidth>
+                  <label id="plan-status" className="wwa-toggle-inline">
+                    <input
+                      type="checkbox"
+                      checked={addForm.isActive}
+                      onChange={(event) => setAddForm((prev) => ({ ...prev, isActive: event.target.checked }))}
+                    />
+                    <span>Active (visible to users)</span>
+                  </label>
+                </FormField>
+
+                <FormField label="Featured Plan" labelFor="plan-featured" fullWidth>
+                  <label id="plan-featured" className="wwa-toggle-inline">
+                    <input
+                      type="checkbox"
+                      checked={addForm.featured}
+                      onChange={(event) => setAddForm((prev) => ({ ...prev, featured: event.target.checked }))}
+                    />
+                    <span>Highlight this official plan in featured placements</span>
+                  </label>
+                </FormField>
+              </FormSection>
+
+              <FormSection title="Plan Matching" columns={2}>
+                <FormField label="Match Sport" labelFor="plan-match-sport">
                   <input
+                    id="plan-match-sport"
                     className="wwa-input"
-                    value={addForm.equipment}
-                    onChange={e => setAddForm(prev => ({ ...prev, equipment: e.target.value }))}
-                    placeholder="Comma-separated, e.g. Barbell, Dumbbells, Bench"
+                    value={deriveOfficialMatchSport(addForm.type)}
+                    readOnly
+                    disabled
                   />
-                </div>
-                <div>
-                  <label className="wwa-field-label">Goals</label>
+                </FormField>
+
+                <FormField label="Match Level" labelFor="plan-match-level">
                   <input
-                    className="wwa-input"
-                    value={addForm.goals}
-                    onChange={e => setAddForm(prev => ({ ...prev, goals: e.target.value }))}
-                    placeholder="Comma-separated, e.g. Build Muscle, Build Strength"
-                  />
-                </div>
-                <div>
-                  <label className="wwa-field-label">Match Sport</label>
-                  <input
-                    className="wwa-input"
-                    value={addForm.matchSport}
-                    onChange={e => setAddForm(prev => ({ ...prev, matchSport: e.target.value }))}
-                  />
-                </div>
-                <div>
-                  <label className="wwa-field-label">Match Level</label>
-                  <input
+                    id="plan-match-level"
                     className="wwa-input"
                     value={addForm.matchLevel}
-                    onChange={e => setAddForm(prev => ({ ...prev, matchLevel: e.target.value }))}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, matchLevel: event.target.value }))}
                   />
-                </div>
-                <div className="wwa-field-full">
-                  <label className="wwa-field-label">Match Goals</label>
+                </FormField>
+
+                <FormField label="Goals" labelFor="plan-goals">
                   <input
+                    id="plan-goals"
+                    className="wwa-input"
+                    value={addForm.goals}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, goals: event.target.value }))}
+                    placeholder="Comma-separated, e.g. Build Muscle, Build Strength"
+                  />
+                </FormField>
+
+                <FormField label="Equipment" labelFor="plan-equipment">
+                  <input
+                    id="plan-equipment"
+                    className="wwa-input"
+                    value={addForm.equipment}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, equipment: event.target.value }))}
+                    placeholder="Comma-separated, e.g. Barbell, Dumbbells, Bench"
+                  />
+                </FormField>
+
+                <FormField label="Match Goals" labelFor="plan-match-goals" fullWidth>
+                  <input
+                    id="plan-match-goals"
                     className="wwa-input"
                     value={addForm.matchGoals}
-                    onChange={e => setAddForm(prev => ({ ...prev, matchGoals: e.target.value }))}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, matchGoals: event.target.value }))}
                     placeholder="Comma-separated — feeds the Plan Match algorithm"
                   />
-                </div>
-                <div className="wwa-field-full">
-                  <label className="wwa-field-label">Description</label>
+                </FormField>
+              </FormSection>
+
+              <FormSection title="Presentation" columns={2}>
+                <FormField label="Description" labelFor="plan-description" fullWidth>
                   <input
+                    id="plan-description"
                     className="wwa-input"
                     value={addForm.description}
-                    onChange={e => setAddForm(prev => ({ ...prev, description: e.target.value }))}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, description: event.target.value }))}
                     placeholder="Short description shown to users"
                   />
-                </div>
-                <div>
-                  <label className="wwa-field-label">Image URL</label>
+                </FormField>
+
+                <FormField label="Image URL" labelFor="plan-image-url">
                   <input
+                    id="plan-image-url"
                     className="wwa-input"
                     value={addForm.imageUrl}
-                    onChange={e => setAddForm(prev => ({ ...prev, imageUrl: e.target.value }))}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, imageUrl: event.target.value }))}
                     placeholder="https://… (optional)"
                   />
-                  {addForm.imageUrl.trim() && (
-                    <div style={{ marginTop: 8 }}>
-                      <ImageThumb url={addForm.imageUrl} size={56} icon="📋" />
-                    </div>
-                  )}
-                </div>
-                <div>
-                  <label className="wwa-field-label">Status</label>
-                  <div style={{ paddingTop: 8 }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#374151' }}>
-                      <input
-                        type="checkbox"
-                        checked={addForm.isActive}
-                        onChange={e => setAddForm(prev => ({ ...prev, isActive: e.target.checked }))}
-                      />
-                      Active (visible to users)
-                    </label>
-                  </div>
-                </div>
-              </div>
+                </FormField>
+              </FormSection>
 
-              <div className="wwa-panel-subtitle" style={{ marginTop: 4 }}>Designed By (optional)</div>
-              <div className="wwa-form-grid">
-                <div>
-                  <label className="wwa-field-label">Name</label>
+              <FormSection title="Designed By" description="Optional plan attribution shown to users." columns={2}>
+                <FormField label="Name" labelFor="designer-name">
                   <input
+                    id="designer-name"
                     className="wwa-input"
                     value={addForm.designedByName}
-                    onChange={e => setAddForm(prev => ({ ...prev, designedByName: e.target.value }))}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, designedByName: event.target.value }))}
                   />
-                </div>
-                <div>
-                  <label className="wwa-field-label">Title</label>
+                </FormField>
+
+                <FormField label="Title" labelFor="designer-title">
                   <input
+                    id="designer-title"
                     className="wwa-input"
                     value={addForm.designedByTitle}
-                    onChange={e => setAddForm(prev => ({ ...prev, designedByTitle: e.target.value }))}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, designedByTitle: event.target.value }))}
                   />
-                </div>
-                <div>
-                  <label className="wwa-field-label">Credential</label>
+                </FormField>
+
+                <FormField label="Credential" labelFor="designer-credential">
                   <input
+                    id="designer-credential"
                     className="wwa-input"
                     value={addForm.designedByCredential}
-                    onChange={e => setAddForm(prev => ({ ...prev, designedByCredential: e.target.value }))}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, designedByCredential: event.target.value }))}
                   />
-                </div>
-                <div className="wwa-field-full">
-                  <label className="wwa-field-label">Quote</label>
+                </FormField>
+
+                <FormField label="Quote" labelFor="designer-quote" fullWidth>
                   <input
+                    id="designer-quote"
                     className="wwa-input"
                     value={addForm.designedByQuote}
-                    onChange={e => setAddForm(prev => ({ ...prev, designedByQuote: e.target.value }))}
+                    onChange={(event) => setAddForm((prev) => ({ ...prev, designedByQuote: event.target.value }))}
                   />
-                </div>
-              </div>
+                </FormField>
+              </FormSection>
 
-              <div className="wwa-panel-subtitle" style={{ marginTop: 4 }}>Training Sessions (Week Schedule)</div>
-              <PlanSessionsEditor
-                sessions={addSessions}
-                onChange={setAddSessions}
-                exerciseCatalog={exerciseCatalog}
-              />
+              <FormSection title="Training Schedule" description="Official plans use explicit day entries grouped by week across the full duration." columns={1}>
+                <PlanSessionsEditor
+                  sessions={addSessions}
+                  onChange={setAddSessions}
+                  exerciseCatalog={exerciseCatalog}
+                  mode="official"
+                  planType={addForm.type}
+                />
+              </FormSection>
 
-              <div className="wwa-cell-actions" style={{ marginTop: 16 }}>
-                <button className="wwa-btn wwa-btn-primary" onClick={handleAddPlan} disabled={addSaving}>
-                  {addSaving ? 'Saving...' : 'Save Plan'}
-                </button>
+              <div className="wwpl-form-actions">
                 <button
+                  type="button"
                   className="wwa-btn wwa-btn-secondary"
-                  onClick={() => { setShowAddForm(false); setAddError(''); }}
+                  onClick={() => {
+                    setShowAddForm(false);
+                    setAddError('');
+                  }}
+                  disabled={addSaving}
                 >
                   Cancel
                 </button>
+                <button type="button" className="wwa-btn wwa-btn-primary" onClick={handleAddPlan} disabled={addSaving}>
+                  {addSaving ? 'Saving...' : 'Save Plan'}
+                </button>
               </div>
             </div>
-          )}
+          ) : null}
 
-          <div className={selectedPlan ? 'wwa-split-layout' : ''}>
-          <div className={selectedPlan ? 'wwa-split-main' : ''}>
-            <div className="wwa-toolbar">
-              <div className="wwa-search">
-                <input
-                  className="wwa-input"
-                  placeholder="Search plans…"
-                  value={search}
-                  onChange={e => setSearch(e.target.value)}
-                />
-              </div>
+          <div className={`wwpl-layout ${selectedPlan ? 'has-detail' : ''}`}>
+            <div>
+              <FilterBar
+                search={
+                  <SearchInput
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    onClear={() => setSearch('')}
+                    placeholder="Search plans…"
+                    label="Search plans"
+                  />
+                }
+                filters={
+                  <>
+                    <SelectField
+                      value={levelFilter}
+                      onChange={(event) => setLevelFilter(event.target.value)}
+                      options={[{ value: 'all', label: 'Level: All' }, ...levels.map((level) => ({ value: level, label: level }))]}
+                      aria-label="Filter plans by level"
+                    />
+                    <SelectField
+                      value={typeFilter}
+                      onChange={(event) => setTypeFilter(event.target.value)}
+                      options={[{ value: 'all', label: 'Type: All' }, ...types.map((type) => ({ value: type, label: type }))]}
+                      aria-label="Filter plans by type"
+                    />
+                    <SelectField
+                      value={sourceFilter}
+                      onChange={(event) => setSourceFilter(event.target.value)}
+                      options={[
+                        { value: 'all', label: 'Source: All' },
+                        { value: 'official', label: 'Source: Official/System' },
+                        { value: 'coach', label: 'Source: Coach' },
+                        { value: 'custom', label: 'Source: Custom' },
+                      ]}
+                      aria-label="Filter plans by source"
+                    />
+                    <SelectField
+                      value={daysFilter}
+                      onChange={(event) => setDaysFilter(event.target.value)}
+                      options={[{ value: 'all', label: 'Days/Week: All' }, ...daysOptions.map((days) => ({ value: String(days), label: `${days} days/week` }))]}
+                      aria-label="Filter plans by days per week"
+                    />
+                    <SelectField
+                      value={statusFilter}
+                      onChange={(event) => setStatusFilter(event.target.value)}
+                      options={[
+                        { value: 'all', label: 'Status: All' },
+                        { value: 'active', label: 'Status: Active' },
+                        { value: 'inactive', label: 'Status: Inactive' },
+                      ]}
+                      aria-label="Filter plans by status"
+                    />
+                  </>
+                }
+                onReset={resetFilters}
+                resetLabel="Reset filters"
+                resetVariant="secondary"
+                resetDisabled={!hasActiveFilters}
+                count={`${filtered.length} of ${plans.length} plans`}
+              />
 
-              <select
-                className="wwa-select wwa-select-inline"
-                value={levelFilter}
-                onChange={e => setLevelFilter(e.target.value)}
-              >
-                <option value="all">All Levels</option>
-                {levels.map(l => (
-                  <option key={l} value={l}>{l}</option>
-                ))}
-              </select>
-
-              <select
-                className="wwa-select wwa-select-inline"
-                value={typeFilter}
-                onChange={e => setTypeFilter(e.target.value)}
-              >
-                <option value="all">All Types</option>
-                {types.map(t => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
-
-              <select
-                className="wwa-select wwa-select-inline"
-                value={sourceFilter}
-                onChange={e => setSourceFilter(e.target.value)}
-              >
-                <option value="all">Source: All</option>
-                <option value="official">Source: Official</option>
-                <option value="coach">Source: Coach</option>
-                <option value="custom">Source: Custom</option>
-              </select>
-
-              <select
-                className="wwa-select wwa-select-inline"
-                value={daysFilter}
-                onChange={e => setDaysFilter(e.target.value)}
-              >
-                <option value="all">Days/Week: All</option>
-                {daysOptions.map(d => (
-                  <option key={d} value={d}>{d} days/week</option>
-                ))}
-              </select>
-
-              <select
-                className="wwa-select wwa-select-inline"
-                value={statusFilter}
-                onChange={e => setStatusFilter(e.target.value)}
-              >
-                <option value="all">Status: All</option>
-                <option value="active">Status: Active</option>
-                <option value="inactive">Status: Inactive</option>
-              </select>
-
-              <button className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={resetFilters}>
-                Reset Filters
-              </button>
-
-              <span className="wwa-toolbar-count">{filtered.length} of {plans.length} plans</span>
+              <DataTable
+                className="wwpl-table"
+                columns={columns}
+                rows={filtered}
+                getRowKey={(plan) => plan.id}
+                selectedRowKey={selectedPlanId}
+                minWidth={1080}
+                emptyIcon={null}
+                emptyTitle="No plans found"
+                emptyMessage={hasActiveFilters ? 'Try adjusting your search or filters.' : 'No plans in the library yet.'}
+                renderRowActions={(plan) => (
+                  <div className="wwpl-actions">
+                    <button
+                      type="button"
+                      className="wwa-btn wwa-btn-sm wwa-btn-brand-soft"
+                      onClick={() => {
+                        setShowAddForm(false);
+                        setAddError('');
+                        setSelectedPlanId(plan.id);
+                      }}
+                      aria-label={`View ${plan.title || plan.name || 'plan'}`}
+                    >
+                      <Eye aria-hidden="true" size={14} strokeWidth={2} />
+                      View
+                    </button>
+                  </div>
+                )}
+              />
             </div>
 
-            <div className="wwa-table-wrap">
-              <table className="wwa-table">
-                <thead>
-                  <tr>
-                    {['Plan Name', 'Level', 'Duration', 'Days/Week', 'Equipment', 'Type', 'Source', 'Creator', 'Status', 'Action'].map(h => (
-                      <th key={h}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.length === 0 ? (
-                    <tr>
-                      <td colSpan="10" style={{ padding: 0, borderBottom: 'none' }}>
-                        <EmptyState
-                          icon="📋"
-                          title="No plans found"
-                          message={hasActiveFilters ? 'Try adjusting your search or filters.' : 'No plans in the library yet.'}
-                        />
-                      </td>
-                    </tr>
-                  ) : (
-                    filtered.map(plan => (
-                      <tr key={plan.id} className={selectedPlanId === plan.id ? 'wwa-row-selected' : ''}>
-                        <td className="wwa-cell-primary">{plan.title || plan.name || '—'}</td>
-                        <td>
-                          <Badge tone={levelTone(plan.level)}>{plan.level || 'Beginner'}</Badge>
-                        </td>
-                        <td style={{ color: '#6b7280' }}>{plan.durationWeeks ? `${plan.durationWeeks} weeks` : '—'}</td>
-                        <td style={{ color: '#6b7280' }}>{plan.daysPerWeek ? `${plan.daysPerWeek} days` : '—'}</td>
-                        <td style={{ color: '#6b7280' }}>{formatEquipment(plan.equipment)}</td>
-                        <td>
-                          <Badge tone="brand">{plan.type || plan.category || 'General'}</Badge>
-                        </td>
-                        <td>
-                          <Badge
-                            tone={
-                              getPlanSource(plan) === 'coach'
-                                ? 'warning'
-                                : getPlanSource(plan) === 'custom'
-                                ? 'brand'
-                                : 'neutral'
-                            }
-                          >
-                            {getPlanSource(plan) === 'coach'
-                              ? 'Coach'
-                              : getPlanSource(plan) === 'custom'
-                              ? 'Custom'
-                              : 'Official/System'}
-                          </Badge>
-                        </td>
-                        <td style={{ color: '#6b7280' }}>{getCreatorLabel(plan)}</td>
-                        <td>
-                          <Badge tone={plan.isActive !== false ? 'success' : 'danger'}>
-                            {plan.isActive !== false ? 'Active' : 'Inactive'}
-                          </Badge>
-                        </td>
-                        <td>
-                          <button
-                            className="wwa-btn wwa-btn-sm wwa-btn-brand-soft"
-                            onClick={() => setSelectedPlanId(plan.id)}
-                          >
-                            View
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {selectedPlan && (
-            <div className="wwa-split-side wwa-split-side-wide">
+            {selectedPlan ? (
               <PlanDetailPanel
                 plan={selectedPlan}
                 creatorLabel={getCreatorLabel(selectedPlan)}
                 levelOptions={levelOptions}
-                typeOptions={typeOptions}
+                typeOptions={officialTypeOptions}
                 exerciseCatalog={exerciseCatalog}
                 onClose={() => setSelectedPlanId(null)}
                 onSave={handleSavePlan}
                 onDelete={handleDeletePlan}
               />
-            </div>
-          )}
+            ) : null}
           </div>
         </>
       )}

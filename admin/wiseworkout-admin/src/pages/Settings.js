@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { functions } from '../firebase';
 import { httpsCallable } from 'firebase/functions';
+import { Plus, Trash2 } from 'lucide-react';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import SkeletonBlock from '../components/ui/SkeletonBlock';
+import { getCallableErrorMessage } from '../utils/planUtils';
 
 const adminGetSettingsDashboard = httpsCallable(
   functions,
@@ -17,9 +19,10 @@ const adminUpdateSettings = httpsCallable(
 
 const defaultSubscription = {
   freeTierAIMessages: 10,
-  premiumPrice: 9.99,
-  premiumPriceAnnual: 79.99,
+  premiumPrice: '9.99',
+  premiumPriceAnnual: '79.99',
 };
+const MIN_LEVEL_THRESHOLD_COUNT = 1;
 
 // Fallback shape only — used to fill in genuinely missing fields from
 // appConfig/gamification so the form never crashes on a partial document.
@@ -79,6 +82,10 @@ function mergeConfig(remote) {
   };
 }
 
+function levelThresholdsToDrafts(values) {
+  return Array.isArray(values) ? values.map((value) => String(value)) : [];
+}
+
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const isNonNegInt = (v) => isNum(v) && Number.isInteger(v) && v >= 0;
 const isNonNegNum = (v) => isNum(v) && v >= 0;
@@ -86,7 +93,7 @@ const isPositiveNum = (v) => isNum(v) && v > 0;
 
 // Returns a flat map of "path.to.field" -> error message for every invalid
 // leaf in the config tree, so each input can show its own inline message.
-function validateConfig(config) {
+function validateConfig(config, levelThresholdDrafts) {
   const errors = {};
   const checkInt = (path, value) => {
     if (!isNonNegInt(value)) errors[path] = 'Must be a non-negative whole number.';
@@ -114,7 +121,7 @@ function validateConfig(config) {
   checkNonNeg('outdoor.stationaryThresholdMeters', outdoor.stationaryThresholdMeters);
   checkNonNeg('outdoor.stationaryWindowSeconds', outdoor.stationaryWindowSeconds);
 
-  const { gymCalories, gymTiming, xp, levelThresholds } = config;
+  const { gymCalories, gymTiming, xp } = config;
   checkNonNeg('gymCalories.minCalories', gymCalories.minCalories);
   checkNonNeg('gymCalories.maxCalories', gymCalories.maxCalories);
   checkNonNeg('gymCalories.setsCoefficient', gymCalories.setsCoefficient);
@@ -135,9 +142,15 @@ function validateConfig(config) {
   checkInt('xp.gymPerSet', xp.gymPerSet);
   checkNonNeg('xp.cardioPerCalorieRate', xp.cardioPerCalorieRate);
 
-  levelThresholds.forEach((val, i) => {
+  levelThresholdDrafts.forEach((rawValue, i) => {
     const path = `levelThresholds.${i}`;
-    if (!isNonNegInt(val)) {
+    if (rawValue === '') {
+      errors[path] = 'Threshold is required.';
+      return;
+    }
+
+    const val = Number(rawValue);
+    if (!Number.isInteger(val) || val < 0) {
       errors[path] = 'Must be a non-negative whole number.';
       return;
     }
@@ -145,7 +158,7 @@ function validateConfig(config) {
       errors[path] = 'Level 1 must remain 0.';
       return;
     }
-    if (i > 0 && val <= levelThresholds[i - 1]) {
+    if (i > 0 && val <= Number(levelThresholdDrafts[i - 1])) {
       errors[path] = `Must be greater than Level ${i}'s threshold.`;
     }
   });
@@ -198,6 +211,10 @@ function buildUpdates(current, original) {
   return updates;
 }
 
+function parseLevelThresholdDrafts(levelThresholdDrafts) {
+  return levelThresholdDrafts.map((value) => Number(value));
+}
+
 function setNested(obj, path, value) {
   if (path.length === 1) return { ...obj, [path[0]]: value };
   const [head, ...rest] = path;
@@ -238,11 +255,12 @@ function Settings() {
 
   const [config, setConfig] = useState(null);
   const [loadedConfig, setLoadedConfig] = useState(null);
+  const [levelThresholdDrafts, setLevelThresholdDrafts] = useState([]);
+  const [loadedLevelThresholdDrafts, setLoadedLevelThresholdDrafts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
 
   const [fieldErrors, setFieldErrors] = useState({});
-  const [confirmingSave, setConfirmingSave] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [saveSuccess, setSaveSuccess] = useState('');
@@ -256,9 +274,12 @@ function Settings() {
         const subscription = result.data.subscription;
 
         const merged = mergeConfig(gamification);
+        const thresholdDrafts = levelThresholdsToDrafts(merged.levelThresholds);
 
         setConfig(merged);
         setLoadedConfig(merged);
+        setLevelThresholdDrafts(thresholdDrafts);
+        setLoadedLevelThresholdDrafts(thresholdDrafts);
         const loadedSubscriptionData = {
           freeTierAIMessages:
             Number.isInteger(subscription?.freeTierAIMessages)
@@ -266,11 +287,11 @@ function Settings() {
               : defaultSubscription.freeTierAIMessages,
           premiumPrice:
             Number.isFinite(Number(subscription?.premiumPrice))
-              ? Number(subscription.premiumPrice)
+              ? String(subscription.premiumPrice)
               : defaultSubscription.premiumPrice,
           premiumPriceAnnual:
             Number.isFinite(Number(subscription?.premiumPriceAnnual))
-              ? Number(subscription.premiumPriceAnnual)
+              ? String(subscription.premiumPriceAnnual)
               : defaultSubscription.premiumPriceAnnual,
         };
         
@@ -278,48 +299,58 @@ function Settings() {
         setLoadedSubscription(loadedSubscriptionData);
       } catch (err) {
         console.error(err);
-        const detail = err && err.code ? ` (${err.code})` : '';
-        setLoadError(`Failed to load system configuration.${detail}`);
+        setLoadError(getCallableErrorMessage(err, 'Failed to load system configuration.'));
       }
       setLoading(false);
     };
     fetchConfig();
   }, []);
 
+  const hasUnsavedChanges =
+    (Boolean(loadedConfig) &&
+      JSON.stringify(config) !== JSON.stringify(loadedConfig)) ||
+    JSON.stringify(levelThresholdDrafts) !== JSON.stringify(loadedLevelThresholdDrafts) ||
+    JSON.stringify(subscription) !== JSON.stringify(loadedSubscription);
+
   const set = (path) => (value) => setConfig(prev => setNested(prev, path, value));
 
   const setLevelThreshold = (index, value) => {
-    setConfig(prev => {
-      const next = [...prev.levelThresholds];
-      next[index] = value;
-      return { ...prev, levelThresholds: next };
-    });
+    setLevelThresholdDrafts((prev) => prev.map((entry, entryIndex) => (entryIndex === index ? value : entry)));
+  };
+
+  const handleAddLevel = () => {
+    setLevelThresholdDrafts((prev) => [...prev, '']);
+  };
+
+  const handleRemoveLastLevel = () => {
+    setLevelThresholdDrafts((prev) =>
+      prev.length > Math.max(MIN_LEVEL_THRESHOLD_COUNT, loadedLevelThresholdDrafts.length)
+        ? prev.slice(0, -1)
+        : prev
+    );
   };
 
   const handleSaveClick = () => {
-    const errors = validateConfig(config);
+    const errors = validateConfig(config, levelThresholdDrafts);
+    const monthlyPrice = subscription.premiumPrice;
+    const annualPrice = subscription.premiumPriceAnnual;
+
     if (
-      !Number.isInteger(subscription.freeTierAIMessages) ||
-      subscription.freeTierAIMessages < 0
-    ) {
-      errors['subscription.freeTierAIMessages'] =
-        'Free-tier AI messages must be a non-negative whole number.';
-    }
-    
-    if (
-      !Number.isFinite(subscription.premiumPrice) ||
-      subscription.premiumPrice < 0
+      monthlyPrice === '' ||
+      !Number.isFinite(Number(monthlyPrice)) ||
+      Number(monthlyPrice) < 0
     ) {
       errors['subscription.premiumPrice'] =
-        'Premium price must be a non-negative number.';
+        'Monthly premium price must be a valid non-negative number.';
     }
 
     if (
-      !Number.isFinite(subscription.premiumPriceAnnual) ||
-      subscription.premiumPriceAnnual < 0
+      annualPrice === '' ||
+      !Number.isFinite(Number(annualPrice)) ||
+      Number(annualPrice) < 0
     ) {
       errors['subscription.premiumPriceAnnual'] =
-        'Annual premium price must be a non-negative number.';
+        'Annual premium price must be a valid non-negative number.';
     }
     setFieldErrors(errors);
     setSaveError('');
@@ -328,37 +359,43 @@ function Settings() {
       setSaveError('Please fix the highlighted fields before saving.');
       return;
     }
-    setConfirmingSave(true);
+    handleConfirmSave();
   };
 
-  const handleCancelSave = () => setConfirmingSave(false);
-
   const handleConfirmSave = async () => {
-    const updates = buildUpdates(config, loadedConfig);
+    const nextConfig = {
+      ...config,
+      levelThresholds: parseLevelThresholdDrafts(levelThresholdDrafts),
+    };
+    const updates = buildUpdates(nextConfig, loadedConfig);
+    const subscriptionPayload = {
+      ...subscription,
+      premiumPrice: Number(subscription.premiumPrice),
+      premiumPriceAnnual: Number(subscription.premiumPriceAnnual),
+    };
   
-    setConfirmingSave(false);
     setSaving(true);
     setSaveError('');
     setSaveSuccess('');
   
     try {
       await adminUpdateSettings({
-        subscription,
+        subscription: subscriptionPayload,
         gamificationUpdates: updates,
       });
   
-      setLoadedConfig(config);
+      setConfig(nextConfig);
+      setLoadedConfig(nextConfig);
+      setLoadedLevelThresholdDrafts(levelThresholdsToDrafts(nextConfig.levelThresholds));
       setLoadedSubscription(subscription);
   
       setSaveSuccess('Settings saved successfully.');
       setTimeout(() => setSaveSuccess(''), 3000);
     } catch (err) {
       console.error('Failed to save settings:', err);
-  
-      const detail = err?.code ? ` (${err.code})` : '';
-  
+
       setSaveError(
-        `Failed to save settings.${detail} Please try again.`
+        getCallableErrorMessage(err, 'Failed to save settings. Please try again.')
       );
     } finally {
       setSaving(false);
@@ -369,75 +406,116 @@ function Settings() {
     if (loadedConfig) {
       setConfig(loadedConfig);
     }
-  
+    setLevelThresholdDrafts(loadedLevelThresholdDrafts);
     setSubscription(loadedSubscription);
     setFieldErrors({});
     setSaveError('');
     setSaveSuccess('');
-    setConfirmingSave(false);
   };
+
+  const renderPageActions = () => (
+    <>
+      {saveSuccess && (
+        <span className="wwa-status-pill">
+          <span className="wwa-status-dot" />
+          {saveSuccess}
+        </span>
+      )}
+      <button
+        className="wwa-btn wwa-btn-secondary"
+        onClick={handleReset}
+        disabled={saving || !loadedConfig || !hasUnsavedChanges}
+      >
+        Reset Changes
+      </button>
+      <button
+        className="wwa-btn wwa-btn-primary"
+        onClick={handleSaveClick}
+        disabled={saving || loading || !config || !hasUnsavedChanges}
+      >
+        {saving ? 'Saving...' : 'Save Changes'}
+      </button>
+    </>
+  );
 
   return (
     <div>
       <AdminStyles />
+      <style>{`
+        .wwa-settings-sticky-actions {
+          position: sticky;
+          top: 12px;
+          z-index: 30;
+          margin-bottom: 20px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+          padding: 14px 16px;
+          border: 1px solid #e5e7eb;
+          border-radius: 16px;
+          background: rgba(255, 255, 255, 0.96);
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+          backdrop-filter: blur(8px);
+        }
+        .wwa-settings-sticky-actions__copy {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          min-width: 0;
+        }
+        .wwa-settings-sticky-actions__title {
+          font-size: 14px;
+          font-weight: 700;
+          color: #111827;
+        }
+        .wwa-settings-sticky-actions__meta {
+          font-size: 12px;
+          color: #6b7280;
+        }
+        .wwa-settings-sticky-actions__buttons {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .wwa-level-table-actions {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 12px;
+          margin-top: 16px;
+          flex-wrap: wrap;
+        }
+        .wwa-level-table-inline {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .wwa-level-table-hint {
+          font-size: 12px;
+          color: #6b7280;
+        }
+      `}</style>
       <PageHeader
         title="Settings"
         subtitle="Configure platform rules and gamification"
-        actions={(
-          <>
-            {saveSuccess && (
-              <span className="wwa-status-pill">
-                <span className="wwa-status-dot" />
-                {saveSuccess}
-              </span>
-            )}
-            <button
-              className="wwa-btn wwa-btn-secondary"
-              onClick={handleReset}
-              disabled={saving || !loadedConfig}
-            >
-              Reset
-            </button>
-            <button
-              className="wwa-btn wwa-btn-primary"
-              onClick={handleSaveClick}
-              disabled={saving || loading || !config}
-            >
-              {saving ? 'Saving...' : 'Save Changes'}
-            </button>
-          </>
-        )}
+        actions={renderPageActions()}
       />
+
+      <div className="wwa-settings-sticky-actions">
+        <div className="wwa-settings-sticky-actions__copy">
+          <div className="wwa-settings-sticky-actions__title">Settings Changes</div>
+          <div className="wwa-settings-sticky-actions__meta">
+            {hasUnsavedChanges ? 'Unsaved changes are ready to save.' : 'All changes saved.'}
+          </div>
+        </div>
+        <div className="wwa-settings-sticky-actions__buttons">{renderPageActions()}</div>
+      </div>
 
       {saveError && (
         <div className="wwa-alert-error" style={{ marginBottom: 16 }}>{saveError}</div>
-      )}
-
-      {confirmingSave && (
-        <div style={{
-          background: '#f9fafb',
-          border: '1px solid #eef0f4',
-          borderRadius: 12,
-          padding: '14px 16px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          gap: 12,
-          marginBottom: 20,
-        }}>
-          <span style={{ fontSize: 14, fontWeight: 600, color: '#111827' }}>
-            Save these system configuration changes?
-          </span>
-          <div className="wwa-cell-actions">
-            <button className="wwa-btn wwa-btn-secondary" onClick={handleCancelSave} disabled={saving}>
-              Cancel
-            </button>
-            <button className="wwa-btn wwa-btn-primary" onClick={handleConfirmSave} disabled={saving}>
-              {saving ? 'Saving...' : 'Save Changes'}
-            </button>
-          </div>
-        </div>
       )}
 
       {loading ? (
@@ -494,18 +572,34 @@ function Settings() {
                   </tr>
                 </thead>
                 <tbody>
-                  {config.levelThresholds.map((xpRequired, i) => (
+                  {levelThresholdDrafts.map((xpRequired, i) => (
                     <tr key={i}>
                       <td className="wwa-cell-primary">Level {i + 1}</td>
                       <td>
-                        <input
-                          type="number"
-                          step={1}
-                          className="wwa-input wwa-input-sm"
-                          style={{ width: 120, textAlign: 'left' }}
-                          value={xpRequired}
-                          onChange={e => setLevelThreshold(i, e.target.value === '' ? 0 : Number(e.target.value))}
-                        />
+                        <div className="wwa-level-table-inline">
+                          <input
+                            type="number"
+                            step={1}
+                            min="0"
+                            className="wwa-input wwa-input-sm"
+                            style={{ width: 140, textAlign: 'left' }}
+                            value={xpRequired}
+                            readOnly={i === 0}
+                            onChange={e => setLevelThreshold(i, e.target.value)}
+                          />
+                          <span>XP</span>
+                          {i === levelThresholdDrafts.length - 1 &&
+                          levelThresholdDrafts.length > Math.max(MIN_LEVEL_THRESHOLD_COUNT, loadedLevelThresholdDrafts.length) ? (
+                            <button
+                              type="button"
+                              className="wwa-btn wwa-btn-sm wwa-btn-danger"
+                              onClick={handleRemoveLastLevel}
+                            >
+                              <Trash2 size={14} strokeWidth={2} />
+                              Remove
+                            </button>
+                          ) : null}
+                        </div>
                         {fieldErrors[`levelThresholds.${i}`] && (
                           <div style={{ color: '#cc3333', fontSize: 12, marginTop: 4 }}>
                             {fieldErrors[`levelThresholds.${i}`]}
@@ -516,6 +610,15 @@ function Settings() {
                   ))}
                 </tbody>
               </table>
+            </div>
+            <div className="wwa-level-table-actions">
+              <button type="button" className="wwa-btn wwa-btn-secondary" onClick={handleAddLevel}>
+                <Plus size={16} strokeWidth={2} />
+                Add Level
+              </button>
+              <div className="wwa-level-table-hint">
+                Level 1 must remain 0. New levels must be added at the end and use a strictly higher XP threshold.
+              </div>
             </div>
           </div>
 
@@ -678,48 +781,12 @@ function Settings() {
       )}
 
 <div className="wwa-panel">
-  <div className="wwa-panel-title">Subscription</div>
-  <div className="wwa-panel-subtitle">Free vs premium tier limits</div>
+  <div className="wwa-panel-title">Premium Pricing</div>
+  <div className="wwa-panel-subtitle">Configure the monthly and annual Premium prices shown in the mobile app.</div>
 
   <SettingRow
-    label="Free tier AI messages/month"
-    sub="Cap for free users on WiseCoach chat"
-  >
-    <div>
-      <input
-        type="number"
-        min="0"
-        step="1"
-        className="wwa-input wwa-input-sm"
-        value={subscription.freeTierAIMessages}
-        onChange={e =>
-          setSubscription(prev => ({
-            ...prev,
-            freeTierAIMessages:
-              e.target.value === ''
-                ? 0
-                : Number(e.target.value),
-          }))
-        }
-      />
-
-      {fieldErrors['subscription.freeTierAIMessages'] && (
-        <div
-          style={{
-            color: '#cc3333',
-            fontSize: 12,
-            marginTop: 4,
-          }}
-        >
-          {fieldErrors['subscription.freeTierAIMessages']}
-        </div>
-      )}
-    </div>
-  </SettingRow>
-
-  <SettingRow
-    label="Premium price (USD/month)"
-    sub="Monthly subscription price"
+    label="Monthly Premium Price"
+    sub='Stored as "premiumPrice" in adminSettings/global'
   >
     <div>
       <input
@@ -731,10 +798,7 @@ function Settings() {
         onChange={e =>
           setSubscription(prev => ({
             ...prev,
-            premiumPrice:
-              e.target.value === ''
-                ? 0
-                : Number(e.target.value),
+            premiumPrice: e.target.value,
           }))
         }
       />
@@ -754,8 +818,8 @@ function Settings() {
   </SettingRow>
 
   <SettingRow
-    label="Premium price (USD/year)"
-    sub="Annual subscription price"
+    label="Annual Premium Price"
+    sub='Stored as "premiumPriceAnnual" in adminSettings/global'
   >
     <div>
       <input
@@ -767,10 +831,7 @@ function Settings() {
         onChange={e =>
           setSubscription(prev => ({
             ...prev,
-            premiumPriceAnnual:
-              e.target.value === ''
-                ? 0
-                : Number(e.target.value),
+            premiumPriceAnnual: e.target.value,
           }))
         }
       />

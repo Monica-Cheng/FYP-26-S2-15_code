@@ -1,15 +1,114 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { functions } from '../firebase';
 import { httpsCallable } from 'firebase/functions';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import Badge from '../components/ui/Badge';
-import EmptyState from '../components/ui/EmptyState';
-import SkeletonBlock from '../components/ui/SkeletonBlock';
+import DataTable from '../components/ui/DataTable';
+import LoadingState from '../components/ui/LoadingState';
+import ErrorState from '../components/ui/ErrorState';
 import { formatDate } from '../utils/dateUtils';
 import { broadcastAudienceLabel, broadcastStatusLabel } from '../utils/broadcastUtils';
 
 const MAX_MESSAGE_LENGTH = 500;
+
+function BroadcastsStyles() {
+  return (
+    <style>{`
+      .wwbr-page {
+        display: flex;
+        flex-direction: column;
+        gap: var(--ww-space-5);
+      }
+      .wwbr-composer {
+        display: flex;
+        flex-direction: column;
+        gap: var(--ww-space-5);
+      }
+      .wwbr-composer__header {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .wwbr-composer__title {
+        font-size: var(--ww-type-card-title-size);
+        font-weight: var(--ww-type-card-title-weight);
+        color: var(--ww-text);
+      }
+      .wwbr-composer__subtitle {
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        color: var(--ww-text-sec);
+      }
+      .wwbr-composer__field {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .wwbr-composer__textarea {
+        min-height: 128px;
+        resize: vertical;
+        font-family: inherit;
+      }
+      .wwbr-composer__count {
+        align-self: flex-end;
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        color: var(--ww-text-sec);
+      }
+      .wwbr-audience {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .wwbr-audience__row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .wwbr-audience__meta {
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        color: var(--ww-text-sec);
+      }
+      .wwbr-confirm {
+        background: color-mix(in srgb, var(--ww-elevated) 55%, white);
+        border: 1px solid var(--ww-divider);
+        border-radius: 12px;
+        padding: 14px 16px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .wwbr-confirm__label {
+        font-size: var(--ww-type-body-size);
+        font-weight: 600;
+        color: var(--ww-text);
+      }
+      .wwbr-history-header {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .wwbr-message-cell {
+        min-width: 0;
+      }
+      .wwbr-message-cell__text {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        line-height: 1.5;
+      }
+      .wwbr-history-table .wwa-table td {
+        vertical-align: top;
+      }
+    `}</style>
+  );
+}
 
 function Broadcasts() {
   const [message, setMessage] = useState('');
@@ -17,40 +116,25 @@ function Broadcasts() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
-
   const [broadcasts, setBroadcasts] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [recipientCount, setRecipientCount] = useState(0);
 
   const fetchHistory = useCallback(async () => {
     setLoadingHistory(true);
-  
+
     try {
-      const adminListBroadcastDashboard = httpsCallable(
-        functions,
-        'adminListBroadcastDashboard'
-      );
-  
+      const adminListBroadcastDashboard = httpsCallable(functions, 'adminListBroadcastDashboard');
       const result = await adminListBroadcastDashboard();
       const data = result.data || {};
-  
-      setBroadcasts(
-        Array.isArray(data.broadcasts) ? data.broadcasts : []
-      );
-  
-      setRecipientCount(
-        Number.isInteger(data.recipientCount)
-          ? data.recipientCount
-          : 0
-      );
+
+      setBroadcasts(Array.isArray(data.broadcasts) ? data.broadcasts : []);
+      setRecipientCount(Number.isInteger(data.recipientCount) ? data.recipientCount : 0);
+      setError('');
     } catch (err) {
       console.error('Failed to load broadcast dashboard:', err);
-  
       const detail = err?.code ? ` (${err.code})` : '';
-  
-      setError(
-        `Failed to load broadcast history.${detail}`
-      );
+      setError(`Failed to load broadcast history.${detail}`);
     } finally {
       setLoadingHistory(false);
     }
@@ -72,136 +156,141 @@ function Broadcasts() {
       `This will send the notification to ${recipientCount} users.\n\n` +
       'Type SEND TO ALL USERS exactly to continue:'
     );
-  
+
     if (confirmation !== 'SEND TO ALL USERS') {
       setConfirming(false);
       return;
     }
-  
+
     setSending(true);
     setError('');
-  
+
     try {
-      const adminCreateBroadcast = httpsCallable(
-        functions,
-        'adminCreateBroadcast'
-      );
-  
+      const adminCreateBroadcast = httpsCallable(functions, 'adminCreateBroadcast');
       const result = await adminCreateBroadcast({
         message: message.trim(),
         confirmation,
       });
-  
+
       const sentCount = result.data?.recipientCount ?? recipientCount;
-  
+
       setMessage('');
       setConfirming(false);
-      setSuccessMsg(
-        `Broadcast queued successfully for ${sentCount} users.`
-      );
-  
+      setSuccessMsg(`Broadcast queued successfully for ${sentCount} users.`);
+
       await fetchHistory();
     } catch (err) {
       console.error('Failed to send broadcast:', err);
-  
       setConfirming(false);
-  
       const detail = err?.code ? ` (${err.code})` : '';
-  
-      setError(
-        `Failed to send broadcast. Please try again.${detail}`
-      );
+      setError(`Failed to send broadcast. Please try again.${detail}`);
     } finally {
       setSending(false);
     }
   };
 
+  const columns = [
+    {
+      key: 'message',
+      header: 'Message',
+      render: (broadcast) => (
+        <div className="wwbr-message-cell">
+          <div className="wwbr-message-cell__text">{broadcast.message || '—'}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'audience',
+      header: 'Audience',
+      render: (broadcast) => broadcastAudienceLabel(broadcast.audience),
+    },
+    {
+      key: 'sent',
+      header: 'Sent',
+      render: (broadcast) => formatDate(broadcast.createdAt),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      render: (broadcast) => (
+        <Badge tone={broadcast.processed === true ? 'success' : 'warning'}>
+          {broadcastStatusLabel(broadcast.processed)}
+        </Badge>
+      ),
+    },
+  ];
+
   return (
-    <div>
+    <div className="wwbr-page">
       <AdminStyles />
+      <BroadcastsStyles />
+
       <PageHeader
-        title="Broadcast Notifications"
-        subtitle={loadingHistory ? 'Loading broadcast history…' : `${broadcasts.length} broadcasts sent`}
+        title="Broadcasts"
+        description="Send notifications and review broadcast history"
+        count={loadingHistory ? undefined : `${broadcasts.length} broadcasts`}
       />
 
-      <div className="wwa-panel">
-        <div className="wwa-panel-title">New Broadcast</div>
-        <div className="wwa-panel-subtitle">Send a notification to WiseWorkout users</div>
+      <div className="wwa-panel wwbr-composer">
+        <div className="wwbr-composer__header">
+          <div className="wwbr-composer__title">New Broadcast</div>
+          <div className="wwbr-composer__subtitle">Send a notification to WiseWorkout users</div>
+        </div>
 
-        {error && (
-          <div className="wwa-alert-error" style={{ marginBottom: 16 }}>{error}</div>
-        )}
-        {successMsg && (
-          <div style={{ marginBottom: 16 }}>
-            <span className="wwa-status-pill">
-              <span className="wwa-status-dot" />
-              {successMsg}
-            </span>
+        {error ? <div className="wwa-alert-error">{error}</div> : null}
+        {successMsg ? (
+          <div className="wwa-status-pill">
+            <span className="wwa-status-dot" />
+            {successMsg}
           </div>
-        )}
+        ) : null}
 
-        <div style={{ marginBottom: 16 }}>
-          <label className="wwa-field-label">Notification Message</label>
+        <div className="wwbr-composer__field">
+          <label className="wwa-field-label" htmlFor="broadcast-message">Notification Message</label>
           <textarea
-            className="wwa-input"
+            id="broadcast-message"
+            className="wwa-input wwbr-composer__textarea"
             rows={4}
             required
             maxLength={MAX_MESSAGE_LENGTH}
             value={message}
-            onChange={e => setMessage(e.target.value)}
+            onChange={(event) => setMessage(event.target.value)}
             placeholder="Type the message to send to users…"
-            style={{ resize: 'vertical', fontFamily: 'inherit' }}
             disabled={sending}
           />
-          <div style={{ textAlign: 'right', fontSize: 12, color: '#9ca3af', marginTop: 4 }}>
-            {message.length}/{MAX_MESSAGE_LENGTH}
+          <div className="wwbr-composer__count">
+            {message.length} / {MAX_MESSAGE_LENGTH}
           </div>
         </div>
 
-        <div style={{ marginBottom: 20 }}>
+        <div className="wwbr-audience">
           <label className="wwa-field-label">Audience</label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <Badge tone="brand">
-            All Users ({recipientCount})
-          </Badge>
-          <span style={{ fontSize: 12.5, color: '#9ca3af' }}>
-            This broadcast will be delivered to every current WiseWorkout account.
-          </span>
+          <div className="wwbr-audience__row">
+            <Badge tone="brand">All Users</Badge>
+            <span className="wwbr-audience__meta">{recipientCount} recipients</span>
+          </div>
+          <div className="wwbr-audience__meta">
+            Delivered to all current WiseWorkout accounts.
           </div>
         </div>
 
         {!confirming ? (
           <div className="wwa-cell-actions">
             <button
+              type="button"
               className="wwa-btn wwa-btn-primary"
               onClick={handleSendClick}
-              disabled={
-                sending ||
-                loadingHistory ||
-                recipientCount <= 0 ||
-                !message.trim()
-              }
+              disabled={sending || loadingHistory || recipientCount <= 0 || !message.trim()}
             >
               Send Broadcast
             </button>
           </div>
         ) : (
-          <div style={{
-            background: '#f9fafb',
-            border: '1px solid #eef0f4',
-            borderRadius: 12,
-            padding: '14px 16px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexWrap: 'wrap',
-            gap: 12,
-          }}>
-            <span style={{ fontSize: 14, fontWeight: 600, color: '#111827' }}>
-              Send this notification to all WiseWorkout users?
-            </span>
+          <div className="wwbr-confirm">
+            <span className="wwbr-confirm__label">Send this notification to all WiseWorkout users?</span>
             <div className="wwa-cell-actions">
               <button
+                type="button"
                 className="wwa-btn wwa-btn-secondary"
                 onClick={() => setConfirming(false)}
                 disabled={sending}
@@ -209,6 +298,7 @@ function Broadcasts() {
                 Cancel
               </button>
               <button
+                type="button"
                 className="wwa-btn wwa-btn-primary"
                 onClick={handleConfirmSend}
                 disabled={sending}
@@ -220,44 +310,30 @@ function Broadcasts() {
         )}
       </div>
 
-      <div className="wwa-panel-title" style={{ marginBottom: 4 }}>Broadcast History</div>
-      <div className="wwa-panel-subtitle">Recent broadcasts and their delivery status</div>
+      <div className="wwbr-history-header">
+        <div className="wwa-panel-title">Broadcast History</div>
+        <div className="wwa-panel-subtitle">Recent broadcasts and their delivery status</div>
+      </div>
 
       {loadingHistory ? (
-        <SkeletonBlock height={220} />
+        <LoadingState rows={5} />
+      ) : error && broadcasts.length === 0 ? (
+        <ErrorState
+          title="Failed to load broadcast history"
+          message={error}
+          onRetry={fetchHistory}
+        />
       ) : (
-        <div className="wwa-table-wrap">
-          <table className="wwa-table">
-            <thead>
-              <tr>
-                {['Message', 'Audience', 'Created At', 'Status'].map(h => (
-                  <th key={h}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {broadcasts.map(b => (
-                <tr key={b.id}>
-                  <td className="wwa-cell-primary">{b.message || '—'}</td>
-                  <td style={{ color: '#6b7280' }}>{broadcastAudienceLabel(b.audience)}</td>
-                  <td style={{ color: '#6b7280' }}>{formatDate(b.createdAt)}</td>
-                  <td>
-                    <Badge tone={b.processed === true ? 'success' : 'warning'}>
-                      {broadcastStatusLabel(b.processed)}
-                    </Badge>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {broadcasts.length === 0 && (
-            <EmptyState
-              icon="📢"
-              title="No broadcasts yet"
-              message="Broadcasts sent to users will appear here."
-            />
-          )}
-        </div>
+        <DataTable
+          className="wwbr-history-table"
+          columns={columns}
+          rows={broadcasts}
+          getRowKey={(broadcast) => broadcast.id}
+          minWidth={720}
+          emptyTitle="No broadcasts yet"
+          emptyMessage="Sent broadcasts will appear here."
+          emptyIcon={null}
+        />
       )}
     </div>
   );

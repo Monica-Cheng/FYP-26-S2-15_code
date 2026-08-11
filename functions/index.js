@@ -1919,6 +1919,7 @@ function normalizeAdminDesignedBy(value) {
 // 'rest'/'cardio'/'combined' type fields on plan.sessions[] entries or on
 // sessions/{id} docs (logged workouts) — those are separate namespaces.
 const VALID_PLAN_TYPES = ["Gym", "Cardio", "Combine"];
+const OFFICIAL_PLAN_WEEK_LENGTH = 7;
 
 function requireValidPlanType(value, fieldName) {
   const normalized = requireNonEmptyAdminString(value, fieldName);
@@ -1958,16 +1959,33 @@ function normalizeOfficialPlanData(rawData) {
   }
 
   const sessions = normalizeAdminPlanSessions(data.sessions);
+  const requiredDays = durationWeeks * OFFICIAL_PLAN_WEEK_LENGTH;
 
-  const actualTrainingDays =
-    sessions.filter((session) => session.isRestDay !== true).length;
-
-  if (actualTrainingDays !== daysPerWeek) {
+  if (sessions.length !== requiredDays) {
     throw new HttpsError(
         "invalid-argument",
-        `Days per week (${daysPerWeek}) must match the number of ` +
-        `training sessions (${actualTrainingDays}).`,
+        `This ${durationWeeks}-week plan requires exactly ` +
+        `${requiredDays} days. Currently ${sessions.length}.`,
     );
+  }
+
+  for (let weekIndex = 0; weekIndex < durationWeeks; weekIndex += 1) {
+    const workoutsThisWeek = sessions
+        .slice(
+            weekIndex * OFFICIAL_PLAN_WEEK_LENGTH,
+            (weekIndex + 1) * OFFICIAL_PLAN_WEEK_LENGTH,
+        )
+        .filter((session) => session.isRestDay !== true)
+        .length;
+
+    if (workoutsThisWeek !== daysPerWeek) {
+      throw new HttpsError(
+          "invalid-argument",
+          `Week ${weekIndex + 1} must contain exactly ${daysPerWeek} ` +
+          `workout day${daysPerWeek === 1 ? "" : "s"}. ` +
+          `Currently ${workoutsThisWeek}.`,
+      );
+    }
   }
 
   const normalized = {
@@ -2182,6 +2200,13 @@ exports.adminUpdatePlan = onCall(async (request) => {
     }
 
     updateData = normalizeOfficialPlanData(merged);
+
+    if (
+      requestedChanges.designedBy !== undefined &&
+      normalizeAdminDesignedBy(requestedChanges.designedBy) === null
+    ) {
+      updateData.designedBy = FieldValue.delete();
+    }
   }
 
   await planRef.update({
@@ -2828,6 +2853,19 @@ exports.adminUpdateInjuryCategory = onCall(async (request) => {
     );
   }
 
+  const attemptedIdentityFieldChange = ["name", "bodyPart"].find((field) =>
+    Object.prototype.hasOwnProperty.call(requestedChanges, field),
+  );
+
+  if (attemptedIdentityFieldChange) {
+    throw new HttpsError(
+        "failed-precondition",
+        "Injury category name and body part cannot be changed after " +
+        "creation because exercises and user injury records reference " +
+        "this category.",
+    );
+  }
+
   const categoryRef =
     db.collection("injuryCategories").doc(categoryId);
 
@@ -2843,50 +2881,13 @@ exports.adminUpdateInjuryCategory = onCall(async (request) => {
   const existing = categorySnapshot.data() || {};
 
   const mergedCategory = normalizeInjuryCategoryInput({
-    name:
-      requestedChanges.name !== undefined ?
-        requestedChanges.name :
-        existing.name,
-    bodyPart:
-      requestedChanges.bodyPart !== undefined ?
-        requestedChanges.bodyPart :
-        existing.bodyPart,
+    name: existing.name,
+    bodyPart: existing.bodyPart,
     description:
       requestedChanges.description !== undefined ?
         requestedChanges.description :
         existing.description,
   });
-
-  const oldName =
-    typeof existing.name === "string" ?
-      existing.name.trim() :
-      "";
-
-  const nameChanged =
-    mergedCategory.name.toLowerCase() !== oldName.toLowerCase();
-
-  if (nameChanged) {
-    await ensureUniqueInjuryCategoryName(
-        mergedCategory.name,
-        categoryId,
-    );
-
-    const exercisesSnapshot =
-      await db.collection("exercises").get();
-
-    const usageCount = exercisesSnapshot.docs.filter((exerciseDoc) =>
-      exerciseUsesInjuryName(exerciseDoc.data(), oldName)
-    ).length;
-
-    if (usageCount > 0) {
-      throw new HttpsError(
-          "failed-precondition",
-          `"${oldName}" is used by ${usageCount} exercise` +
-          `${usageCount === 1 ? "" : "s"}. Update those exercises ` +
-          "before renaming this category.",
-      );
-    }
-  }
 
   await categoryRef.update({
     ...mergedCategory,

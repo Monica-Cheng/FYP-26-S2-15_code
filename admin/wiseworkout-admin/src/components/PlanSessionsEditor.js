@@ -1,11 +1,16 @@
 import React from 'react';
-import { CARDIO_ACTIVITIES, MUSCLE_OPTIONS } from '../utils/planUtils';
+import { Clock3, Dumbbell, MoonStar, Plus, Trash2 } from 'lucide-react';
+import Badge from './ui/Badge';
+import {
+  CARDIO_ACTIVITIES,
+  OFFICIAL_PLAN_WEEK_LENGTH,
+  calculateOfficialSessionEstimatedMinutes,
+  getRequiredOfficialDayCount,
+  groupOfficialSessionsByWeek,
+  validateOfficialWeeklySchedule,
+} from '../utils/planUtils';
 
-// Every existing official plan stores exactly 7 embedded sessions — one full
-// calendar week — because plan_schedule_screen.dart groups sessions into
-// week-pages of 7 (`_totalWeeks = (sessions.length / 7).ceil()`). New plans
-// default to that same 7-day shape; admins can still add/remove days.
-const DAYS_IN_WEEK = 7;
+const DAYS_IN_WEEK = OFFICIAL_PLAN_WEEK_LENGTH;
 
 const TAG_OPTIONS = ['Primary', 'Accessory'];
 const SET_TYPE_OPTIONS = [
@@ -14,102 +19,182 @@ const SET_TYPE_OPTIONS = [
   { value: 'D', label: 'Drop Set (D)' },
 ];
 
-// ---------------------------------------------------------------------------
-// OFFICIAL mode — sets is a plain integer count, reps lives on the exercise.
-// Session-level `type` is always "gym" (training) or "rest" — never "cardio".
-// Cardio content lives inside a session's exercises as dedicated cardio-block
-// entries (isCardio: true), not as a session-level type.
-// ---------------------------------------------------------------------------
+function getAllowedBlockKinds(planType) {
+  if (planType === 'Gym') return { strength: true, cardio: false };
+  if (planType === 'Cardio') return { strength: false, cardio: true };
+  return { strength: true, cardio: true };
+}
+
+function findCatalogExercise(exerciseCatalog, name) {
+  const normalizedName = (name || '').trim().toLowerCase();
+  if (!normalizedName) return null;
+  return exerciseCatalog.find((exercise) => (exercise?.name || '').trim().toLowerCase() === normalizedName) || null;
+}
+
+function getCatalogPrimaryMuscle(exercise) {
+  return typeof exercise?.muscle === 'string' ? exercise.muscle.trim() : '';
+}
+
+function resolveStrengthMuscle(catalogExercise, existingMuscle = '') {
+  const catalogMuscle = getCatalogPrimaryMuscle(catalogExercise);
+  if (catalogMuscle) return catalogMuscle;
+  return typeof existingMuscle === 'string' ? existingMuscle.trim() : '';
+}
+
+function cardioEditorFromPlanExercise(exercise) {
+  return {
+    isCardio: true,
+    cardioActivity: CARDIO_ACTIVITIES.includes(exercise?.cardioActivity) ? exercise.cardioActivity : CARDIO_ACTIVITIES[0],
+    cardioMinutes:
+      exercise?.cardioMinutes !== undefined && exercise?.cardioMinutes !== null
+        ? String(exercise.cardioMinutes)
+        : exercise?.sets?.[0]?.reps !== undefined
+          ? String(exercise.sets[0].reps)
+          : '15',
+  };
+}
+
+function createOfficialTrainingSession(planType) {
+  const allowedKinds = getAllowedBlockKinds(planType);
+  return withCalculatedOfficialMinutes({
+    name: '',
+    isRestDay: false,
+    exercises: allowedKinds.cardio && !allowedKinds.strength ? [emptyCardioBlock()] : [emptyExercise()],
+  });
+}
+
+function createOfficialRestSession() {
+  return {
+    name: 'Rest',
+    isRestDay: true,
+    estimatedMinutes: '0',
+    exercises: [],
+  };
+}
+
+function sessionHasMeaningfulContent(session) {
+  if (!session || session.isRestDay === true) return false;
+  if ((session.name || '').trim()) return true;
+  const exercises = Array.isArray(session.exercises) ? session.exercises : [];
+  return exercises.length > 0;
+}
+
+function withCalculatedOfficialMinutes(session) {
+  return {
+    ...session,
+    estimatedMinutes: String(calculateOfficialSessionEstimatedMinutes(session)),
+  };
+}
 
 export function emptyExercise() {
-  return { name: '', muscle: '', tag: 'Primary', sets: '3', reps: '10', restTime: '60', note: '', isCardio: false };
+  return { name: '', muscle: '', tag: 'Primary', sets: '3', reps: '10', restTime: '60', estTimePerSet: '', note: '', isCardio: false };
 }
 
 export function emptyCardioBlock() {
   return { isCardio: true, cardioActivity: CARDIO_ACTIVITIES[0], cardioMinutes: '15' };
 }
 
-// Seeds `daysPerWeek` training days (capped to a week) followed by rest days —
-// matches the pattern most existing official plans already follow, while
-// staying editable since real data doesn't enforce this split strictly.
-export function buildDefaultSessions(daysPerWeek) {
+export function buildDefaultSessions(daysPerWeek, durationWeeks = 1, planType = '') {
   const trainingCount = Math.min(Math.max(Number(daysPerWeek) || 3, 1), DAYS_IN_WEEK);
-  return Array.from({ length: DAYS_IN_WEEK }, (_, i) => {
-    const isTraining = i < trainingCount;
+  const requiredDays = getRequiredOfficialDayCount(durationWeeks);
+  return Array.from({ length: requiredDays }, (_, index) => {
+    const weekdayIndex = index % DAYS_IN_WEEK;
+    return weekdayIndex < trainingCount ? createOfficialTrainingSession(planType) : createOfficialRestSession();
+  });
+}
+
+export function resizeOfficialSessions(sessions, durationWeeks) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  const requiredDays = getRequiredOfficialDayCount(durationWeeks);
+
+  if (list.length === requiredDays) {
+    return { sessions: list, removedSessions: [] };
+  }
+
+  if (list.length > requiredDays) {
     return {
-      name: isTraining ? '' : 'Rest',
-      isRestDay: !isTraining,
-      estimatedMinutes: isTraining ? '45' : '0',
-      exercises: isTraining ? [emptyExercise()] : [],
+      sessions: list.slice(0, requiredDays),
+      removedSessions: list.slice(requiredDays),
+    };
+  }
+
+  return {
+    sessions: [...list, ...Array.from({ length: requiredDays - list.length }, () => createOfficialRestSession())],
+    removedSessions: [],
+  };
+}
+
+export function officialSessionsNeedTruncationConfirm(sessions) {
+  return (Array.isArray(sessions) ? sessions : []).some(sessionHasMeaningfulContent);
+}
+
+export function sessionsFromPlan(rawSessions) {
+  const list = Array.isArray(rawSessions) ? rawSessions : [];
+  return list.map((session) => {
+    const { name, isRestDay, exercises, day, type, ...restSessionFields } = session || {};
+    return {
+      name: isRestDay ? name || 'Rest' : name || '',
+      isRestDay: !!isRestDay,
+      estimatedMinutes: String(calculateOfficialSessionEstimatedMinutes({ isRestDay, exercises })),
+      exercises: Array.isArray(exercises)
+        ? exercises.map((exercise) => {
+            if (exercise && exercise.isCardio === true) {
+              return cardioEditorFromPlanExercise(exercise);
+            }
+
+            const {
+              name: exerciseName,
+              muscle,
+              tag,
+              sets,
+              reps,
+              restTime,
+              estTimePerSet,
+              note,
+              ...restExerciseFields
+            } = exercise || {};
+
+            return {
+              isCardio: false,
+              name: exerciseName || '',
+              muscle: muscle || '',
+              tag: tag === 'Accessory' ? 'Accessory' : 'Primary',
+              sets:
+                typeof sets === 'number'
+                  ? String(sets)
+                  : Array.isArray(sets)
+                    ? String(sets.length)
+                    : '3',
+              reps: reps !== undefined && reps !== null ? String(reps) : '10',
+              restTime: restTime !== undefined && restTime !== null ? String(restTime) : '60',
+              estTimePerSet: estTimePerSet !== undefined && estTimePerSet !== null ? String(estTimePerSet) : '',
+              note: note || '',
+              _extra: restExerciseFields,
+            };
+          })
+        : [],
+      _extra: restSessionFields,
     };
   });
 }
 
-// Converts a real Firestore plan's sessions[] into the editor's controlled-
-// input shape (string-typed numeric fields). Defensive about `sets` possibly
-// being an array (custom-plan shape) even though official plans should only
-// ever store it as a plain count — falls back to the array's length either way.
-// An exercise only becomes a cardio-block editor row when it has the real
-// `isCardio: true` flag — anything merely cardio-shaped (e.g. muscle:
-// "Cardio" without the flag) loads as a normal gym exercise, unchanged,
-// rather than being silently reinterpreted.
-export function sessionsFromPlan(rawSessions) {
-  const list = Array.isArray(rawSessions) ? rawSessions : [];
-  return list.map(s => ({
-    name: s.isRestDay ? (s.name || 'Rest') : (s.name || ''),
-    isRestDay: !!s.isRestDay,
-    estimatedMinutes: s.estimatedMinutes !== undefined && s.estimatedMinutes !== null
-      ? String(s.estimatedMinutes) : '0',
-    exercises: Array.isArray(s.exercises) ? s.exercises.map(ex => {
-      if (ex && ex.isCardio === true) {
-        return {
-          isCardio: true,
-          cardioActivity: CARDIO_ACTIVITIES.includes(ex.cardioActivity) ? ex.cardioActivity : CARDIO_ACTIVITIES[0],
-          cardioMinutes: ex.cardioMinutes !== undefined && ex.cardioMinutes !== null
-            ? String(ex.cardioMinutes)
-            : (ex.sets?.[0]?.reps !== undefined ? String(ex.sets[0].reps) : '15'),
-        };
-      }
-      return {
-        isCardio: false,
-        name: ex.name || '',
-        muscle: ex.muscle || '',
-        tag: ex.tag === 'Accessory' ? 'Accessory' : 'Primary',
-        sets: typeof ex.sets === 'number'
-          ? String(ex.sets)
-          : (Array.isArray(ex.sets) ? String(ex.sets.length) : '3'),
-        reps: ex.reps !== undefined && ex.reps !== null ? String(ex.reps) : '10',
-        restTime: ex.restTime !== undefined && ex.restTime !== null ? String(ex.restTime) : '60',
-        note: ex.note || '',
-      };
-    }) : [],
-  }));
-}
-
-// Shared by Add Plan and Edit Official Plan so both write the exact same
-// official-plan shape. Every existing official plan has exactly 7 sessions
-// (plan_schedule_screen.dart pages sessions in blocks of 7), so that's
-// enforced here rather than left as a soft convention. expectedDaysPerWeek
-// (the admin's Days per Week field) must equal the number of non-rest
-// sessions actually built — mismatches block saving rather than silently
-// persisting inconsistent data.
-export function buildAndValidateSessions(sessions, expectedDaysPerWeek) {
-  if (sessions.length !== DAYS_IN_WEEK) {
-    return { error: `Exactly 7 sessions (one per day of the week) are required — currently ${sessions.length}.` };
-  }
-  if (!sessions.some(s => !s.isRestDay)) {
-    return { error: 'A plan cannot consist of 7 rest days — at least one training session is required.' };
+export function buildAndValidateSessions(sessions, expectedDaysPerWeek, planType, exerciseCatalog, durationWeeks) {
+  const scheduleError = validateOfficialWeeklySchedule(sessions, expectedDaysPerWeek, durationWeeks);
+  if (scheduleError) {
+    return { error: scheduleError };
   }
 
+  const allowedKinds = getAllowedBlockKinds(planType);
   const built = [];
-  for (let i = 0; i < sessions.length; i++) {
-    const s = sessions[i];
-    const dayLabel = `Day ${i + 1}`;
+  for (let sessionIndex = 0; sessionIndex < sessions.length; sessionIndex += 1) {
+    const session = sessions[sessionIndex];
+    const dayLabel = `Day ${sessionIndex + 1}`;
 
-    if (s.isRestDay) {
+    if (session.isRestDay) {
       built.push({
+        ...session._extra,
         day: dayLabel,
-        name: s.name.trim() || 'Rest',
+        name: session.name.trim() || 'Rest',
         type: 'rest',
         isRestDay: true,
         estimatedMinutes: 0,
@@ -118,87 +203,95 @@ export function buildAndValidateSessions(sessions, expectedDaysPerWeek) {
       continue;
     }
 
-    if (!s.name.trim()) return { error: `${dayLabel}: Session Name is required.` };
-    if (!s.exercises || s.exercises.length === 0) {
+    if (!session.name.trim()) return { error: `${dayLabel}: Session Name is required.` };
+    if (!session.exercises || session.exercises.length === 0) {
       return { error: `${dayLabel}: at least one exercise is required for a training day.` };
     }
 
     const exercises = [];
-    for (let j = 0; j < s.exercises.length; j++) {
-      const ex = s.exercises[j];
+    for (let exerciseIndex = 0; exerciseIndex < session.exercises.length; exerciseIndex += 1) {
+      const exercise = session.exercises[exerciseIndex];
 
-      if (ex.isCardio) {
-        if (!CARDIO_ACTIVITIES.includes(ex.cardioActivity)) {
-          return { error: `${dayLabel}, cardio block ${j + 1}: Activity must be Run, Walk, or Cycle.` };
+      if (exercise.isCardio) {
+        if (!allowedKinds.cardio) {
+          return { error: `${dayLabel}: ${planType} plans cannot contain cardio blocks. Remove the cardio block(s) before saving.` };
         }
-        const minutes = Number(ex.cardioMinutes);
+        if (!CARDIO_ACTIVITIES.includes(exercise.cardioActivity)) {
+          return { error: `${dayLabel}, cardio block ${exerciseIndex + 1}: Activity must be Run, Walk, or Cycle.` };
+        }
+        const minutes = Number(exercise.cardioMinutes);
         if (!Number.isInteger(minutes) || minutes <= 0) {
-          return { error: `${dayLabel}, cardio block ${j + 1}: Minutes must be a positive integer.` };
+          return { error: `${dayLabel}, cardio block ${exerciseIndex + 1}: Minutes must be a positive integer.` };
         }
         exercises.push({
-          name: `${ex.cardioActivity} ${minutes}min`,
+          name: `${exercise.cardioActivity} ${minutes}min`,
           muscle: 'Cardio',
           restTime: 0,
-          note: '',
-          tag: 'Primary',
-          sets: [{ type: 'N', kg: '', reps: String(minutes) }],
           isCardio: true,
-          cardioActivity: ex.cardioActivity,
+          cardioActivity: exercise.cardioActivity,
           cardioMinutes: minutes,
         });
         continue;
       }
 
-      if (!ex.name.trim()) return { error: `${dayLabel}, exercise ${j + 1}: Name is required.` };
-      if (!ex.muscle.trim()) return { error: `${dayLabel}, exercise ${j + 1}: Muscle is required.` };
-      const sets = Number(ex.sets);
-      const reps = Number(ex.reps);
+      if (!exercise.name.trim()) return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Name is required.` };
+      if (!allowedKinds.strength) {
+        return { error: `${dayLabel}: ${planType} plans cannot contain strength exercises. Remove the strength exercise(s) before saving.` };
+      }
+      const catalogExercise = findCatalogExercise(exerciseCatalog, exercise.name);
+      if (!catalogExercise) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Select an exercise from the catalog before saving.` };
+      }
+      const resolvedMuscle = resolveStrengthMuscle(catalogExercise, exercise.muscle);
+      if (!resolvedMuscle) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: The selected catalog exercise is missing primary muscle metadata.` };
+      }
+      const sets = Number(exercise.sets);
+      const reps = Number(exercise.reps);
       if (!Number.isInteger(sets) || sets <= 0) {
-        return { error: `${dayLabel}, exercise ${j + 1}: Sets must be a positive integer.` };
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Sets must be a positive integer.` };
       }
       if (!Number.isInteger(reps) || reps <= 0) {
-        return { error: `${dayLabel}, exercise ${j + 1}: Reps must be a positive integer.` };
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Reps must be a positive integer.` };
       }
-      const restTime = Number(ex.restTime);
+      const restTime = Number(exercise.restTime);
       if (!Number.isInteger(restTime) || restTime < 0) {
-        return { error: `${dayLabel}, exercise ${j + 1}: Rest Time must be a valid non-negative integer.` };
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Rest Time must be a valid non-negative integer.` };
       }
-      const exercise = { name: ex.name.trim(), muscle: ex.muscle.trim(), tag: ex.tag, sets, reps, restTime };
-      if (ex.note && ex.note.trim()) exercise.note = ex.note.trim();
-      exercises.push(exercise);
+      const estTimePerSet = Number(exercise.estTimePerSet);
+      if (exercise.estTimePerSet === '' || exercise.estTimePerSet === undefined || exercise.estTimePerSet === null) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Estimated time per set is required.` };
+      }
+      if (!Number.isInteger(estTimePerSet) || estTimePerSet <= 0) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Estimated time per set must be greater than 0 seconds.` };
+      }
+      const builtExercise = {
+        ...exercise._extra,
+        name: catalogExercise.name,
+        muscle: resolvedMuscle,
+        tag: exercise.tag,
+        sets,
+        reps,
+        restTime,
+        estTimePerSet,
+      };
+      if (exercise.note && exercise.note.trim()) builtExercise.note = exercise.note.trim();
+      exercises.push(builtExercise);
     }
 
-    const estMinutes = Number(s.estimatedMinutes);
     built.push({
+      ...session._extra,
       day: dayLabel,
-      name: s.name.trim(),
+      name: session.name.trim(),
       type: 'gym',
       isRestDay: false,
-      estimatedMinutes: Number.isInteger(estMinutes) && estMinutes >= 0 ? estMinutes : 0,
+      estimatedMinutes: calculateOfficialSessionEstimatedMinutes({ isRestDay: false, exercises }),
       exercises,
     });
   }
 
-  const actualDays = built.filter(s => !s.isRestDay).length;
-  const expected = Number(expectedDaysPerWeek);
-  if (expected !== actualDays) {
-    return {
-      error: `Days per Week (${expectedDaysPerWeek}) does not match the number of non-rest sessions (${actualDays}). `
-        + 'Update Days per Week or adjust which days are marked as rest.',
-    };
-  }
-
   return { sessions: built, error: null };
 }
-
-// ---------------------------------------------------------------------------
-// CUSTOM mode — sets is an array of {type: W/N/D, kg, reps} (per-set logging),
-// matching saveCustomRoutine/build_routine_screen.dart exactly. No estimatedMinutes
-// (custom plans never store it) and no fixed 7-day requirement (real custom
-// plans vary in length — the sample "Jason babo" plan has only 2 days). No
-// dedicated cardio-block UI here — any isCardio/cardioActivity/cardioMinutes
-// fields already on a custom exercise are preserved untouched via `_extra`.
-// ---------------------------------------------------------------------------
 
 export function emptySet() {
   return { type: 'N', kg: '', reps: '' };
@@ -211,149 +304,434 @@ export function emptyCustomExercise() {
 export function buildDefaultCustomSessions(daysPerWeek) {
   const count = Math.min(Math.max(Number(daysPerWeek) || 3, 1), DAYS_IN_WEEK);
   return Array.from({ length: count }, () => ({
-    name: '', isRestDay: false, type: 'gym', exercises: [emptyCustomExercise()], _extra: {},
+    name: '',
+    isRestDay: false,
+    type: 'gym',
+    exercises: [emptyCustomExercise()],
+    _extra: {},
   }));
 }
 
-// Preserves any exercise/session fields this editor doesn't manage (isCardio,
-// cardioActivity, cardioMinutes, id, showNote, etc. — all real fields written
-// by build_routine_screen.dart) in `_extra` so they survive a save untouched.
 export function customSessionsFromPlan(rawSessions) {
   const list = Array.isArray(rawSessions) ? rawSessions : [];
-  return list.map(s => {
-    const { name, isRestDay, exercises, day, type, ...restSessionFields } = s;
+  return list.map((session) => {
+    const { name, isRestDay, exercises, day, type, ...restSessionFields } = session;
     return {
       name: name || (isRestDay ? 'Rest' : ''),
       isRestDay: !!isRestDay,
       type: type || 'gym',
-      exercises: Array.isArray(exercises) ? exercises.map(ex => {
-        const { name: exName, muscle, tag, restTime, note, sets, ...restExFields } = ex;
-        const setsArr = Array.isArray(sets) && sets.length > 0
-          ? sets.map(st => ({
-              type: (st && st.type) || 'N',
-              kg: st && st.kg !== undefined && st.kg !== null ? String(st.kg) : '',
-              reps: st && st.reps !== undefined && st.reps !== null ? String(st.reps) : '',
-            }))
-          : [emptySet()];
-        return {
-          name: exName || '',
-          muscle: muscle || '',
-          tag: tag === 'Accessory' ? 'Accessory' : 'Primary',
-          restTime: restTime !== undefined && restTime !== null ? String(restTime) : '90',
-          note: note || '',
-          sets: setsArr,
-          _extra: restExFields,
-        };
-      }) : [],
+      exercises: Array.isArray(exercises)
+        ? exercises.map((exercise) => {
+            if (exercise && exercise.isCardio === true) {
+              const { isCardio, cardioActivity, cardioMinutes, sets, ...restExerciseFields } = exercise || {};
+              delete restExerciseFields.name;
+              delete restExerciseFields.muscle;
+              delete restExerciseFields.restTime;
+              delete restExerciseFields.tag;
+              delete restExerciseFields.note;
+              return {
+                ...cardioEditorFromPlanExercise({ isCardio, cardioActivity, cardioMinutes, sets }),
+                _extra: restExerciseFields,
+              };
+            }
+
+            const { name: exerciseName, muscle, tag, restTime, note, sets, ...restExerciseFields } = exercise;
+            const setsArray =
+              Array.isArray(sets) && sets.length > 0
+                ? sets.map((setItem) => ({
+                    type: (setItem && setItem.type) || 'N',
+                    kg: setItem && setItem.kg !== undefined && setItem.kg !== null ? String(setItem.kg) : '',
+                    reps: setItem && setItem.reps !== undefined && setItem.reps !== null ? String(setItem.reps) : '',
+                  }))
+                : [emptySet()];
+            return {
+              name: exerciseName || '',
+              muscle: muscle || '',
+              tag: tag === 'Accessory' ? 'Accessory' : 'Primary',
+              restTime: restTime !== undefined && restTime !== null ? String(restTime) : '90',
+              note: note || '',
+              sets: setsArray,
+              _extra: restExerciseFields,
+            };
+          })
+        : [],
       _extra: restSessionFields,
     };
   });
 }
 
-export function buildAndValidateCustomSessions(sessions) {
+export function buildAndValidateCustomSessions(sessions, planType, exerciseCatalog) {
   if (sessions.length === 0) {
     return { error: 'Add at least one training day.' };
   }
-  if (!sessions.some(s => !s.isRestDay)) {
+  if (!sessions.some((session) => !session.isRestDay)) {
     return { error: 'At least one non-rest training session is required.' };
   }
 
+  const allowedKinds = getAllowedBlockKinds(planType);
   const built = [];
-  for (let i = 0; i < sessions.length; i++) {
-    const s = sessions[i];
-    const dayLabel = `Day ${i + 1}`;
+  for (let sessionIndex = 0; sessionIndex < sessions.length; sessionIndex += 1) {
+    const session = sessions[sessionIndex];
+    const dayLabel = `Day ${sessionIndex + 1}`;
 
-    if (s.isRestDay) {
+    if (session.isRestDay) {
       built.push({
-        day: dayLabel, name: s.name.trim() || 'Rest', type: 'rest', isRestDay: true, exercises: [],
-        ...s._extra,
+        day: dayLabel,
+        name: session.name.trim() || 'Rest',
+        type: 'rest',
+        isRestDay: true,
+        exercises: [],
+        ...session._extra,
       });
       continue;
     }
 
-    if (!s.name.trim()) return { error: `${dayLabel}: Session Name is required.` };
-    if (!s.exercises || s.exercises.length === 0) {
+    if (!session.name.trim()) return { error: `${dayLabel}: Session Name is required.` };
+    if (!session.exercises || session.exercises.length === 0) {
       return { error: `${dayLabel}: at least one exercise is required for a training day.` };
     }
 
     const exercises = [];
-    for (let j = 0; j < s.exercises.length; j++) {
-      const ex = s.exercises[j];
-      if (!ex.name.trim()) return { error: `${dayLabel}, exercise ${j + 1}: Name is required.` };
-      if (!ex.muscle.trim()) return { error: `${dayLabel}, exercise ${j + 1}: Muscle is required.` };
-      if (!ex.sets || ex.sets.length === 0) {
-        return { error: `${dayLabel}, exercise ${j + 1}: at least one set is required.` };
+    for (let exerciseIndex = 0; exerciseIndex < session.exercises.length; exerciseIndex += 1) {
+      const exercise = session.exercises[exerciseIndex];
+      if (exercise.isCardio) {
+        if (!allowedKinds.cardio) {
+          return { error: `${dayLabel}: ${planType} plans cannot contain cardio blocks. Remove the cardio block(s) before saving.` };
+        }
+        if (!CARDIO_ACTIVITIES.includes(exercise.cardioActivity)) {
+          return { error: `${dayLabel}, cardio block ${exerciseIndex + 1}: Activity must be Run, Walk, or Cycle.` };
+        }
+        const minutes = Number(exercise.cardioMinutes);
+        if (!Number.isInteger(minutes) || minutes <= 0) {
+          return { error: `${dayLabel}, cardio block ${exerciseIndex + 1}: Minutes must be a positive integer.` };
+        }
+        exercises.push({
+          ...exercise._extra,
+          isCardio: true,
+          cardioActivity: exercise.cardioActivity,
+          cardioMinutes: minutes,
+          name: `${exercise.cardioActivity} ${minutes}min`,
+          muscle: 'Cardio',
+          restTime: 0,
+        });
+        continue;
+      }
+
+      if (!exercise.name.trim()) return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Name is required.` };
+      if (!allowedKinds.strength) {
+        return { error: `${dayLabel}: ${planType} plans cannot contain strength exercises. Remove the strength exercise(s) before saving.` };
+      }
+      const catalogExercise = findCatalogExercise(exerciseCatalog, exercise.name);
+      if (!catalogExercise) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: Select an exercise from the catalog before saving.` };
+      }
+      const resolvedMuscle = resolveStrengthMuscle(catalogExercise, exercise.muscle);
+      if (!resolvedMuscle) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: The selected catalog exercise is missing primary muscle metadata.` };
+      }
+      if (!exercise.sets || exercise.sets.length === 0) {
+        return { error: `${dayLabel}, exercise ${exerciseIndex + 1}: at least one set is required.` };
       }
 
       const sets = [];
-      for (let k = 0; k < ex.sets.length; k++) {
-        const st = ex.sets[k];
-        if (!st.type) return { error: `${dayLabel}, exercise ${j + 1}, set ${k + 1}: Type is required.` };
-        if (st.reps !== '' && (!Number.isFinite(Number(st.reps)) || Number(st.reps) < 0)) {
-          return { error: `${dayLabel}, exercise ${j + 1}, set ${k + 1}: Reps must be a valid number.` };
+      for (let setIndex = 0; setIndex < exercise.sets.length; setIndex += 1) {
+        const setItem = exercise.sets[setIndex];
+        if (!setItem.type) return { error: `${dayLabel}, exercise ${exerciseIndex + 1}, set ${setIndex + 1}: Type is required.` };
+        if (setItem.reps !== '' && (!Number.isFinite(Number(setItem.reps)) || Number(setItem.reps) < 0)) {
+          return { error: `${dayLabel}, exercise ${exerciseIndex + 1}, set ${setIndex + 1}: Reps must be a valid number.` };
         }
-        if (st.kg !== '' && (!Number.isFinite(Number(st.kg)) || Number(st.kg) < 0)) {
-          return { error: `${dayLabel}, exercise ${j + 1}, set ${k + 1}: KG must be a valid non-negative number.` };
+        if (setItem.kg !== '' && (!Number.isFinite(Number(setItem.kg)) || Number(setItem.kg) < 0)) {
+          return { error: `${dayLabel}, exercise ${exerciseIndex + 1}, set ${setIndex + 1}: KG must be a valid non-negative number.` };
         }
-        sets.push({ type: st.type, kg: st.kg, reps: st.reps });
+        sets.push({ type: setItem.type, kg: setItem.kg, reps: setItem.reps });
       }
 
-      const restTime = Number(ex.restTime);
+      const restTime = Number(exercise.restTime);
       exercises.push({
-        name: ex.name.trim(),
-        muscle: ex.muscle.trim(),
-        tag: ex.tag,
+        name: catalogExercise.name,
+        muscle: resolvedMuscle,
+        tag: exercise.tag,
         restTime: Number.isInteger(restTime) && restTime >= 0 ? restTime : 90,
-        note: ex.note ? ex.note.trim() : '',
+        note: exercise.note ? exercise.note.trim() : '',
         sets,
-        ...ex._extra,
+        ...exercise._extra,
       });
     }
 
     built.push({
-      day: dayLabel, name: s.name.trim(), type: s.type || 'gym', isRestDay: false, exercises,
-      ...s._extra,
+      day: dayLabel,
+      name: session.name.trim(),
+      type: session.type || 'gym',
+      isRestDay: false,
+      exercises,
+      ...session._extra,
     });
   }
   return { sessions: built, error: null };
 }
 
-function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'official' }) {
+function PlanSessionsEditorStyles() {
+  return (
+    <style>{`
+      .wwpse {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .wwpse__day {
+        border: 1px solid var(--ww-divider);
+        border-radius: 14px;
+        background: var(--ww-card);
+        overflow: hidden;
+      }
+      .wwpse__week {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .wwpse__week-heading {
+        font-size: var(--ww-type-table-header-size);
+        font-weight: var(--ww-type-table-header-weight);
+        color: var(--ww-primary-dark);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .wwpse__day-header {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        align-items: flex-start;
+        padding: 16px;
+        border-bottom: 1px solid var(--ww-divider);
+        background: color-mix(in srgb, var(--ww-bg) 78%, white);
+        flex-wrap: wrap;
+      }
+      .wwpse__day-main {
+        min-width: 0;
+        flex: 1;
+      }
+      .wwpse__day-title-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+      }
+      .wwpse__day-index {
+        font-size: var(--ww-type-table-header-size);
+        font-weight: var(--ww-type-table-header-weight);
+        color: var(--ww-primary-dark);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .wwpse__day-header-controls {
+        display: grid;
+        grid-template-columns: minmax(180px, 280px) auto auto;
+        gap: 10px;
+        align-items: center;
+      }
+      .wwpse__minutes-field {
+        min-width: 92px;
+      }
+      .wwpse__minutes-display {
+        min-height: var(--ww-control-height);
+        padding: 10px 12px;
+        border-radius: var(--ww-radius-control);
+        border: 1px solid var(--ww-divider);
+        background: var(--ww-elevated);
+        display: flex;
+        align-items: center;
+        color: var(--ww-text);
+        font-size: var(--ww-type-body-size);
+      }
+      .wwpse__day-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-text);
+      }
+      .wwpse__rest-state {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 16px;
+        color: var(--ww-text-sec);
+        font-size: var(--ww-type-body-size);
+      }
+      .wwpse__body {
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .wwpse__block {
+        border: 1px solid var(--ww-divider);
+        border-radius: 12px;
+        background: var(--ww-card);
+        padding: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .wwpse__block-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .wwpse__block-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        font-size: var(--ww-type-card-title-size);
+        font-weight: var(--ww-type-card-title-weight);
+        color: var(--ww-primary-dark);
+      }
+      .wwpse__grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .wwpse__grid-two {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .wwpse__full {
+        grid-column: 1 / -1;
+      }
+      .wwpse__preview {
+        min-height: var(--ww-control-height);
+        padding: 10px 12px;
+        border-radius: var(--ww-radius-control);
+        border: 1px solid var(--ww-divider);
+        background: var(--ww-elevated);
+        display: flex;
+        align-items: center;
+        color: var(--ww-text-sec);
+        font-size: var(--ww-type-body-size);
+      }
+      .wwpse__inline-error {
+        margin-top: 6px;
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-danger, #b42318);
+        line-height: 1.45;
+      }
+      .wwpse__sets {
+        border-top: 1px solid var(--ww-divider);
+        padding-top: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .wwpse__sets-title {
+        font-size: var(--ww-type-table-header-size);
+        font-weight: var(--ww-type-table-header-weight);
+        color: var(--ww-text-sec);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .wwpse__set-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.65fr) minmax(0, 0.65fr);
+        gap: 10px;
+        align-items: end;
+        padding: 12px;
+        border: 1px solid var(--ww-divider);
+        border-radius: 10px;
+        background: var(--ww-elevated);
+      }
+      .wwpse__set-row > div {
+        min-width: 0;
+      }
+      .wwpse__set-row .wwa-input,
+      .wwpse__set-row .wwa-select {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+      }
+      .wwpse__set-action {
+        grid-column: 1 / -1;
+        display: flex;
+        justify-content: flex-end;
+        min-width: 0;
+      }
+      .wwpse__day-actions,
+      .wwpse__block-actions,
+      .wwpse__footer {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .wwpse__footer {
+        justify-content: flex-start;
+      }
+      @media (max-width: 980px) {
+        .wwpse__grid,
+        .wwpse__grid-two,
+        .wwpse__day-header-controls,
+        .wwpse__set-row {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+    `}</style>
+  );
+}
+
+function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'official', planType = '' }) {
   const isCustomMode = mode === 'custom';
   const makeEmptyExercise = () => (isCustomMode ? emptyCustomExercise() : emptyExercise());
+  const allowedKinds = getAllowedBlockKinds(planType);
+  const makeDefaultTrainingExercises = () => (allowedKinds.cardio && !allowedKinds.strength ? [emptyCardioBlock()] : [makeEmptyExercise()]);
+  const sessionGroups = isCustomMode
+    ? [{ weekNumber: null, items: sessions.map((session, dayIndex) => ({ session, dayIndex })) }]
+    : groupOfficialSessionsByWeek(sessions);
 
   const updateSession = (index, changes) => {
-    onChange(sessions.map((s, i) => (i === index ? { ...s, ...changes } : s)));
+    onChange(sessions.map((session, sessionIndex) => {
+      if (sessionIndex !== index) return session;
+      const updated = { ...session, ...changes };
+      return isCustomMode ? updated : withCalculatedOfficialMinutes(updated);
+    }));
   };
 
   const toggleRestDay = (index) => {
     const session = sessions[index];
     const nowRest = !session.isRestDay;
     if (nowRest) {
-      updateSession(index, isCustomMode
-        ? { isRestDay: true, name: session.name || 'Rest', exercises: [] }
-        : { isRestDay: true, name: session.name || 'Rest', estimatedMinutes: '0', exercises: [] });
+      updateSession(
+        index,
+        isCustomMode
+          ? { isRestDay: true, name: session.name || 'Rest', exercises: [] }
+          : { isRestDay: true, name: session.name || 'Rest', exercises: [] }
+      );
     } else {
-      updateSession(index, isCustomMode
-        ? { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, exercises: [makeEmptyExercise()] }
-        : { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, estimatedMinutes: '45', exercises: [makeEmptyExercise()] });
+      updateSession(
+        index,
+        isCustomMode
+          ? { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, exercises: makeDefaultTrainingExercises() }
+          : { isRestDay: false, name: session.name === 'Rest' ? '' : session.name, exercises: makeDefaultTrainingExercises() }
+      );
     }
   };
 
   const addDay = () => {
     const newDay = isCustomMode
-      ? { name: '', isRestDay: false, type: 'gym', exercises: [makeEmptyExercise()], _extra: {} }
-      : { name: '', isRestDay: false, estimatedMinutes: '45', exercises: [makeEmptyExercise()] };
+      ? { name: '', isRestDay: false, type: 'gym', exercises: makeDefaultTrainingExercises(), _extra: {} }
+      : withCalculatedOfficialMinutes({ name: '', isRestDay: false, exercises: makeDefaultTrainingExercises() });
     onChange([...sessions, newDay]);
   };
 
   const removeDay = (index) => {
-    onChange(sessions.filter((_, i) => i !== index));
+    onChange(sessions.filter((_, sessionIndex) => sessionIndex !== index));
   };
 
-  const updateExercise = (dayIndex, exIndex, changes) => {
+  const updateExercise = (dayIndex, exerciseIndex, changes) => {
     const session = sessions[dayIndex];
-    const exercises = session.exercises.map((ex, i) => (i === exIndex ? { ...ex, ...changes } : ex));
+    const exercises = session.exercises.map((exercise, index) => (index === exerciseIndex ? { ...exercise, ...changes } : exercise));
     updateSession(dayIndex, { exercises });
   };
 
@@ -367,305 +745,362 @@ function PlanSessionsEditor({ sessions, onChange, exerciseCatalog, mode = 'offic
     updateSession(dayIndex, { exercises: [...session.exercises, emptyCardioBlock()] });
   };
 
-  const removeExercise = (dayIndex, exIndex) => {
+  const removeExercise = (dayIndex, exerciseIndex) => {
     const session = sessions[dayIndex];
-    updateSession(dayIndex, { exercises: session.exercises.filter((_, i) => i !== exIndex) });
+    updateSession(dayIndex, { exercises: session.exercises.filter((_, index) => index !== exerciseIndex) });
   };
 
-  // Selecting a known exercise prefills its muscle group as a convenience —
-  // plan-embedded exercises are copies (name/muscle/...), not references into
-  // the `exercises` collection, so nothing is linked by ID in either mode.
-  const handleExerciseNameChange = (dayIndex, exIndex, name) => {
-    const match = exerciseCatalog.find(e => e.name.toLowerCase() === name.toLowerCase());
-    updateExercise(dayIndex, exIndex, match ? { name, muscle: match.muscle } : { name });
+  const handleExerciseNameChange = (dayIndex, exerciseIndex, name) => {
+    const currentExercise = sessions[dayIndex]?.exercises?.[exerciseIndex];
+    const match = findCatalogExercise(exerciseCatalog, name);
+    if (match) {
+      updateExercise(dayIndex, exerciseIndex, {
+        name: match.name,
+        muscle: resolveStrengthMuscle(match, currentExercise?.muscle),
+      });
+      return;
+    }
+
+    updateExercise(dayIndex, exerciseIndex, { name, muscle: '' });
   };
 
-  const updateSet = (dayIndex, exIndex, setIndex, changes) => {
+  const updateSet = (dayIndex, exerciseIndex, setIndex, changes) => {
     const session = sessions[dayIndex];
-    const ex = session.exercises[exIndex];
-    const setsArr = ex.sets.map((st, i) => (i === setIndex ? { ...st, ...changes } : st));
-    updateExercise(dayIndex, exIndex, { sets: setsArr });
+    const exercise = session.exercises[exerciseIndex];
+    const setsArray = exercise.sets.map((setItem, index) => (index === setIndex ? { ...setItem, ...changes } : setItem));
+    updateExercise(dayIndex, exerciseIndex, { sets: setsArray });
   };
 
-  const addSet = (dayIndex, exIndex) => {
+  const addSet = (dayIndex, exerciseIndex) => {
     const session = sessions[dayIndex];
-    const ex = session.exercises[exIndex];
-    updateExercise(dayIndex, exIndex, { sets: [...ex.sets, emptySet()] });
+    const exercise = session.exercises[exerciseIndex];
+    updateExercise(dayIndex, exerciseIndex, { sets: [...exercise.sets, emptySet()] });
   };
 
-  const removeSet = (dayIndex, exIndex, setIndex) => {
+  const removeSet = (dayIndex, exerciseIndex, setIndex) => {
     const session = sessions[dayIndex];
-    const ex = session.exercises[exIndex];
-    updateExercise(dayIndex, exIndex, { sets: ex.sets.filter((_, i) => i !== setIndex) });
+    const exercise = session.exercises[exerciseIndex];
+    updateExercise(dayIndex, exerciseIndex, { sets: exercise.sets.filter((_, index) => index !== setIndex) });
   };
 
   return (
-    <div>
-      {sessions.map((session, dayIndex) => (
-        <div key={dayIndex} className="wwa-panel" style={{ padding: 16, marginBottom: 12 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 13, fontWeight: 700, color: '#111827' }}>Day {dayIndex + 1}</span>
-              <input
-                className="wwa-input"
-                style={{ width: 200 }}
-                value={session.name}
-                onChange={e => updateSession(dayIndex, { name: e.target.value })}
-                placeholder={session.isRestDay ? 'Rest' : 'Session name, e.g. Upper A'}
-                disabled={session.isRestDay}
-              />
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#4b5563' }}>
-                <input type="checkbox" checked={session.isRestDay} onChange={() => toggleRestDay(dayIndex)} />
-                Rest Day
-              </label>
-              {!isCustomMode && !session.isRestDay && (
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#4b5563' }}>
-                  Est. Minutes
-                  <input
-                    type="number"
-                    min="0"
-                    className="wwa-input wwa-input-sm"
-                    value={session.estimatedMinutes}
-                    onChange={e => updateSession(dayIndex, { estimatedMinutes: e.target.value })}
-                  />
+    <div className="wwpse">
+      <PlanSessionsEditorStyles />
+
+      {sessionGroups.map((group) => (
+        <div key={group.weekNumber || 'custom'} className="wwpse__week">
+          {!isCustomMode ? <div className="wwpse__week-heading">Week {group.weekNumber}</div> : null}
+          {group.items.map(({ session, dayIndex }) => (
+        <div key={dayIndex} className="wwpse__day">
+          <div className="wwpse__day-header">
+            <div className="wwpse__day-main">
+              <div className="wwpse__day-title-row">
+                <span className="wwpse__day-index">Day {dayIndex + 1}</span>
+                {session.isRestDay ? <Badge tone="neutral">Rest Day</Badge> : null}
+                {!isCustomMode && !session.isRestDay && session.estimatedMinutes ? <Badge tone="neutral">{session.estimatedMinutes} min</Badge> : null}
+              </div>
+              <div className="wwpse__day-header-controls">
+                <input
+                  className="wwa-input"
+                  value={session.name}
+                  onChange={(event) => updateSession(dayIndex, { name: event.target.value })}
+                  placeholder={session.isRestDay ? 'Rest' : 'Session name, e.g. Upper A'}
+                  disabled={session.isRestDay}
+                />
+                <label className="wwpse__day-toggle">
+                  <input type="checkbox" checked={session.isRestDay} onChange={() => toggleRestDay(dayIndex)} />
+                  <span>Rest Day</span>
                 </label>
-              )}
+                {!isCustomMode && !session.isRestDay ? (
+                  <div className="wwpse__minutes-field">
+                    <label className="wwa-field-label">Estimated Duration</label>
+                    <div className="wwpse__minutes-display">{session.estimatedMinutes || '0'} min</div>
+                  </div>
+                ) : null}
+              </div>
             </div>
-            <button className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => removeDay(dayIndex)}>
-              Remove Day
-            </button>
+
+            {isCustomMode ? (
+              <div className="wwpse__day-actions">
+                <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-danger" onClick={() => removeDay(dayIndex)}>
+                  <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
+                  Remove Day
+                </button>
+              </div>
+            ) : null}
           </div>
 
-          {!session.isRestDay && (
-            <div>
-              {session.exercises.map((ex, exIndex) => (
-                <div
-                  key={exIndex}
-                  style={{
-                    padding: '10px 0',
-                    borderTop: exIndex > 0 ? '1px solid #f3f4f6' : 'none',
-                  }}
-                >
-                  {ex.isCardio ? (
-                    <div style={{
-                      display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8, alignItems: 'end',
-                    }}>
-                      <div>
-                        <label className="wwa-field-label">Cardio Activity</label>
-                        <select
-                          className="wwa-select"
-                          value={ex.cardioActivity}
-                          onChange={e => updateExercise(dayIndex, exIndex, { cardioActivity: e.target.value })}
-                        >
-                          {CARDIO_ACTIVITIES.map(a => <option key={a} value={a}>{a}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="wwa-field-label">Minutes</label>
-                        <input
-                          type="number"
-                          min="1"
-                          className="wwa-input"
-                          value={ex.cardioMinutes}
-                          onChange={e => updateExercise(dayIndex, exIndex, { cardioMinutes: e.target.value })}
-                        />
-                      </div>
-                      <div>
-                        <label className="wwa-field-label">Preview</label>
-                        <div className="wwa-input" style={{ background: '#f9fafb', color: '#6b7280', display: 'flex', alignItems: 'center' }}>
-                          {ex.cardioActivity} {ex.cardioMinutes || 0}min
+          {session.isRestDay ? (
+            <div className="wwpse__rest-state">
+              <MoonStar aria-hidden="true" size={16} strokeWidth={2} />
+              <span>Rest day enabled for this training slot.</span>
+            </div>
+          ) : (
+            <div className="wwpse__body">
+              {session.exercises.map((exercise, exerciseIndex) => (
+                <div key={exerciseIndex} className="wwpse__block">
+                  {exercise.isCardio ? (
+                    <>
+                      <div className="wwpse__block-header">
+                        <div className="wwpse__block-title">
+                          <Clock3 aria-hidden="true" size={16} strokeWidth={2} />
+                          <span>Cardio Block {exerciseIndex + 1}</span>
                         </div>
-                      </div>
-                      <div>
                         <button
+                          type="button"
                           className="wwa-btn wwa-btn-sm wwa-btn-danger"
-                          onClick={() => removeExercise(dayIndex, exIndex)}
-                          disabled={session.exercises.length === 1}
+                          onClick={() => removeExercise(dayIndex, exerciseIndex)}
                         >
+                          <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
                           Remove Cardio Block
                         </button>
                       </div>
-                    </div>
-                  ) : (
-                    <div
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
-                        gap: 8,
-                        alignItems: 'end',
-                      }}
-                    >
-                      <div>
-                        <label className="wwa-field-label">Exercise Name</label>
-                        <input
-                          className="wwa-input"
-                          list="wwa-exercise-catalog"
-                          value={ex.name}
-                          onChange={e => handleExerciseNameChange(dayIndex, exIndex, e.target.value)}
-                          placeholder="e.g. Bench Press"
-                        />
-                      </div>
-                      <div>
-                        <label className="wwa-field-label">Muscle</label>
-                        <input
-                          className="wwa-input"
-                          list="wwa-muscle-options"
-                          value={ex.muscle}
-                          onChange={e => updateExercise(dayIndex, exIndex, { muscle: e.target.value })}
-                          placeholder="e.g. Chest"
-                        />
-                      </div>
-                      <div>
-                        <label className="wwa-field-label">Tag</label>
-                        <select
-                          className="wwa-select"
-                          value={ex.tag}
-                          onChange={e => updateExercise(dayIndex, exIndex, { tag: e.target.value })}
-                        >
-                          {TAG_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
-                        </select>
-                      </div>
-
-                      {!isCustomMode && (
-                        <>
-                          <div>
-                            <label className="wwa-field-label">Sets</label>
-                            <input
-                              type="number"
-                              min="1"
-                              className="wwa-input"
-                              value={ex.sets}
-                              onChange={e => updateExercise(dayIndex, exIndex, { sets: e.target.value })}
-                            />
-                          </div>
-                          <div>
-                            <label className="wwa-field-label">Reps</label>
-                            <input
-                              type="number"
-                              min="1"
-                              className="wwa-input"
-                              value={ex.reps}
-                              onChange={e => updateExercise(dayIndex, exIndex, { reps: e.target.value })}
-                            />
-                          </div>
-                        </>
-                      )}
-
-                      <div>
-                        <label className="wwa-field-label">Rest (sec)</label>
-                        <input
-                          type="number"
-                          min="0"
-                          className="wwa-input"
-                          value={ex.restTime}
-                          onChange={e => updateExercise(dayIndex, exIndex, { restTime: e.target.value })}
-                        />
-                      </div>
-
-                      <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8, alignItems: 'end' }}>
-                        <div style={{ flex: 1 }}>
-                          <label className="wwa-field-label">Note (optional)</label>
+                      <div className="wwpse__grid-two">
+                        <div>
+                          <label className="wwa-field-label" htmlFor={`cardio-activity-${dayIndex}-${exerciseIndex}`}>Cardio Activity</label>
+                          <select
+                            id={`cardio-activity-${dayIndex}-${exerciseIndex}`}
+                            className="wwa-select"
+                            value={exercise.cardioActivity}
+                            onChange={(event) => updateExercise(dayIndex, exerciseIndex, { cardioActivity: event.target.value })}
+                          >
+                            {CARDIO_ACTIVITIES.map((activity) => (
+                              <option key={activity} value={activity}>
+                                {activity}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="wwa-field-label" htmlFor={`cardio-minutes-${dayIndex}-${exerciseIndex}`}>Minutes</label>
                           <input
+                            id={`cardio-minutes-${dayIndex}-${exerciseIndex}`}
+                            type="number"
+                            min="1"
                             className="wwa-input"
-                            value={ex.note}
-                            onChange={e => updateExercise(dayIndex, exIndex, { note: e.target.value })}
-                            placeholder="e.g. Keep elbows tucked"
+                            value={exercise.cardioMinutes}
+                            onChange={(event) => updateExercise(dayIndex, exerciseIndex, { cardioMinutes: event.target.value })}
                           />
                         </div>
+                        <div className="wwpse__full">
+                          <label className="wwa-field-label">Preview</label>
+                          <div className="wwpse__preview">
+                            {exercise.cardioActivity} {exercise.cardioMinutes || 0}min
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="wwpse__block-header">
+                        <div className="wwpse__block-title">
+                          <Dumbbell aria-hidden="true" size={16} strokeWidth={2} />
+                          <span>Exercise {exerciseIndex + 1}</span>
+                        </div>
                         <button
+                          type="button"
                           className="wwa-btn wwa-btn-sm wwa-btn-danger"
-                          onClick={() => removeExercise(dayIndex, exIndex)}
-                          disabled={session.exercises.length === 1}
+                          onClick={() => removeExercise(dayIndex, exerciseIndex)}
                         >
+                          <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
                           Remove Exercise
                         </button>
                       </div>
-                    </div>
-                  )}
 
-                  {isCustomMode && !ex.isCardio && (
-                    <div style={{ marginTop: 10, paddingLeft: 12, borderLeft: '2px solid #f3f4f6' }}>
-                      <div className="wwa-field-label" style={{ marginBottom: 6 }}>Sets</div>
-                      {ex.sets.map((st, setIndex) => (
-                        <div
-                          key={setIndex}
-                          style={{ display: 'flex', gap: 8, alignItems: 'end', marginBottom: 6 }}
-                        >
-                          <div style={{ width: 140 }}>
-                            <select
-                              className="wwa-select"
-                              value={st.type}
-                              onChange={e => updateSet(dayIndex, exIndex, setIndex, { type: e.target.value })}
-                            >
-                              {SET_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                            </select>
-                          </div>
-                          <div style={{ width: 90 }}>
-                            <input
-                              className="wwa-input"
-                              value={st.kg}
-                              onChange={e => updateSet(dayIndex, exIndex, setIndex, { kg: e.target.value })}
-                              placeholder="KG"
-                            />
-                          </div>
-                          <div style={{ width: 90 }}>
-                            <input
-                              className="wwa-input"
-                              value={st.reps}
-                              onChange={e => updateSet(dayIndex, exIndex, setIndex, { reps: e.target.value })}
-                              placeholder="Reps"
-                            />
-                          </div>
-                          <button
-                            className="wwa-btn wwa-btn-sm wwa-btn-danger"
-                            onClick={() => removeSet(dayIndex, exIndex, setIndex)}
-                            disabled={ex.sets.length === 1}
-                          >
-                            Remove Set
-                          </button>
+                      <div className="wwpse__grid">
+                        <div>
+                          <label className="wwa-field-label" htmlFor={`exercise-name-${dayIndex}-${exerciseIndex}`}>Exercise Name</label>
+                          <input
+                            id={`exercise-name-${dayIndex}-${exerciseIndex}`}
+                            className="wwa-input"
+                            list="wwa-exercise-catalog"
+                            value={exercise.name}
+                            onChange={(event) => handleExerciseNameChange(dayIndex, exerciseIndex, event.target.value)}
+                            placeholder="e.g. Bench Press"
+                          />
+                          {exercise.name.trim() && !findCatalogExercise(exerciseCatalog, exercise.name) ? (
+                            <div className="wwpse__inline-error">Select an exercise from the exercise catalog.</div>
+                          ) : null}
                         </div>
-                      ))}
-                      <button
-                        className="wwa-btn wwa-btn-sm wwa-btn-secondary"
-                        onClick={() => addSet(dayIndex, exIndex)}
-                      >
-                        + Add Set
-                      </button>
-                    </div>
+                        <div>
+                          <label className="wwa-field-label" htmlFor={`exercise-tag-${dayIndex}-${exerciseIndex}`}>Tag</label>
+                          <select
+                            id={`exercise-tag-${dayIndex}-${exerciseIndex}`}
+                            className="wwa-select"
+                            value={exercise.tag}
+                            onChange={(event) => updateExercise(dayIndex, exerciseIndex, { tag: event.target.value })}
+                          >
+                            {TAG_OPTIONS.map((tag) => (
+                              <option key={tag} value={tag}>
+                                {tag}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {!isCustomMode ? (
+                          <>
+                            <div>
+                              <label className="wwa-field-label" htmlFor={`exercise-sets-${dayIndex}-${exerciseIndex}`}>Sets</label>
+                              <input
+                                id={`exercise-sets-${dayIndex}-${exerciseIndex}`}
+                                type="number"
+                                min="1"
+                                className="wwa-input"
+                                value={exercise.sets}
+                                onChange={(event) => updateExercise(dayIndex, exerciseIndex, { sets: event.target.value })}
+                              />
+                            </div>
+                            <div>
+                              <label className="wwa-field-label" htmlFor={`exercise-reps-${dayIndex}-${exerciseIndex}`}>Reps</label>
+                              <input
+                                id={`exercise-reps-${dayIndex}-${exerciseIndex}`}
+                                type="number"
+                                min="1"
+                                className="wwa-input"
+                                value={exercise.reps}
+                                onChange={(event) => updateExercise(dayIndex, exerciseIndex, { reps: event.target.value })}
+                              />
+                            </div>
+                            <div>
+                              <label className="wwa-field-label" htmlFor={`exercise-est-time-${dayIndex}-${exerciseIndex}`}>Est. Set Time (sec)</label>
+                              <input
+                                id={`exercise-est-time-${dayIndex}-${exerciseIndex}`}
+                                type="number"
+                                min="1"
+                                className="wwa-input"
+                                value={exercise.estTimePerSet}
+                                onChange={(event) => updateExercise(dayIndex, exerciseIndex, { estTimePerSet: event.target.value })}
+                              />
+                            </div>
+                          </>
+                        ) : null}
+
+                        <div>
+                          <label className="wwa-field-label" htmlFor={`exercise-rest-${dayIndex}-${exerciseIndex}`}>Rest (sec)</label>
+                          <input
+                            id={`exercise-rest-${dayIndex}-${exerciseIndex}`}
+                            type="number"
+                            min="0"
+                            className="wwa-input"
+                            value={exercise.restTime}
+                            onChange={(event) => updateExercise(dayIndex, exerciseIndex, { restTime: event.target.value })}
+                          />
+                        </div>
+
+                        <div className="wwpse__full">
+                          <label className="wwa-field-label" htmlFor={`exercise-note-${dayIndex}-${exerciseIndex}`}>Note (optional)</label>
+                          <input
+                            id={`exercise-note-${dayIndex}-${exerciseIndex}`}
+                            className="wwa-input"
+                            value={exercise.note}
+                            onChange={(event) => updateExercise(dayIndex, exerciseIndex, { note: event.target.value })}
+                            placeholder="e.g. Keep elbows tucked"
+                          />
+                        </div>
+                      </div>
+
+                      {isCustomMode ? (
+                        <div className="wwpse__sets">
+                          <div className="wwpse__sets-title">Sets</div>
+                          {exercise.sets.map((setItem, setIndex) => (
+                            <div key={setIndex} className="wwpse__set-row">
+                              <div>
+                                <label className="wwa-field-label" htmlFor={`set-type-${dayIndex}-${exerciseIndex}-${setIndex}`}>Set Type</label>
+                                <select
+                                  id={`set-type-${dayIndex}-${exerciseIndex}-${setIndex}`}
+                                  className="wwa-select"
+                                  value={setItem.type}
+                                  onChange={(event) => updateSet(dayIndex, exerciseIndex, setIndex, { type: event.target.value })}
+                                >
+                                  {SET_TYPE_OPTIONS.map((option) => (
+                                    <option key={option.value} value={option.value}>
+                                      {option.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="wwa-field-label" htmlFor={`set-kg-${dayIndex}-${exerciseIndex}-${setIndex}`}>KG</label>
+                                <input
+                                  id={`set-kg-${dayIndex}-${exerciseIndex}-${setIndex}`}
+                                  className="wwa-input"
+                                  value={setItem.kg}
+                                  onChange={(event) => updateSet(dayIndex, exerciseIndex, setIndex, { kg: event.target.value })}
+                                  placeholder="KG"
+                                />
+                              </div>
+                              <div>
+                                <label className="wwa-field-label" htmlFor={`set-reps-${dayIndex}-${exerciseIndex}-${setIndex}`}>Reps</label>
+                                <input
+                                  id={`set-reps-${dayIndex}-${exerciseIndex}-${setIndex}`}
+                                  className="wwa-input"
+                                  value={setItem.reps}
+                                  onChange={(event) => updateSet(dayIndex, exerciseIndex, setIndex, { reps: event.target.value })}
+                                  placeholder="Reps"
+                                />
+                              </div>
+                              <div className="wwpse__set-action">
+                                <button
+                                  type="button"
+                                  className="wwa-btn wwa-btn-sm wwa-btn-danger"
+                                  onClick={() => removeSet(dayIndex, exerciseIndex, setIndex)}
+                                  disabled={exercise.sets.length === 1}
+                                >
+                                  <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
+                                  Remove Set
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                          <div className="wwpse__block-actions">
+                            <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={() => addSet(dayIndex, exerciseIndex)}>
+                              <Plus aria-hidden="true" size={14} strokeWidth={2} />
+                              Add Set
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
                   )}
                 </div>
               ))}
-              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                <button
-                  className="wwa-btn wwa-btn-sm wwa-btn-brand-soft"
-                  onClick={() => addExercise(dayIndex)}
-                >
-                  + Add Exercise
-                </button>
-                {!isCustomMode && (
-                  <button
-                    className="wwa-btn wwa-btn-sm wwa-btn-secondary"
-                    onClick={() => addCardioBlock(dayIndex)}
-                  >
-                    + Add Cardio Block
+
+              <div className="wwpse__block-actions">
+                {allowedKinds.strength ? (
+                  <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-brand-soft" onClick={() => addExercise(dayIndex)}>
+                    <Plus aria-hidden="true" size={14} strokeWidth={2} />
+                    Add Exercise
                   </button>
-                )}
+                ) : null}
+                {allowedKinds.cardio ? (
+                  <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={() => addCardioBlock(dayIndex)}>
+                    <Plus aria-hidden="true" size={14} strokeWidth={2} />
+                    Add Cardio Block
+                  </button>
+                ) : null}
               </div>
             </div>
           )}
         </div>
       ))}
+        </div>
+      ))}
 
       <datalist id="wwa-exercise-catalog">
-        {exerciseCatalog.map(e => <option key={e.name} value={e.name} />)}
-      </datalist>
-      <datalist id="wwa-muscle-options">
-        {MUSCLE_OPTIONS.map(m => <option key={m} value={m} />)}
+        {exerciseCatalog.map((exercise) => (
+          <option key={exercise.name} value={exercise.name} />
+        ))}
       </datalist>
 
-      <button className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={addDay}>
-        + Add Day
-      </button>
+      {isCustomMode ? (
+        <div className="wwpse__footer">
+          <button type="button" className="wwa-btn wwa-btn-sm wwa-btn-secondary" onClick={addDay}>
+            <Plus aria-hidden="true" size={14} strokeWidth={2} />
+            Add Day
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
