@@ -407,7 +407,7 @@ function SessionCard({ session, index }) {
   );
 }
 
-function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerciseCatalog, onClose, onSave, onDelete }) {
+function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerciseCatalog, startInEdit, onClose, onSave, onEdit, onDelete }) {
   const [isEditing, setIsEditing] = useState(false);
   const [form, setForm] = useState(null);
   const [customSessions, setCustomSessions] = useState([]);
@@ -433,6 +433,19 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     setOfficialForm(null);
     setOfficialSessions([]);
   }, [planId]);
+
+  useEffect(() => {
+    if (!plan || !startInEdit) {
+      return;
+    }
+
+    if (plan.isCustom) {
+      startEdit();
+    } else {
+      startEditOfficial();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planId, startInEdit]);
 
   if (!plan) return null;
 
@@ -639,20 +652,12 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
   };
 
   const handleDeleteClick = async () => {
-    const confirmMsg = isCustom
-      ? 'Are you sure you want to permanently delete this custom plan? This action cannot be undone.'
-      : 'Are you sure you want to permanently delete this official plan? This action cannot be undone.';
-    if (!window.confirm(confirmMsg)) {
-      return;
-    }
-    setDeleting(true);
     setError('');
     try {
-      await onDelete(plan);
+      onDelete(plan);
     } catch (err) {
       console.error(err);
       setError(err?.message || 'Failed to delete plan. Please try again.');
-      setDeleting(false);
     }
   };
 
@@ -720,7 +725,11 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
         onClose={onClose}
         actions={
           !isEditMode && canEdit ? (
-            <button type="button" className="wwa-btn wwa-btn-secondary" onClick={isCustom ? startEdit : startEditOfficial}>
+            <button
+              type="button"
+              className="wwa-btn wwa-btn-secondary"
+              onClick={() => (typeof onEdit === 'function' ? onEdit(plan) : isCustom ? startEdit() : startEditOfficial())}
+            >
               <Pencil aria-hidden="true" size={16} strokeWidth={2} />
               Edit
             </button>

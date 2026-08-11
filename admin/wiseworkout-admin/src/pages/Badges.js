@@ -13,14 +13,20 @@ import FormSection from '../components/ui/FormSection';
 import FormField from '../components/ui/FormField';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
+import TableActions from '../components/ui/TableActions';
+import ModalDialog from '../components/ui/ModalDialog';
+import ImageThumb from '../components/ui/ImageThumb';
+import { formatDate } from '../utils/dateUtils';
 import {
-  formatConditions,
-  validateConditions,
+  FALLBACK_BADGE_STAT_TYPES,
+  formatConditionsSummary,
   normalizeConditionsForSave,
-  isValidImageUrl,
+  validateBadgeForm,
+  getBadgeCallableErrorMessage,
 } from '../utils/badgeUtils';
 
 const emptyForm = { name: '', description: '', imageUrl: '', conditions: [{ statType: '', value: '' }] };
+const DELETE_CONFIRMATION = 'DELETE BADGE';
 
 function BadgesStyles() {
   return (
@@ -64,43 +70,79 @@ function BadgesStyles() {
         color: var(--ww-text);
       }
       .wwba-badge-cell__meta {
-        margin-top: 3px;
         font-size: var(--ww-type-secondary-size);
         font-weight: var(--ww-type-secondary-weight);
         color: var(--ww-text-sec);
-      }
-      .wwba-description {
-        color: var(--ww-text-sec);
-        line-height: 1.45;
       }
       .wwba-condition {
         color: var(--ww-text-sec);
         line-height: 1.45;
       }
-      .wwba-condition + .wwba-condition {
-        margin-top: 4px;
+      .wwba-badge-id {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-text-sec);
       }
-      .wwba-image {
-        width: 48px;
-        height: 48px;
-        border-radius: 12px;
-        border: 1px solid var(--ww-divider);
-        background: var(--ww-card);
+      .wwba-modal-copy {
+        color: var(--ww-text-sec);
+        line-height: 1.5;
+      }
+      .wwa-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1200;
         display: flex;
         align-items: center;
         justify-content: center;
-        overflow: hidden;
+        padding: 24px;
+        background: rgba(15, 23, 42, 0.58);
+        backdrop-filter: blur(2px);
       }
-      .wwba-image img {
-        width: 100%;
-        height: 100%;
-        object-fit: contain;
-        display: block;
+      .wwa-modal__panel {
+        width: min(100%, 560px);
+        max-height: calc(100vh - 48px);
+        overflow: auto;
+        background: var(--ww-card);
+        border: 1px solid var(--ww-divider);
+        border-radius: 20px;
+        box-shadow: var(--ww-shadow-lg);
       }
-      .wwba-image__fallback {
-        width: 100%;
-        height: 100%;
-        background: var(--ww-elevated);
+      .wwa-modal__header,
+      .wwa-modal__footer {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--ww-divider);
+      }
+      .wwa-modal__footer {
+        align-items: center;
+        justify-content: flex-end;
+        border-top: 1px solid var(--ww-divider);
+        border-bottom: 0;
+        flex-wrap: wrap;
+      }
+      .wwa-modal__header-main {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .wwa-modal__title {
+        margin: 0;
+        font-size: var(--ww-type-card-title-size);
+        font-weight: var(--ww-type-card-title-weight);
+        color: var(--ww-primary-dark);
+      }
+      .wwa-modal__description {
+        margin: 0;
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text-sec);
+        line-height: 1.55;
+      }
+      .wwa-modal__body {
+        padding: 20px;
       }
       .wwba-actions {
         display: inline-flex;
@@ -114,28 +156,18 @@ function BadgesStyles() {
           grid-template-columns: minmax(0, 1fr);
         }
       }
+      @media (max-width: 720px) {
+        .wwa-modal {
+          padding: 12px;
+        }
+      }
     `}</style>
-  );
-}
-
-function BadgeImage({ url, alt }) {
-  if (!isValidImageUrl(url)) {
-    return (
-      <div className="wwba-image" aria-hidden="true">
-        <div className="wwba-image__fallback" />
-      </div>
-    );
-  }
-
-  return (
-    <div className="wwba-image">
-      <img src={url} alt={alt} />
-    </div>
   );
 }
 
 function Badges() {
   const [badges, setBadges] = useState([]);
+  const [supportedStatTypes, setSupportedStatTypes] = useState(FALLBACK_BADGE_STAT_TYPES);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [search, setSearch] = useState('');
@@ -146,6 +178,10 @@ function Badges() {
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [deleteBadge, setDeleteBadge] = useState(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [deleteSaving, setDeleteSaving] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   const fetchBadges = async () => {
     setLoading(true);
@@ -156,6 +192,11 @@ function Badges() {
       const result = await adminListBadgesDashboard();
       const data = result.data || {};
       setBadges(Array.isArray(data.badges) ? data.badges : []);
+      setSupportedStatTypes(
+        Array.isArray(data.supportedStatTypes) && data.supportedStatTypes.length > 0
+          ? data.supportedStatTypes
+          : FALLBACK_BADGE_STAT_TYPES
+      );
     } catch (err) {
       console.error('Failed to load badges dashboard:', err);
       const detail = err?.code ? ` (${err.code})` : '';
@@ -170,22 +211,9 @@ function Badges() {
   }, []);
 
   const handleAddBadge = async () => {
-    if (!addForm.name.trim()) {
-      setAddError('Badge Name is required.');
-      return;
-    }
-    if (!addForm.description.trim()) {
-      setAddError('Description is required.');
-      return;
-    }
-    if (addForm.imageUrl.trim() && !isValidImageUrl(addForm.imageUrl)) {
-      setAddError('Image URL must start with http:// or https://.');
-      return;
-    }
-
-    const conditionsError = validateConditions(addForm.conditions);
-    if (conditionsError) {
-      setAddError(conditionsError);
+    const validationError = validateBadgeForm(addForm, supportedStatTypes);
+    if (validationError) {
+      setAddError(validationError);
       return;
     }
 
@@ -219,8 +247,7 @@ function Badges() {
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error('Failed to add badge:', err);
-      const detail = err?.code ? ` (${err.code})` : '';
-      setAddError(`Failed to add badge. Please try again.${detail}`);
+      setAddError(getBadgeCallableErrorMessage(err, 'Failed to add badge. Please try again.'));
     } finally {
       setAddSaving(false);
     }
@@ -243,37 +270,57 @@ function Badges() {
     );
   };
 
-  const handleDeleteBadge = async (badgeId) => {
-    const badge = badges.find((item) => item.id === badgeId);
-    if (!badge) return;
-
-    const confirmation = window.prompt(
-      `Permanently delete "${badge.name || badgeId}"?\n\n` +
-      'Deletion will be blocked if any user has already earned this badge.\n\n' +
-      'Type DELETE BADGE exactly to continue:'
-    );
-
-    if (confirmation !== 'DELETE BADGE') return;
-
+  const handleDeleteBadge = async () => {
+    if (!deleteBadge) return;
     try {
+      setDeleteSaving(true);
+      setDeleteError('');
       const adminDeleteBadge = httpsCallable(functions, 'adminDeleteBadge');
       await adminDeleteBadge({
-        badgeId,
-        confirmation,
+        badgeId: deleteBadge.id,
+        confirmation: deleteConfirmation,
       });
 
-      setBadges((prev) => prev.filter((item) => item.id !== badgeId));
-      setSelectedBadgeId((prev) => (prev === badgeId ? null : prev));
+      setBadges((prev) => prev.filter((item) => item.id !== deleteBadge.id));
+      setSelectedBadgeId((prev) => (prev === deleteBadge.id ? null : prev));
+      setDeleteBadge(null);
+      setDeleteConfirmation('');
+      setDeleteError('');
       setSuccessMsg('Badge deleted successfully');
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error('Failed to delete badge:', err);
-      const detail = err?.code ? ` (${err.code})` : '';
-      window.alert(
-        `Failed to delete badge.${detail}\n\n` +
-        'The badge may already have been earned by a user.'
-      );
+      setDeleteError(getBadgeCallableErrorMessage(err, 'Failed to delete badge. Please try again.'));
+    } finally {
+      setDeleteSaving(false);
     }
+  };
+
+  const openBadgeView = (badge) => {
+    setShowAddForm(false);
+    setAddError('');
+    setSelectedBadgeId(badge.id);
+    setOpenInEdit(false);
+  };
+
+  const openBadgeEdit = (badge) => {
+    setShowAddForm(false);
+    setAddError('');
+    setSelectedBadgeId(badge.id);
+    setOpenInEdit(true);
+  };
+
+  const openDeleteDialog = (badge) => {
+    setDeleteBadge(badge);
+    setDeleteConfirmation('');
+    setDeleteError('');
+  };
+
+  const closeDeleteDialog = () => {
+    if (deleteSaving) return;
+    setDeleteBadge(null);
+    setDeleteConfirmation('');
+    setDeleteError('');
   };
 
   const filtered = badges.filter((badge) => {
@@ -282,6 +329,7 @@ function Badges() {
 
     const matchesBasic =
       (badge.name || '').toLowerCase().includes(query) ||
+      (badge.id || '').toLowerCase().includes(query) ||
       (badge.description || '').toLowerCase().includes(query);
     const matchesStat =
       Array.isArray(badge.conditions) &&
@@ -299,37 +347,32 @@ function Badges() {
       render: (badge) => (
         <div className="wwba-badge-cell">
           <div className="wwba-badge-cell__title">{badge.name || 'Unnamed badge'}</div>
-          {badge.id ? <div className="wwba-badge-cell__meta">{badge.id}</div> : null}
         </div>
       ),
     },
     {
-      key: 'description',
-      header: 'Description',
-      render: (badge) => <span className="wwba-description">{badge.description || '—'}</span>,
+      key: 'badgeId',
+      header: 'Badge ID',
+      render: (badge) => (
+        <div className="wwba-badge-id" title={badge.id || '—'}>
+          {badge.id || '—'}
+        </div>
+      ),
     },
     {
-      key: 'condition',
-      header: 'Condition',
-      render: (badge) => {
-        const conditionTexts = formatConditions(badge.conditions);
-        if (conditionTexts === '—') return '—';
-
-        return (
-          <div>
-            {conditionTexts.map((text, index) => (
-              <div key={`${badge.id}-condition-${index}`} className="wwba-condition">
-                {text}
-              </div>
-            ))}
-          </div>
-        );
-      },
+      key: 'conditions',
+      header: 'Conditions',
+      render: (badge) => <span className="wwba-condition">{formatConditionsSummary(badge.conditions)}</span>,
     },
     {
       key: 'image',
       header: 'Image',
-      render: (badge) => <BadgeImage url={badge.imageUrl} alt={badge.name || 'Badge'} />,
+      render: (badge) => <ImageThumb url={badge.imageUrl} size={48} icon="🏅" />,
+    },
+    {
+      key: 'updatedAt',
+      header: 'Updated At',
+      render: (badge) => formatDate(badge.updatedAt),
     },
   ];
 
@@ -391,6 +434,7 @@ function Badges() {
                     value={addForm.name}
                     onChange={(event) => setAddForm((prev) => ({ ...prev, name: event.target.value }))}
                     placeholder="e.g. Distance Runner"
+                    maxLength={100}
                   />
                 </FormField>
 
@@ -411,6 +455,7 @@ function Badges() {
                     value={addForm.description}
                     onChange={(event) => setAddForm((prev) => ({ ...prev, description: event.target.value }))}
                     placeholder="e.g. Run 50km total"
+                    maxLength={500}
                   />
                 </FormField>
               </FormSection>
@@ -420,6 +465,7 @@ function Badges() {
                   conditions={addForm.conditions}
                   onChange={(next) => setAddForm((prev) => ({ ...prev, conditions: next }))}
                   disabled={addSaving}
+                  supportedStatTypes={supportedStatTypes}
                 />
               </FormSection>
 
@@ -463,6 +509,7 @@ function Badges() {
                 rows={filtered}
                 getRowKey={(badge) => badge.id}
                 selectedRowKey={selectedBadgeId}
+                onRowClick={(badge) => openBadgeView(badge)}
                 minWidth={980}
                 emptyIcon={null}
                 emptyTitle="No badges found"
@@ -472,40 +519,34 @@ function Badges() {
                     <button
                       type="button"
                       className="wwa-btn wwa-btn-sm wwa-btn-brand-soft"
-                      onClick={() => {
-                        setShowAddForm(false);
-                        setAddError('');
-                        setSelectedBadgeId(badge.id);
-                        setOpenInEdit(false);
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openBadgeView(badge);
                       }}
                       aria-label={`View ${badge.name || 'badge'}`}
                     >
                       <Eye aria-hidden="true" size={14} strokeWidth={2} />
                       View
                     </button>
-                    <button
-                      type="button"
-                      className="wwa-btn wwa-btn-sm wwa-btn-secondary"
-                      onClick={() => {
-                        setShowAddForm(false);
-                        setAddError('');
-                        setSelectedBadgeId(badge.id);
-                        setOpenInEdit(true);
-                      }}
-                      aria-label={`Edit ${badge.name || 'badge'}`}
-                    >
-                      <Pencil aria-hidden="true" size={14} strokeWidth={2} />
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      className="wwa-btn wwa-btn-sm wwa-btn-danger"
-                      onClick={() => handleDeleteBadge(badge.id)}
-                      aria-label={`Delete ${badge.name || 'badge'}`}
-                    >
-                      <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
-                      Delete
-                    </button>
+                    <TableActions
+                      label={`Actions for ${badge.name || 'badge'}`}
+                      items={[
+                        {
+                          key: 'edit',
+                          label: 'Edit',
+                          icon: <Pencil aria-hidden="true" size={14} strokeWidth={2} />,
+                          onSelect: () => openBadgeEdit(badge),
+                        },
+                        { type: 'divider' },
+                        {
+                          key: 'delete',
+                          label: 'Delete',
+                          tone: 'danger',
+                          icon: <Trash2 aria-hidden="true" size={14} strokeWidth={2} />,
+                          onSelect: () => openDeleteDialog(badge),
+                        },
+                      ]}
+                    />
                   </div>
                 )}
               />
@@ -517,11 +558,53 @@ function Badges() {
                 startInEdit={openInEdit}
                 onClose={() => setSelectedBadgeId(null)}
                 onSave={handleSaveBadge}
+                onEdit={openBadgeEdit}
+                onDelete={openDeleteDialog}
+                supportedStatTypes={supportedStatTypes}
               />
             ) : null}
           </div>
         </>
       )}
+
+      <ModalDialog
+        open={Boolean(deleteBadge)}
+        title="Delete Badge"
+        description="This permanently removes the badge definition. Badges that have already been earned cannot be deleted."
+        onClose={closeDeleteDialog}
+        footer={
+          <>
+            <button type="button" className="wwa-btn wwa-btn-ghost" onClick={closeDeleteDialog} disabled={deleteSaving}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="wwa-btn wwa-btn-danger"
+              onClick={handleDeleteBadge}
+              disabled={deleteSaving || deleteConfirmation !== DELETE_CONFIRMATION}
+            >
+              {deleteSaving ? 'Deleting...' : 'Delete Badge'}
+            </button>
+          </>
+        }
+      >
+        <div className="wwba-modal-copy">
+          Delete <strong>"{deleteBadge?.name || 'this badge'}"</strong>?
+        </div>
+        <FormSection columns={1}>
+          <FormField label="Confirmation" labelFor="badge-delete-confirmation" required fullWidth>
+            <input
+              id="badge-delete-confirmation"
+              type="text"
+              className="wwa-input"
+              value={deleteConfirmation}
+              onChange={(event) => setDeleteConfirmation(event.target.value)}
+              placeholder={DELETE_CONFIRMATION}
+            />
+          </FormField>
+        </FormSection>
+        {deleteError ? <div className="wwa-alert-error">{deleteError}</div> : null}
+      </ModalDialog>
     </div>
   );
 }

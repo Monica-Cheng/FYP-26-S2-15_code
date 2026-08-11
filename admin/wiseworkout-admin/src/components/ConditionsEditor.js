@@ -1,17 +1,6 @@
 import React from 'react';
 import { Plus, Trash2 } from 'lucide-react';
-
-const STAT_TYPES = [
-  'level',
-  'totalXp',
-  'sessionCount',
-  'totalVolume',
-  'totalDistance',
-  'streak',
-  'gymSessionCount',
-  'cardioSessionCount',
-  'combinedSessionCount',
-];
+import { FALLBACK_BADGE_STAT_TYPES } from '../utils/badgeUtils';
 
 function ConditionsEditorStyles() {
   return (
@@ -78,7 +67,14 @@ function ConditionsEditorStyles() {
   );
 }
 
-function ConditionsEditor({ conditions, onChange, disabled, layout = 'default' }) {
+function ConditionsEditor({ conditions, onChange, disabled, layout = 'default', supportedStatTypes }) {
+  const statTypes = Array.isArray(supportedStatTypes) && supportedStatTypes.length > 0
+    ? supportedStatTypes
+    : FALLBACK_BADGE_STAT_TYPES;
+  const selectedStatTypes = conditions
+    .map((condition) => condition?.statType)
+    .filter((value) => typeof value === 'string' && value.trim());
+
   const updateCondition = (index, field, value) => {
     onChange(conditions.map((condition, itemIndex) => (itemIndex === index ? { ...condition, [field]: value } : condition)));
   };
@@ -114,11 +110,15 @@ function ConditionsEditor({ conditions, onChange, disabled, layout = 'default' }
                   disabled={disabled}
                 >
                   <option value="">Select stat type...</option>
-                  {STAT_TYPES.map((type) => (
-                    <option key={type} value={type}>
-                      {type}
-                    </option>
-                  ))}
+                  {statTypes.map((type) => {
+                    const selectedElsewhere = selectedStatTypes.includes(type) && condition.statType !== type;
+
+                    return (
+                      <option key={type} value={type} disabled={selectedElsewhere}>
+                        {type}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 

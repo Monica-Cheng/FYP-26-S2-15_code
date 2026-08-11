@@ -1,6 +1,8 @@
 // lib/screens/auth/register_screen.dart
 // Registration screen for WiseWorkout — email/password and Google sign-up.
-// Navigation: context.go(Routes.home) on success, context.pop() for back.
+// Navigation: context.go(Routes.onboardingStep1) on success. No back button
+// — reached via context.go() from the walkthrough (replace, not push), so
+// there's nothing on the stack to pop to; Log In is the alternative path.
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -150,34 +152,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
       backgroundColor: WW.bg,
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(24, 16, 24, 36),
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 36),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ── Back arrow ─────────────────────────────────────────────────
-              GestureDetector(
-                onTap: () => context.pop(),
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.chevron_left_rounded,
-                      color: WW.primary,
-                      size: 26,
-                    ),
-                    Text(
-                      'Back',
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: WW.primary,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 20),
-
               // ── Hero ───────────────────────────────────────────────────────
               const Text(
                 'Create your account',

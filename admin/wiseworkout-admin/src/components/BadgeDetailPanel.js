@@ -3,11 +3,13 @@ import DetailDrawer from './ui/DetailDrawer';
 import FormSection from './ui/FormSection';
 import FormField from './ui/FormField';
 import ConditionsEditor from './ConditionsEditor';
+import ImageThumb from './ui/ImageThumb';
+import { formatDate } from '../utils/dateUtils';
 import {
-  validateConditions,
   normalizeConditionsForSave,
-  isValidImageUrl,
   normalizeConditionValue,
+  validateBadgeForm,
+  getBadgeCallableErrorMessage,
 } from '../utils/badgeUtils';
 
 function BadgeDetailStyles() {
@@ -126,7 +128,7 @@ function DetailRow({ label, value }) {
   );
 }
 
-function BadgeDetailPanel({ badge, startInEdit, onClose, onSave }) {
+function BadgeDetailPanel({ badge, startInEdit, onClose, onSave, onEdit, onDelete, supportedStatTypes }) {
   const [isEditing, setIsEditing] = useState(false);
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -164,7 +166,6 @@ function BadgeDetailPanel({ badge, startInEdit, onClose, onSave }) {
   if (!badge) return null;
 
   const normalizedConditions = Array.isArray(badge.conditions) ? badge.conditions : [];
-  const showImage = isValidImageUrl(badge.imageUrl);
 
   const cancelEdit = () => {
     setIsEditing(false);
@@ -173,22 +174,9 @@ function BadgeDetailPanel({ badge, startInEdit, onClose, onSave }) {
   };
 
   const handleSave = async () => {
-    if (!form.name.trim()) {
-      setError('Badge Name is required.');
-      return;
-    }
-    if (!form.description.trim()) {
-      setError('Description is required.');
-      return;
-    }
-    if (form.imageUrl.trim() && !isValidImageUrl(form.imageUrl)) {
-      setError('Image URL must start with http:// or https://.');
-      return;
-    }
-
-    const conditionsError = validateConditions(form.conditions);
-    if (conditionsError) {
-      setError(conditionsError);
+    const validationError = validateBadgeForm(form, supportedStatTypes);
+    if (validationError) {
+      setError(validationError);
       return;
     }
 
@@ -219,21 +207,16 @@ function BadgeDetailPanel({ badge, startInEdit, onClose, onSave }) {
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error(err);
-      const detail = err && err.code ? ` (${err.code})` : '';
-      setError(`Failed to update badge. Please try again.${detail}`);
+      setError(getBadgeCallableErrorMessage(err, 'Failed to update badge. Please try again.'));
+    } finally {
+      setSaving(false);
     }
-
-    setSaving(false);
   };
 
   const summary = (
     <div className="wwbd-summary">
       <div className="wwbd-summary__media" aria-hidden="true">
-        {showImage ? (
-          <img src={badge.imageUrl} alt={badge.name || 'Badge'} />
-        ) : (
-          <div className="wwbd-summary__fallback">No image</div>
-        )}
+        <ImageThumb url={badge.imageUrl} size={88} icon="🏅" />
       </div>
       <div className="wwbd-summary__content">
         <div className="wwbd-summary__title">{badge.name || 'Unnamed badge'}</div>
@@ -248,6 +231,17 @@ function BadgeDetailPanel({ badge, startInEdit, onClose, onSave }) {
         title="Badge"
         open={Boolean(badge)}
         onClose={onClose}
+        actions={
+          !isEditing && onEdit ? (
+            <button
+              type="button"
+              className="wwa-btn wwa-btn-sm wwa-btn-secondary"
+              onClick={() => onEdit(badge)}
+            >
+              Edit
+            </button>
+          ) : null
+        }
         summary={summary}
         footer={
           isEditing ? (
@@ -257,6 +251,12 @@ function BadgeDetailPanel({ badge, startInEdit, onClose, onSave }) {
               </button>
               <button type="button" className="wwa-btn wwa-btn-primary" onClick={handleSave} disabled={saving}>
                 {saving ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          ) : onDelete ? (
+            <div className="wwbd-footer">
+              <button type="button" className="wwa-btn wwa-btn-danger" onClick={() => onDelete(badge)}>
+                Delete
               </button>
             </div>
           ) : null
@@ -284,6 +284,7 @@ function BadgeDetailPanel({ badge, startInEdit, onClose, onSave }) {
                   value={form.name}
                   onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
                   placeholder="e.g. Distance Runner"
+                  maxLength={100}
                 />
               </FormField>
 
@@ -304,6 +305,7 @@ function BadgeDetailPanel({ badge, startInEdit, onClose, onSave }) {
                   value={form.description}
                   onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))}
                   placeholder="e.g. Run 50km total"
+                  maxLength={500}
                 />
               </FormField>
             </FormSection>
@@ -314,11 +316,17 @@ function BadgeDetailPanel({ badge, startInEdit, onClose, onSave }) {
                 onChange={(next) => setForm((prev) => ({ ...prev, conditions: next }))}
                 disabled={saving}
                 layout="stacked"
+                supportedStatTypes={supportedStatTypes}
               />
             </FormSection>
           </div>
         ) : (
           <>
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Overview</div>
+              <DetailRow label="Badge ID" value={badge.id || '—'} />
+            </section>
+
             {badge.description ? (
               <section className="wwa-detail-section">
                 <div className="wwa-detail-section__title">Description</div>
@@ -342,6 +350,16 @@ function BadgeDetailPanel({ badge, startInEdit, onClose, onSave }) {
                 )}
               </div>
             </section>
+
+            {(badge.createdAt || badge.updatedAt || badge.createdByAdminUid || badge.updatedByAdminUid) ? (
+              <section className="wwa-detail-section">
+                <div className="wwa-detail-section__title">Audit</div>
+                <DetailRow label="Created At" value={badge.createdAt ? formatDate(badge.createdAt) : undefined} />
+                <DetailRow label="Updated At" value={badge.updatedAt ? formatDate(badge.updatedAt) : undefined} />
+                <DetailRow label="Created By" value={badge.createdByAdminUid || undefined} />
+                <DetailRow label="Updated By" value={badge.updatedByAdminUid || undefined} />
+              </section>
+            ) : null}
           </>
         )}
       </DetailDrawer>

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { collection, getDocs } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
-import { Download, Eye, Plus } from 'lucide-react';
+import { Download, Eye, Pencil, Plus, Trash2 } from 'lucide-react';
 import { db, functions } from '../firebase';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
@@ -22,6 +22,8 @@ import FormSection from '../components/ui/FormSection';
 import FormField from '../components/ui/FormField';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
+import TableActions from '../components/ui/TableActions';
+import ModalDialog from '../components/ui/ModalDialog';
 import {
   parseCommaList,
   buildDesignedBy,
@@ -32,6 +34,7 @@ import {
 
 const CANONICAL_LEVELS = ['Beginner', 'Intermediate', 'Advanced'];
 const CANONICAL_TYPES = CANONICAL_PLAN_TYPES;
+const DELETE_CONFIRMATION = 'DELETE';
 
 const getPlanSource = (plan) => {
   if (plan.isCoachPlan === true) return 'coach';
@@ -133,9 +136,75 @@ function PlansStyles() {
       .wwpl-status-badge {
         white-space: nowrap;
       }
+      .wwpl-modal-copy {
+        color: var(--ww-text-sec);
+        line-height: 1.5;
+      }
+      .wwa-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1200;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(15, 23, 42, 0.58);
+        backdrop-filter: blur(2px);
+      }
+      .wwa-modal__panel {
+        width: min(100%, 560px);
+        max-height: calc(100vh - 48px);
+        overflow: auto;
+        background: var(--ww-card);
+        border: 1px solid var(--ww-divider);
+        border-radius: 20px;
+        box-shadow: var(--ww-shadow-lg);
+      }
+      .wwa-modal__header,
+      .wwa-modal__footer {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--ww-divider);
+      }
+      .wwa-modal__footer {
+        align-items: center;
+        justify-content: flex-end;
+        border-top: 1px solid var(--ww-divider);
+        border-bottom: 0;
+        flex-wrap: wrap;
+      }
+      .wwa-modal__header-main {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .wwa-modal__title {
+        margin: 0;
+        font-size: var(--ww-type-card-title-size);
+        font-weight: var(--ww-type-card-title-weight);
+        color: var(--ww-primary-dark);
+      }
+      .wwa-modal__description {
+        margin: 0;
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text-sec);
+        line-height: 1.55;
+      }
+      .wwa-modal__body {
+        padding: 20px;
+      }
       @media (max-width: 1240px) {
         .wwpl-layout.has-detail {
           grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      @media (max-width: 720px) {
+        .wwa-modal {
+          padding: 12px;
         }
       }
     `}</style>
@@ -161,6 +230,11 @@ function Plans() {
   const [addError, setAddError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [exerciseCatalog, setExerciseCatalog] = useState([]);
+  const [openInEdit, setOpenInEdit] = useState(false);
+  const [deletePlan, setDeletePlan] = useState(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [deleteSaving, setDeleteSaving] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   const fetchData = async () => {
     setLoading(true);
@@ -198,7 +272,6 @@ function Plans() {
       console.error('Failed to load plans dashboard:', err);
       const detail = err?.code ? ` (${err.code})` : '';
       setLoadError(`Failed to load plans dashboard.${detail}`);
-      window.alert(`Failed to load plans dashboard.${detail}`);
     } finally {
       setLoading(false);
     }
@@ -349,21 +422,9 @@ function Plans() {
   };
 
   const handleDeletePlan = async (plan) => {
-    const planName = plan.name || plan.title || plan.id;
-
-    const confirmation = window.prompt(
-      `Permanently delete "${planName}"?\n\n` +
-      `${
-        plan.isCustom
-          ? 'This also removes the creator’s matching custom routine and plan progress.'
-          : 'This removes the official plan from the shared plan library.'
-      }\n\n` +
-      'Type DELETE to continue:'
-    );
-
-    if (confirmation !== 'DELETE') return;
-
     try {
+      setDeleteSaving(true);
+      setDeleteError('');
       const adminDeletePlan = httpsCallable(functions, 'adminDeletePlan');
       await adminDeletePlan({
         planId: plan.id,
@@ -371,10 +432,16 @@ function Plans() {
     } catch (err) {
       console.error(err);
       throw new Error(getCallableErrorMessage(err, 'Failed to delete plan. Please try again.'));
+    } finally {
+      setDeleteSaving(false);
     }
 
     setPlans((prev) => prev.filter((existing) => existing.id !== plan.id));
     setSelectedPlanId(null);
+    setOpenInEdit(false);
+    setDeletePlan(null);
+    setDeleteConfirmation('');
+    setDeleteError('');
     setSuccessMsg(`${sourceLabel(plan)} plan deleted successfully`);
     setTimeout(() => setSuccessMsg(''), 3000);
   };
@@ -512,10 +579,47 @@ function Plans() {
 
   const openAddForm = () => {
     setSelectedPlanId(null);
+    setOpenInEdit(false);
     setShowAddForm(true);
     setAddError('');
     setAddForm(emptyAddForm);
     setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek, emptyAddForm.durationWeeks, emptyAddForm.type));
+  };
+
+  const openPlanView = (plan) => {
+    setShowAddForm(false);
+    setAddError('');
+    setSelectedPlanId(plan.id);
+    setOpenInEdit(false);
+  };
+
+  const openPlanEdit = (plan) => {
+    setShowAddForm(false);
+    setAddError('');
+    setSelectedPlanId(plan.id);
+    setOpenInEdit(true);
+  };
+
+  const openDeleteDialog = (plan) => {
+    setDeletePlan(plan);
+    setDeleteConfirmation('');
+    setDeleteError('');
+  };
+
+  const closeDeleteDialog = () => {
+    if (deleteSaving) return;
+    setDeletePlan(null);
+    setDeleteConfirmation('');
+    setDeleteError('');
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deletePlan) return;
+    try {
+      await handleDeletePlan(deletePlan);
+    } catch (err) {
+      setDeleteError(err?.message || 'Failed to delete plan. Please try again.');
+    }
   };
 
   const handleAddDurationWeeksChange = (value) => {
@@ -868,6 +972,7 @@ function Plans() {
                 rows={filtered}
                 getRowKey={(plan) => plan.id}
                 selectedRowKey={selectedPlanId}
+                onRowClick={(plan) => openPlanView(plan)}
                 minWidth={1080}
                 emptyIcon={null}
                 emptyTitle="No plans found"
@@ -877,16 +982,34 @@ function Plans() {
                     <button
                       type="button"
                       className="wwa-btn wwa-btn-sm wwa-btn-brand-soft"
-                      onClick={() => {
-                        setShowAddForm(false);
-                        setAddError('');
-                        setSelectedPlanId(plan.id);
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openPlanView(plan);
                       }}
                       aria-label={`View ${plan.title || plan.name || 'plan'}`}
                     >
                       <Eye aria-hidden="true" size={14} strokeWidth={2} />
                       View
                     </button>
+                    <TableActions
+                      label={`Actions for ${plan.title || plan.name || 'plan'}`}
+                      items={[
+                        {
+                          key: 'edit',
+                          label: 'Edit',
+                          icon: <Pencil aria-hidden="true" size={14} strokeWidth={2} />,
+                          onSelect: () => openPlanEdit(plan),
+                        },
+                        { type: 'divider' },
+                        {
+                          key: 'delete',
+                          label: 'Delete',
+                          tone: 'danger',
+                          icon: <Trash2 aria-hidden="true" size={14} strokeWidth={2} />,
+                          onSelect: () => openDeleteDialog(plan),
+                        },
+                      ]}
+                    />
                   </div>
                 )}
               />
@@ -899,14 +1022,67 @@ function Plans() {
                 levelOptions={levelOptions}
                 typeOptions={officialTypeOptions}
                 exerciseCatalog={exerciseCatalog}
-                onClose={() => setSelectedPlanId(null)}
+                startInEdit={openInEdit}
+                onClose={() => {
+                  setSelectedPlanId(null);
+                  setOpenInEdit(false);
+                }}
                 onSave={handleSavePlan}
-                onDelete={handleDeletePlan}
+                onEdit={openPlanEdit}
+                onDelete={openDeleteDialog}
               />
             ) : null}
           </div>
         </>
       )}
+
+      <ModalDialog
+        open={Boolean(deletePlan)}
+        title="Delete Plan"
+        description="This permanently removes the selected plan. This action cannot be undone."
+        onClose={closeDeleteDialog}
+        footer={
+          <>
+            <button type="button" className="wwa-btn wwa-btn-ghost" onClick={closeDeleteDialog} disabled={deleteSaving}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="wwa-btn wwa-btn-danger"
+              onClick={handleDeleteConfirm}
+              disabled={deleteSaving || deleteConfirmation !== DELETE_CONFIRMATION}
+            >
+              {deleteSaving ? 'Deleting...' : 'Delete Plan'}
+            </button>
+          </>
+        }
+      >
+        <div className="wwpl-modal-copy">
+          Delete <strong>"{deletePlan?.title || deletePlan?.name || 'this plan'}"</strong>?
+          {deletePlan ? (
+            <>
+              <br />
+              <br />
+              {deletePlan.isCustom
+                ? 'This also removes the creator’s matching custom routine and plan progress.'
+                : 'This removes the official plan from the shared plan library.'}
+            </>
+          ) : null}
+        </div>
+        <FormSection columns={1}>
+          <FormField label="Confirmation" labelFor="plan-delete-confirmation" required fullWidth>
+            <input
+              id="plan-delete-confirmation"
+              type="text"
+              className="wwa-input"
+              value={deleteConfirmation}
+              onChange={(event) => setDeleteConfirmation(event.target.value)}
+              placeholder={DELETE_CONFIRMATION}
+            />
+          </FormField>
+        </FormSection>
+        {deleteError ? <div className="wwa-alert-error">{deleteError}</div> : null}
+      </ModalDialog>
     </div>
   );
 }
