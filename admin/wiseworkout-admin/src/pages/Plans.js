@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { collection, getDocs } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
@@ -140,6 +140,30 @@ function PlansStyles() {
         color: var(--ww-text-sec);
         line-height: 1.5;
       }
+      .wwpl-catalog-state {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 16px;
+        border: 1px dashed var(--ww-divider);
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--ww-elevated) 60%, white);
+      }
+      .wwpl-catalog-state__title {
+        font-size: var(--ww-type-body-size);
+        font-weight: 600;
+        color: var(--ww-text);
+      }
+      .wwpl-catalog-state__meta {
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-text-sec);
+        line-height: 1.5;
+      }
+      .wwpl-catalog-state__actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
       .wwa-modal {
         position: fixed;
         inset: 0;
@@ -230,11 +254,16 @@ function Plans() {
   const [addError, setAddError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [exerciseCatalog, setExerciseCatalog] = useState([]);
+  const [exerciseCatalogLoading, setExerciseCatalogLoading] = useState(false);
+  const [exerciseCatalogLoaded, setExerciseCatalogLoaded] = useState(false);
+  const [exerciseCatalogError, setExerciseCatalogError] = useState('');
   const [openInEdit, setOpenInEdit] = useState(false);
   const [deletePlan, setDeletePlan] = useState(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState('');
   const [deleteSaving, setDeleteSaving] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+  const [pendingAddDurationReduction, setPendingAddDurationReduction] = useState(null);
+  const exerciseCatalogRequestRef = useRef(null);
 
   const fetchData = async () => {
     setLoading(true);
@@ -242,10 +271,7 @@ function Plans() {
 
     try {
       const adminListPlansDashboard = httpsCallable(functions, 'adminListPlansDashboard');
-      const [result, exercisesSnapshot] = await Promise.all([
-        adminListPlansDashboard(),
-        getDocs(collection(db, 'exercises')),
-      ]);
+      const result = await adminListPlansDashboard();
       const data = result.data || {};
 
       const loadedPlans = Array.isArray(data.plans) ? data.plans : [];
@@ -257,17 +283,6 @@ function Plans() {
         byId[user.id] = user;
       });
       setUsersById(byId);
-
-      const catalog = exercisesSnapshot.docs
-        .map((doc) => ({ id: doc.id, ...doc.data() }))
-        .filter((exercise) => exercise.name)
-        .map((exercise) => ({
-          name: exercise.name,
-          muscle: typeof exercise.muscle === 'string' ? exercise.muscle.trim() : '',
-          muscleGroup: typeof exercise.muscleGroup === 'string' ? exercise.muscleGroup.trim() : '',
-        }));
-
-      setExerciseCatalog(catalog);
     } catch (err) {
       console.error('Failed to load plans dashboard:', err);
       const detail = err?.code ? ` (${err.code})` : '';
@@ -281,6 +296,50 @@ function Plans() {
     fetchData();
   }, []);
 
+  const ensureExerciseCatalogLoaded = async () => {
+    if (exerciseCatalogLoaded) {
+      return exerciseCatalog;
+    }
+
+    if (exerciseCatalogRequestRef.current) {
+      return exerciseCatalogRequestRef.current;
+    }
+
+    setExerciseCatalogLoading(true);
+    setExerciseCatalogError('');
+
+    const request = getDocs(collection(db, 'exercises'))
+      .then((snapshot) => {
+        const catalog = snapshot.docs
+          .map((doc) => ({ id: doc.id, ...doc.data() }))
+          .filter((exercise) => exercise.name)
+          .map((exercise) => ({
+            name: exercise.name,
+            muscle: typeof exercise.muscle === 'string' ? exercise.muscle.trim() : '',
+            muscleGroup: typeof exercise.muscleGroup === 'string' ? exercise.muscleGroup.trim() : '',
+          }));
+
+        setExerciseCatalog(catalog);
+        setExerciseCatalogLoaded(true);
+        setExerciseCatalogError('');
+        return catalog;
+      })
+      .catch((err) => {
+        console.error('Failed to load exercise catalog:', err);
+        const detail = err?.code ? ` (${err.code})` : '';
+        const message = `Failed to load exercise catalog.${detail}`;
+        setExerciseCatalogError(message);
+        throw err;
+      })
+      .finally(() => {
+        setExerciseCatalogLoading(false);
+        exerciseCatalogRequestRef.current = null;
+      });
+
+    exerciseCatalogRequestRef.current = request;
+    return request;
+  };
+
   const getCreatorLabel = (plan) => {
     if (!plan.isCustom) return (plan.designedBy && plan.designedBy.name) || 'WiseWorkout';
     const uid = plan.createdBy;
@@ -289,16 +348,34 @@ function Plans() {
     return (user && (user.displayName || user.email)) || uid;
   };
 
-  const levels = Array.from(new Set(plans.map((plan) => plan.level).filter(Boolean))).sort();
-  const types = Array.from(new Set(plans.map((plan) => plan.type).filter(Boolean))).sort();
-  const daysOptions = Array.from(
-    new Set(plans.map((plan) => plan.daysPerWeek).filter((days) => days !== undefined && days !== null))
-  ).sort((a, b) => a - b);
+  const levels = useMemo(
+    () => Array.from(new Set(plans.map((plan) => plan.level).filter(Boolean))).sort(),
+    [plans]
+  );
+  const types = useMemo(
+    () => Array.from(new Set(plans.map((plan) => plan.type).filter(Boolean))).sort(),
+    [plans]
+  );
+  const daysOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(plans.map((plan) => plan.daysPerWeek).filter((days) => days !== undefined && days !== null))
+      ).sort((a, b) => a - b),
+    [plans]
+  );
 
-  const levelOptions = Array.from(new Set([...CANONICAL_LEVELS, ...levels])).filter((level) => level.toLowerCase() !== 'custom');
+  const levelOptions = useMemo(
+    () => Array.from(new Set([...CANONICAL_LEVELS, ...levels])).filter((level) => level.toLowerCase() !== 'custom'),
+    [levels]
+  );
   const officialTypeOptions = CANONICAL_TYPES;
 
   const handleAddPlan = async () => {
+    if (!exerciseCatalogReady) {
+      setAddError(exerciseCatalogLoading ? 'Exercise catalog is still loading. Please wait before saving.' : exerciseCatalogError || 'Exercise catalog is unavailable. Retry loading it before saving.');
+      return;
+    }
+
     if (!addForm.name.trim()) {
       setAddError('Plan Name is required.');
       return;
@@ -459,24 +536,29 @@ function Plans() {
     setStatusFilter('all');
   };
 
-  const filtered = plans.filter((plan) => {
+  const filtered = useMemo(() => {
     const query = search.toLowerCase();
-    const matchesSearch =
-      !query ||
-      (plan.title || plan.name || '').toLowerCase().includes(query) ||
-      (plan.level || '').toLowerCase().includes(query);
-    const matchesLevel = levelFilter === 'all' || plan.level === levelFilter;
-    const matchesType = typeFilter === 'all' || plan.type === typeFilter;
-    const matchesSource = sourceFilter === 'all' || getPlanSource(plan) === sourceFilter;
-    const matchesDays = daysFilter === 'all' || plan.daysPerWeek === Number(daysFilter);
-    const matchesStatus =
-      statusFilter === 'all' ||
-      (statusFilter === 'active' ? plan.isActive !== false : plan.isActive === false);
+    return plans.filter((plan) => {
+      const matchesSearch =
+        !query ||
+        (plan.title || plan.name || '').toLowerCase().includes(query) ||
+        (plan.level || '').toLowerCase().includes(query);
+      const matchesLevel = levelFilter === 'all' || plan.level === levelFilter;
+      const matchesType = typeFilter === 'all' || plan.type === typeFilter;
+      const matchesSource = sourceFilter === 'all' || getPlanSource(plan) === sourceFilter;
+      const matchesDays = daysFilter === 'all' || plan.daysPerWeek === Number(daysFilter);
+      const matchesStatus =
+        statusFilter === 'all' ||
+        (statusFilter === 'active' ? plan.isActive !== false : plan.isActive === false);
 
-    return matchesSearch && matchesLevel && matchesType && matchesSource && matchesDays && matchesStatus;
-  });
+      return matchesSearch && matchesLevel && matchesType && matchesSource && matchesDays && matchesStatus;
+    });
+  }, [plans, search, levelFilter, typeFilter, sourceFilter, daysFilter, statusFilter]);
 
-  const selectedPlan = plans.find((plan) => plan.id === selectedPlanId) || null;
+  const selectedPlan = useMemo(
+    () => plans.find((plan) => plan.id === selectedPlanId) || null,
+    [plans, selectedPlanId]
+  );
 
   const levelTone = (level) =>
     level === 'Advanced' ? 'danger' : level === 'Intermediate' ? 'warning' : 'success';
@@ -582,13 +664,16 @@ function Plans() {
     setOpenInEdit(false);
     setShowAddForm(true);
     setAddError('');
+    setPendingAddDurationReduction(null);
     setAddForm(emptyAddForm);
     setAddSessions(buildDefaultSessions(emptyAddForm.daysPerWeek, emptyAddForm.durationWeeks, emptyAddForm.type));
+    void ensureExerciseCatalogLoaded();
   };
 
   const openPlanView = (plan) => {
     setShowAddForm(false);
     setAddError('');
+    setPendingAddDurationReduction(null);
     setSelectedPlanId(plan.id);
     setOpenInEdit(false);
   };
@@ -596,9 +681,33 @@ function Plans() {
   const openPlanEdit = (plan) => {
     setShowAddForm(false);
     setAddError('');
+    setPendingAddDurationReduction(null);
     setSelectedPlanId(plan.id);
     setOpenInEdit(true);
+    void ensureExerciseCatalogLoaded();
   };
+
+  const exerciseCatalogReady = exerciseCatalogLoaded && !exerciseCatalogLoading;
+
+  const renderExerciseCatalogState = (variant) => (
+    <div className="wwpl-catalog-state">
+      <div className="wwpl-catalog-state__title">
+        {exerciseCatalogLoading ? 'Loading exercise catalog…' : 'Exercise catalog unavailable'}
+      </div>
+      <div className="wwpl-catalog-state__meta">
+        {exerciseCatalogLoading
+          ? `Loading exercises for ${variant === 'add' ? 'plan creation' : 'plan editing'}. The rest of the page remains available.`
+          : exerciseCatalogError || 'The exercise catalog could not be loaded.'}
+      </div>
+      {!exerciseCatalogLoading ? (
+        <div className="wwpl-catalog-state__actions">
+          <button type="button" className="wwa-btn wwa-btn-secondary" onClick={() => void ensureExerciseCatalogLoaded()}>
+            Retry
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
 
   const openDeleteDialog = (plan) => {
     setDeletePlan(plan);
@@ -622,6 +731,17 @@ function Plans() {
     }
   };
 
+  const closeAddDurationReductionDialog = () => {
+    setPendingAddDurationReduction(null);
+  };
+
+  const confirmAddDurationReduction = () => {
+    if (!pendingAddDurationReduction) return;
+    setAddSessions(pendingAddDurationReduction.sessions);
+    setAddForm((prev) => ({ ...prev, durationWeeks: pendingAddDurationReduction.value }));
+    setPendingAddDurationReduction(null);
+  };
+
   const handleAddDurationWeeksChange = (value) => {
     const currentWeeks = Number(addForm.durationWeeks) || 1;
     const requestedWeeks = Number(value);
@@ -634,9 +754,14 @@ function Plans() {
     const { sessions: resizedSessions, removedSessions } = resizeOfficialSessions(addSessions, requestedWeeks);
     if (
       requestedWeeks < currentWeeks &&
-      officialSessionsNeedTruncationConfirm(removedSessions) &&
-      !window.confirm(buildOfficialDurationReductionWarning(currentWeeks, requestedWeeks))
+      officialSessionsNeedTruncationConfirm(removedSessions)
     ) {
+      setPendingAddDurationReduction({
+        value,
+        sessions: resizedSessions,
+        oldWeeks: currentWeeks,
+        newWeeks: requestedWeeks,
+      });
       return;
     }
 
@@ -876,13 +1001,17 @@ function Plans() {
               </FormSection>
 
               <FormSection title="Training Schedule" description="Official plans use explicit day entries grouped by week across the full duration." columns={1}>
-                <PlanSessionsEditor
-                  sessions={addSessions}
-                  onChange={setAddSessions}
-                  exerciseCatalog={exerciseCatalog}
-                  mode="official"
-                  planType={addForm.type}
-                />
+                {exerciseCatalogReady ? (
+                  <PlanSessionsEditor
+                    sessions={addSessions}
+                    onChange={setAddSessions}
+                    exerciseCatalog={exerciseCatalog}
+                    mode="official"
+                    planType={addForm.type}
+                  />
+                ) : (
+                  renderExerciseCatalogState('add')
+                )}
               </FormSection>
 
               <div className="wwpl-form-actions">
@@ -897,7 +1026,12 @@ function Plans() {
                 >
                   Cancel
                 </button>
-                <button type="button" className="wwa-btn wwa-btn-primary" onClick={handleAddPlan} disabled={addSaving}>
+                <button
+                  type="button"
+                  className="wwa-btn wwa-btn-primary"
+                  onClick={handleAddPlan}
+                  disabled={addSaving || !exerciseCatalogReady}
+                >
                   {addSaving ? 'Saving...' : 'Save Plan'}
                 </button>
               </div>
@@ -1022,6 +1156,10 @@ function Plans() {
                 levelOptions={levelOptions}
                 typeOptions={officialTypeOptions}
                 exerciseCatalog={exerciseCatalog}
+                exerciseCatalogReady={exerciseCatalogReady}
+                exerciseCatalogLoading={exerciseCatalogLoading}
+                exerciseCatalogError={exerciseCatalogError}
+                onRetryExerciseCatalog={ensureExerciseCatalogLoaded}
                 startInEdit={openInEdit}
                 onClose={() => {
                   setSelectedPlanId(null);
@@ -1035,6 +1173,35 @@ function Plans() {
           </div>
         </>
       )}
+
+      <ModalDialog
+        open={Boolean(pendingAddDurationReduction)}
+        title="Reduce Plan Duration?"
+        description="Reducing the duration removes sessions that fall outside the new plan length."
+        onClose={closeAddDurationReductionDialog}
+        footer={
+          <>
+            <button type="button" className="wwa-btn wwa-btn-ghost" onClick={closeAddDurationReductionDialog}>
+              Cancel
+            </button>
+            <button type="button" className="wwa-btn wwa-btn-primary" onClick={confirmAddDurationReduction}>
+              Continue
+            </button>
+          </>
+        }
+      >
+        <div className="wwpl-modal-copy">
+          {pendingAddDurationReduction
+            ? buildOfficialDurationReductionWarning(
+                pendingAddDurationReduction.oldWeeks,
+                pendingAddDurationReduction.newWeeks
+              )
+            : ''}
+          <br />
+          <br />
+          Populated day entries outside the new duration will be removed.
+        </div>
+      </ModalDialog>
 
       <ModalDialog
         open={Boolean(deletePlan)}

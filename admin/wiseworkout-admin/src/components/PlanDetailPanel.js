@@ -4,6 +4,7 @@ import Badge from './ui/Badge';
 import DetailDrawer from './ui/DetailDrawer';
 import FormSection from './ui/FormSection';
 import FormField from './ui/FormField';
+import ModalDialog from './ui/ModalDialog';
 import SelectField from './ui/SelectField';
 import PlanSessionsEditor, {
   buildDefaultSessions,
@@ -107,6 +108,29 @@ function PlanDetailStyles() {
       .wwpdn-message-stack .wwa-status-pill,
       .wwpdn-message-stack .wwa-alert-error {
         margin: 0;
+      }
+      .wwpdn-catalog-state {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 16px;
+        border: 1px dashed var(--ww-divider);
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--ww-elevated) 60%, white);
+      }
+      .wwpdn-catalog-state__title {
+        font-size: var(--ww-type-body-size);
+        font-weight: 600;
+        color: var(--ww-text);
+      }
+      .wwpdn-catalog-state__meta {
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-text-sec);
+        line-height: 1.5;
+      }
+      .wwpdn-modal-copy {
+        color: var(--ww-text-sec);
+        line-height: 1.6;
       }
       .wwpdn-description {
         font-size: var(--ww-type-body-size);
@@ -407,7 +431,22 @@ function SessionCard({ session, index }) {
   );
 }
 
-function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerciseCatalog, startInEdit, onClose, onSave, onEdit, onDelete }) {
+function PlanDetailPanel({
+  plan,
+  creatorLabel,
+  levelOptions,
+  typeOptions,
+  exerciseCatalog,
+  exerciseCatalogReady = true,
+  exerciseCatalogLoading = false,
+  exerciseCatalogError = '',
+  onRetryExerciseCatalog,
+  startInEdit,
+  onClose,
+  onSave,
+  onEdit,
+  onDelete,
+}) {
   const [isEditing, setIsEditing] = useState(false);
   const [form, setForm] = useState(null);
   const [customSessions, setCustomSessions] = useState([]);
@@ -421,6 +460,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
   const [officialForm, setOfficialForm] = useState(null);
   const [officialSessions, setOfficialSessions] = useState([]);
   const [officialSaving, setOfficialSaving] = useState(false);
+  const [pendingOfficialDurationReduction, setPendingOfficialDurationReduction] = useState(null);
 
   useEffect(() => {
     setIsEditing(false);
@@ -432,6 +472,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     setIsEditingOfficial(false);
     setOfficialForm(null);
     setOfficialSessions([]);
+    setPendingOfficialDurationReduction(null);
   }, [planId]);
 
   useEffect(() => {
@@ -457,6 +498,27 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
   const isEditMode = isEditing || isEditingOfficial;
   const canEdit = typeof onSave === 'function';
   const canDelete = typeof onDelete === 'function';
+  const canEditSessions = exerciseCatalogReady && !exerciseCatalogLoading;
+
+  const renderExerciseCatalogState = () => (
+    <div className="wwpdn-catalog-state">
+      <div className="wwpdn-catalog-state__title">
+        {exerciseCatalogLoading ? 'Loading exercise catalog…' : 'Exercise catalog unavailable'}
+      </div>
+      <div className="wwpdn-catalog-state__meta">
+        {exerciseCatalogLoading
+          ? 'Loading exercises for plan editing. The rest of this drawer remains available.'
+          : exerciseCatalogError || 'The exercise catalog could not be loaded for editing.'}
+      </div>
+      {!exerciseCatalogLoading && typeof onRetryExerciseCatalog === 'function' ? (
+        <div>
+          <button type="button" className="wwa-btn wwa-btn-secondary" onClick={() => void onRetryExerciseCatalog()}>
+            Retry
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
 
   const startEdit = () => {
     setForm({
@@ -477,6 +539,11 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
   };
 
   const handleSave = async () => {
+    if (!canEditSessions) {
+      setError(exerciseCatalogLoading ? 'Exercise catalog is still loading. Please wait before saving.' : exerciseCatalogError || 'Exercise catalog is unavailable. Retry loading it before saving.');
+      return;
+    }
+
     if (!form.name.trim()) {
       setError('Plan Name cannot be empty.');
       return;
@@ -556,9 +623,15 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     setIsEditingOfficial(false);
     setOfficialForm(null);
     setError('');
+    setPendingOfficialDurationReduction(null);
   };
 
   const handleSaveOfficial = async () => {
+    if (!canEditSessions) {
+      setError(exerciseCatalogLoading ? 'Exercise catalog is still loading. Please wait before saving.' : exerciseCatalogError || 'Exercise catalog is unavailable. Retry loading it before saving.');
+      return;
+    }
+
     if (!officialForm.name.trim()) {
       setError('Plan Name cannot be empty.');
       return;
@@ -673,14 +746,30 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
     const { sessions: resizedSessions, removedSessions } = resizeOfficialSessions(officialSessions, requestedWeeks);
     if (
       requestedWeeks < currentWeeks &&
-      officialSessionsNeedTruncationConfirm(removedSessions) &&
-      !window.confirm(buildOfficialDurationReductionWarning(currentWeeks, requestedWeeks))
+      officialSessionsNeedTruncationConfirm(removedSessions)
     ) {
+      setPendingOfficialDurationReduction({
+        value,
+        sessions: resizedSessions,
+        oldWeeks: currentWeeks,
+        newWeeks: requestedWeeks,
+      });
       return;
     }
 
     setOfficialSessions(resizedSessions);
     setOfficialForm((prev) => ({ ...prev, durationWeeks: value }));
+  };
+
+  const closeOfficialDurationReductionDialog = () => {
+    setPendingOfficialDurationReduction(null);
+  };
+
+  const confirmOfficialDurationReduction = () => {
+    if (!pendingOfficialDurationReduction) return;
+    setOfficialSessions(pendingOfficialDurationReduction.sessions);
+    setOfficialForm((prev) => ({ ...prev, durationWeeks: pendingOfficialDurationReduction.value }));
+    setPendingOfficialDurationReduction(null);
   };
 
   const summary = (
@@ -749,7 +838,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
                 <button type="button" className="wwa-btn wwa-btn-secondary" onClick={cancelEdit} disabled={saving}>
                   Cancel
                 </button>
-                <button type="button" className="wwa-btn wwa-btn-primary" onClick={handleSave} disabled={saving}>
+                <button type="button" className="wwa-btn wwa-btn-primary" onClick={handleSave} disabled={saving || !canEditSessions}>
                   {saving ? 'Saving...' : 'Save Changes'}
                 </button>
               </div>
@@ -766,7 +855,7 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
                 <button type="button" className="wwa-btn wwa-btn-secondary" onClick={cancelEditOfficial} disabled={officialSaving}>
                   Cancel
                 </button>
-                <button type="button" className="wwa-btn wwa-btn-primary" onClick={handleSaveOfficial} disabled={officialSaving}>
+                <button type="button" className="wwa-btn wwa-btn-primary" onClick={handleSaveOfficial} disabled={officialSaving || !canEditSessions}>
                   {officialSaving ? 'Saving...' : 'Save Changes'}
                 </button>
               </div>
@@ -827,13 +916,17 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
             </FormSection>
 
             <FormSection title="Training Schedule" columns={1}>
-              <PlanSessionsEditor
-                sessions={customSessions}
-                onChange={setCustomSessions}
-                exerciseCatalog={exerciseCatalog || []}
-                mode="custom"
-                planType={plan.type}
-              />
+              {canEditSessions ? (
+                <PlanSessionsEditor
+                  sessions={customSessions}
+                  onChange={setCustomSessions}
+                  exerciseCatalog={exerciseCatalog || []}
+                  mode="custom"
+                  planType={plan.type}
+                />
+              ) : (
+                renderExerciseCatalogState()
+              )}
             </FormSection>
           </div>
         ) : isEditingOfficial ? (
@@ -1017,13 +1110,17 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
             </FormSection>
 
             <FormSection title="Training Schedule" description="Official plans are grouped into full weeks and must repeat the weekly workout-day count." columns={1}>
-              <PlanSessionsEditor
-                sessions={officialSessions}
-                onChange={setOfficialSessions}
-                exerciseCatalog={exerciseCatalog || []}
-                mode="official"
-                planType={officialForm.type}
-              />
+              {canEditSessions ? (
+                <PlanSessionsEditor
+                  sessions={officialSessions}
+                  onChange={setOfficialSessions}
+                  exerciseCatalog={exerciseCatalog || []}
+                  mode="official"
+                  planType={officialForm.type}
+                />
+              ) : (
+                renderExerciseCatalogState()
+              )}
             </FormSection>
           </div>
         ) : (
@@ -1065,6 +1162,34 @@ function PlanDetailPanel({ plan, creatorLabel, levelOptions, typeOptions, exerci
           </>
         )}
       </DetailDrawer>
+      <ModalDialog
+        open={Boolean(pendingOfficialDurationReduction)}
+        title="Reduce Plan Duration?"
+        description="Reducing the duration removes sessions that fall outside the new plan length."
+        onClose={closeOfficialDurationReductionDialog}
+        footer={
+          <>
+            <button type="button" className="wwa-btn wwa-btn-ghost" onClick={closeOfficialDurationReductionDialog}>
+              Cancel
+            </button>
+            <button type="button" className="wwa-btn wwa-btn-primary" onClick={confirmOfficialDurationReduction}>
+              Continue
+            </button>
+          </>
+        }
+      >
+        <div className="wwpdn-modal-copy">
+          {pendingOfficialDurationReduction
+            ? buildOfficialDurationReductionWarning(
+                pendingOfficialDurationReduction.oldWeeks,
+                pendingOfficialDurationReduction.newWeeks
+              )
+            : ''}
+          <br />
+          <br />
+          Populated day entries outside the new duration will be removed.
+        </div>
+      </ModalDialog>
     </>
   );
 }

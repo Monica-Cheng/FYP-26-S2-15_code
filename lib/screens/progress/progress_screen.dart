@@ -3137,17 +3137,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
               ),
             )
           else
-            Container(
-              decoration: WW.cardDecoration,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: Column(
-                children: List.generate(_xpEvents.length, (i) {
-                  return _XpRow(
-                    event: _xpEvents[i],
-                    isLast: i == _xpEvents.length - 1,
-                  );
-                }),
-              ),
+            Column(
+              children: List.generate(_xpEvents.length, (i) {
+                return _XpRow(
+                  event: _xpEvents[i],
+                  isLast: i == _xpEvents.length - 1,
+                );
+              }),
             ),
         ],
       ),
@@ -3299,150 +3295,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 100),
           itemCount: checkIns.length,
           itemBuilder: (context, index) {
-            final item = checkIns[index];
-            return _buildCheckInCard(item);
+            return _CheckInRow(
+              item: checkIns[index],
+              isLast: index == checkIns.length - 1,
+            );
           },
         );
       },
-    );
-  }
-
-  Widget _buildCheckInCard(Map<String, dynamic> item) {
-    final reason = item['reason'] as String? ?? 'skip';
-    final date = item['date'] as String? ?? '';
-    final dayIndex = (item['dayIndex'] as num?)?.toInt() ?? 1;
-    final planId = item['planId'] as String? ?? '';
-    final rd = _reasonData[reason] ?? _reasonData['skip']!;
-    final iconColor = rd['color'] as Color;
-    final icon = rd['icon'] as IconData;
-    final label = rd['label'] as String;
-    final sub = rd['sub'] as String;
-
-    String displayDate = date;
-    try {
-      final parts = date.split('-');
-      if (parts.length == 3) {
-        final dt = DateTime(
-          int.parse(parts[0]),
-          int.parse(parts[1]),
-          int.parse(parts[2]),
-        );
-        const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-        const months = [
-          'Jan',
-          'Feb',
-          'Mar',
-          'Apr',
-          'May',
-          'Jun',
-          'Jul',
-          'Aug',
-          'Sep',
-          'Oct',
-          'Nov',
-          'Dec',
-        ];
-        displayDate =
-            '${days[dt.weekday - 1]}, ${dt.day} ${months[dt.month - 1]}';
-      }
-    } catch (_) {}
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: WW.card,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: WW.border, width: 0.5),
-        boxShadow: WW.shadow,
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: iconColor.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(icon, color: iconColor, size: 22),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Text(
-                      label,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
-                        color: WW.text,
-                      ),
-                    ),
-                    const Spacer(),
-                    Text(
-                      displayDate,
-                      style: const TextStyle(fontSize: 11, color: WW.textSec),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  sub,
-                  style: const TextStyle(fontSize: 12, color: WW.textSec),
-                ),
-                const SizedBox(height: 4),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: WW.elevated,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    'Day $dayIndex',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: WW.textSec,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: GestureDetector(
-                    onTap: () async {
-                      await context.push(
-                        Routes.missedCheckin,
-                        extra: {
-                          'planId': planId,
-                          'planName': '',
-                          'missedDayIndex': dayIndex,
-                          'existingDate': date,
-                        },
-                      );
-                    },
-                    child: const Text(
-                      'Change reason',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: WW.primary,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -3489,7 +3348,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
     return ListView.separated(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
       itemCount: _nutritionLogs.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      separatorBuilder: (_, __) => Container(height: 1, color: WW.elevated),
       itemBuilder: (_, i) {
         final log = _nutritionLogs[i];
         return _NutritionLogCard(
@@ -3740,95 +3599,93 @@ class _NutritionLogCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Color barColor;
+    final Color iconColor;
+    final Color iconBg;
     final IconData iconData;
     final String sourceLabel;
 
     switch (source) {
       case 'scan':
-        barColor = WW.primary;
+        iconColor = WW.primary;
+        iconBg = WW.chipBg;
         iconData = Icons.camera_alt_rounded;
         sourceLabel = 'Scanned';
         break;
       case 'barcode':
-        barColor = WW.teal;
+        iconColor = WW.teal;
+        iconBg = WW.tealBg;
         iconData = Icons.qr_code_scanner_rounded;
         sourceLabel = 'Barcode';
         break;
       default:
-        barColor = WW.lavender;
+        iconColor = WW.lavender;
+        iconBg = WW.lavenderBg;
         iconData = Icons.edit_note_rounded;
         sourceLabel = 'Manual';
     }
 
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        decoration: WW.cardDecoration,
-        clipBehavior: Clip.hardEdge,
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Left color bar
-              Container(width: 4, color: barColor),
-
-              // Icon
-              Padding(
-                padding: const EdgeInsets.fromLTRB(10, 14, 4, 14),
-                child: Icon(iconData, color: barColor, size: 22),
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: iconBg,
+                borderRadius: BorderRadius.circular(8),
               ),
+              child: Icon(iconData, color: iconColor, size: 18),
+            ),
+            const SizedBox(width: 10),
 
-              // Content
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(6, 12, 10, 12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        foodName,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                          color: WW.text,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        '$dateLabel · $sourceLabel',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          color: WW.textSec,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-              // Badge: calories
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: WW.tealBg,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    '$calories kcal',
+            // Content
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    foodName,
                     style: const TextStyle(
-                      fontSize: 11,
+                      fontSize: 14,
                       fontWeight: FontWeight.w700,
-                      color: WW.teal,
+                      color: WW.text,
                     ),
                   ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '$dateLabel · $sourceLabel',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: WW.textSec,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+
+            // Badge: calories
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: WW.tealBg,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                '$calories kcal',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: WW.teal,
                 ),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -3869,13 +3726,13 @@ class _XpRow extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Star circle
+          // Star chip
           Container(
-            width: 36,
-            height: 36,
-            decoration: const BoxDecoration(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
               color: WW.tealBg,
-              shape: BoxShape.circle,
+              borderRadius: BorderRadius.circular(8),
             ),
             child: const Center(
               child: Icon(Icons.star_rounded, color: WW.teal, size: 18),
@@ -3916,6 +3773,156 @@ class _XpRow extends StatelessWidget {
               fontSize: 14,
               fontWeight: FontWeight.w700,
               color: WW.primary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Check-in row ─────────────────────────────────────────────────────────────
+
+class _CheckInRow extends StatelessWidget {
+  final Map<String, dynamic> item;
+  final bool isLast;
+
+  const _CheckInRow({required this.item, required this.isLast});
+
+  @override
+  Widget build(BuildContext context) {
+    final reason = item['reason'] as String? ?? 'skip';
+    final date = item['date'] as String? ?? '';
+    final dayIndex = (item['dayIndex'] as num?)?.toInt() ?? 1;
+    final planId = item['planId'] as String? ?? '';
+    final rd = _ProgressScreenState._reasonData[reason] ??
+        _ProgressScreenState._reasonData['skip']!;
+    final iconColor = rd['color'] as Color;
+    final icon = rd['icon'] as IconData;
+    final label = rd['label'] as String;
+    final sub = rd['sub'] as String;
+
+    String displayDate = date;
+    try {
+      final parts = date.split('-');
+      if (parts.length == 3) {
+        final dt = DateTime(
+          int.parse(parts[0]),
+          int.parse(parts[1]),
+          int.parse(parts[2]),
+        );
+        const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+        const months = [
+          'Jan',
+          'Feb',
+          'Mar',
+          'Apr',
+          'May',
+          'Jun',
+          'Jul',
+          'Aug',
+          'Sep',
+          'Oct',
+          'Nov',
+          'Dec',
+        ];
+        displayDate =
+            '${days[dt.weekday - 1]}, ${dt.day} ${months[dt.month - 1]}';
+      }
+    } catch (_) {}
+
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      decoration: BoxDecoration(
+        border: isLast
+            ? null
+            : const Border(
+                bottom: BorderSide(color: Color(0xFFE8EAF8), width: 0.5),
+              ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: iconColor.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, color: iconColor, size: 18),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: WW.text,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      displayDate,
+                      style: const TextStyle(fontSize: 11, color: WW.textSec),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  sub,
+                  style: const TextStyle(fontSize: 12, color: WW.textSec),
+                ),
+                const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: WW.elevated,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    'Day $dayIndex',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: WW.textSec,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: GestureDetector(
+                    onTap: () async {
+                      await context.push(
+                        Routes.missedCheckin,
+                        extra: {
+                          'planId': planId,
+                          'planName': '',
+                          'missedDayIndex': dayIndex,
+                          'existingDate': date,
+                        },
+                      );
+                    },
+                    child: const Text(
+                      'Change reason',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: WW.primary,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ],

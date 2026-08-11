@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { functions } from '../firebase';
 import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
-import { Download } from 'lucide-react';
+import { Download, ShieldOff, ShieldCheck, Trash2 } from 'lucide-react';
 import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import Badge from '../components/ui/Badge';
@@ -13,6 +13,10 @@ import FilterBar from '../components/ui/FilterBar';
 import SearchInput from '../components/ui/SearchInput';
 import SelectField from '../components/ui/SelectField';
 import DataTable from '../components/ui/DataTable';
+import TableActions from '../components/ui/TableActions';
+import ModalDialog from '../components/ui/ModalDialog';
+import FormSection from '../components/ui/FormSection';
+import FormField from '../components/ui/FormField';
 
 function UsersStyles() {
   return (
@@ -59,14 +63,91 @@ function UsersStyles() {
         width: 1%;
         white-space: nowrap;
       }
+      .wwus-modal-copy {
+        color: var(--ww-text-sec);
+        line-height: 1.5;
+      }
+      .wwa-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1200;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(15, 23, 42, 0.58);
+        backdrop-filter: blur(2px);
+      }
+      .wwa-modal__panel {
+        width: min(100%, 560px);
+        max-height: calc(100vh - 48px);
+        overflow: auto;
+        background: var(--ww-card);
+        border: 1px solid var(--ww-divider);
+        border-radius: 20px;
+        box-shadow: var(--ww-shadow-lg);
+      }
+      .wwa-modal__header,
+      .wwa-modal__footer {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--ww-divider);
+      }
+      .wwa-modal__footer {
+        align-items: center;
+        justify-content: flex-end;
+        border-top: 1px solid var(--ww-divider);
+        border-bottom: 0;
+        flex-wrap: wrap;
+      }
+      .wwa-modal__header-main {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .wwa-modal__title {
+        margin: 0;
+        font-size: var(--ww-type-card-title-size);
+        font-weight: var(--ww-type-card-title-weight);
+        color: var(--ww-primary-dark);
+      }
+      .wwa-modal__description {
+        margin: 0;
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text-sec);
+        line-height: 1.55;
+      }
+      .wwa-modal__body {
+        padding: 20px;
+      }
       @media (max-width: 1240px) {
         .wwus-layout.has-detail {
           grid-template-columns: minmax(0, 1fr);
         }
       }
+      @media (max-width: 720px) {
+        .wwa-modal {
+          padding: 12px;
+        }
+      }
     `}</style>
   );
 }
+
+const DELETE_CONFIRMATION = 'DELETE';
+
+const emptyActionState = {
+  type: null,
+  user: null,
+  deleteConfirmation: '',
+  uidConfirmation: '',
+  error: '',
+  saving: false,
+};
 
 function Users() {
   const [users, setUsers] = useState([]);
@@ -79,6 +160,7 @@ function Users() {
   const [premiumFilter, setPremiumFilter] = useState('all');
   const [selectedUserId, setSelectedUserId] = useState(null);
   const [loadError, setLoadError] = useState('');
+  const [actionState, setActionState] = useState(emptyActionState);
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -101,14 +183,8 @@ function Users() {
     fetchUsers();
   }, []);
 
-  const toggleSuspend = async (userId, currentStatus) => {
+  const updateUserStatus = async (userId, currentStatus) => {
     const suspended = currentStatus !== 'suspended';
-    const action = suspended ? 'suspend' : 'reinstate';
-
-    if (!window.confirm(`Are you sure you want to ${action} this user?`)) {
-      return;
-    }
-
     try {
       const adminSetUserSuspended = httpsCallable(functions, 'adminSetUserSuspended');
       const result = await adminSetUserSuspended({
@@ -127,33 +203,12 @@ function Users() {
       );
     } catch (err) {
       console.error(err);
-      window.alert(err.message || 'Failed to update the user account status.');
+      throw new Error(err.message || 'Failed to update the user account status.');
     }
   };
 
-  const handleDelete = async (user) => {
+  const deleteUser = async (user, uidConfirmation) => {
     const userLabel = user.displayName || user.username || user.email || user.id;
-
-    const confirmation = window.prompt(
-      `Permanently delete "${userLabel}"?\n\n` +
-      'This will remove the Firebase Authentication account and related ' +
-      'WiseWorkout data. This cannot be undone.\n\n' +
-      'Type DELETE to continue:'
-    );
-
-    if (confirmation !== 'DELETE') {
-      return;
-    }
-
-    const uidConfirmation = window.prompt(
-      'Final confirmation.\n\n' +
-      `Copy and paste this user UID exactly:\n${user.id}`
-    );
-
-    if (uidConfirmation !== user.id) {
-      window.alert('The UID did not match. Deletion cancelled.');
-      return;
-    }
 
     try {
       const adminDeleteUser = httpsCallable(functions, 'adminDeleteUser');
@@ -165,11 +220,10 @@ function Users() {
 
       setUsers((prev) => prev.filter((existingUser) => existingUser.id !== user.id));
       setSelectedUserId((prev) => (prev === user.id ? null : prev));
-
-      window.alert(`"${userLabel}" was permanently deleted successfully.`);
+      return `"${userLabel}" was permanently deleted successfully.`;
     } catch (err) {
       console.error(err);
-      window.alert(err.message || 'The user could not be permanently deleted.');
+      throw new Error(err.message || 'The user could not be permanently deleted.');
     }
   };
 
@@ -241,6 +295,51 @@ function Users() {
   });
 
   const selectedUser = users.find((user) => user.id === selectedUserId) || null;
+
+  const openUserView = (user) => {
+    setSelectedUserId(user.id);
+  };
+
+  const openActionModal = (type, user) => {
+    setActionState({
+      type,
+      user,
+      deleteConfirmation: '',
+      uidConfirmation: '',
+      error: '',
+      saving: false,
+    });
+  };
+
+  const closeActionModal = () => {
+    if (actionState.saving) return;
+    setActionState(emptyActionState);
+  };
+
+  const submitActionModal = async () => {
+    const { type, user } = actionState;
+    if (!type || !user) return;
+
+    setActionState((prev) => ({ ...prev, saving: true, error: '' }));
+
+    try {
+      if (type === 'suspend' || type === 'reactivate') {
+        await updateUserStatus(user.id, user.accountStatus);
+      } else if (type === 'delete') {
+        await deleteUser(user, actionState.uidConfirmation);
+        setActionState(emptyActionState);
+        return;
+      }
+
+      setActionState(emptyActionState);
+    } catch (err) {
+      setActionState((prev) => ({
+        ...prev,
+        saving: false,
+        error: err?.message || 'Action failed. Please try again.',
+      }));
+    }
+  };
 
   const handleExport = () => {
     const rows = filtered.map((user) => ({
@@ -423,6 +522,7 @@ function Users() {
               rows={filtered}
               getRowKey={(user) => user.id}
               selectedRowKey={selectedUserId}
+              onRowClick={(user) => openUserView(user)}
               minWidth={920}
               emptyTitle="No users found"
               emptyMessage={hasActiveFilters ? 'Try adjusting your search or filters.' : 'No registered accounts yet.'}
@@ -432,24 +532,37 @@ function Users() {
                   <button
                     type="button"
                     className="wwa-btn wwa-btn-sm wwa-btn-brand-soft"
-                    onClick={() => setSelectedUserId(user.id)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openUserView(user);
+                    }}
                   >
                     View
                   </button>
-                  <button
-                    type="button"
-                    className={`wwa-btn wwa-btn-sm ${user.accountStatus === 'suspended' ? 'wwa-btn-success-soft' : 'wwa-btn-danger'}`}
-                    onClick={() => toggleSuspend(user.id, user.accountStatus)}
-                  >
-                    {user.accountStatus === 'suspended' ? 'Reinstate' : 'Suspend'}
-                  </button>
-                  <button
-                    type="button"
-                    className="wwa-btn wwa-btn-sm wwa-btn-danger"
-                    onClick={() => handleDelete(user)}
-                  >
-                    Delete
-                  </button>
+                  <TableActions
+                    label={`Actions for ${user.displayName || user.username || user.email || 'user'}`}
+                    items={[
+                      {
+                        key: user.accountStatus === 'suspended' ? 'reactivate' : 'suspend',
+                        label: user.accountStatus === 'suspended' ? 'Reinstate' : 'Suspend',
+                        icon:
+                          user.accountStatus === 'suspended' ? (
+                            <ShieldCheck aria-hidden="true" size={14} strokeWidth={2} />
+                          ) : (
+                            <ShieldOff aria-hidden="true" size={14} strokeWidth={2} />
+                          ),
+                        onSelect: () => openActionModal(user.accountStatus === 'suspended' ? 'reactivate' : 'suspend', user),
+                      },
+                      { type: 'divider' },
+                      {
+                        key: 'delete',
+                        label: 'Delete',
+                        tone: 'danger',
+                        icon: <Trash2 aria-hidden="true" size={14} strokeWidth={2} />,
+                        onSelect: () => openActionModal('delete', user),
+                      },
+                    ]}
+                  />
                 </div>
               )}
             />
@@ -460,10 +573,108 @@ function Users() {
               user={selectedUser}
               onClose={() => setSelectedUserId(null)}
               onSave={handleSaveUser}
+              onSuspend={() => openActionModal('suspend', selectedUser)}
+              onReactivate={() => openActionModal('reactivate', selectedUser)}
+              onDelete={() => openActionModal('delete', selectedUser)}
             />
           ) : null}
         </div>
       )}
+
+      <ModalDialog
+        open={Boolean(actionState.type && actionState.user)}
+        title={
+          actionState.type === 'suspend'
+            ? 'Suspend User'
+            : actionState.type === 'reactivate'
+              ? 'Reactivate User'
+              : actionState.type === 'delete'
+                ? 'Delete User'
+                : 'User Action'
+        }
+        description={
+          actionState.type === 'suspend'
+            ? 'This updates the account status to suspended.'
+            : actionState.type === 'reactivate'
+              ? 'This restores the account to active status.'
+              : actionState.type === 'delete'
+                ? 'This permanently removes the Firebase Authentication account and related WiseWorkout data. This cannot be undone.'
+                : undefined
+        }
+        onClose={closeActionModal}
+        footer={
+          <>
+            <button type="button" className="wwa-btn wwa-btn-ghost" onClick={closeActionModal} disabled={actionState.saving}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className={`wwa-btn ${actionState.type === 'delete' || actionState.type === 'suspend' ? 'wwa-btn-danger' : 'wwa-btn-primary'}`}
+              onClick={submitActionModal}
+              disabled={
+                actionState.saving ||
+                (actionState.type === 'delete' &&
+                  (actionState.deleteConfirmation !== DELETE_CONFIRMATION || actionState.uidConfirmation !== actionState.user?.id))
+              }
+            >
+              {actionState.saving
+                ? actionState.type === 'delete'
+                  ? 'Deleting...'
+                  : actionState.type === 'reactivate'
+                    ? 'Reactivating...'
+                    : 'Suspending...'
+                : actionState.type === 'delete'
+                  ? 'Delete User'
+                  : actionState.type === 'reactivate'
+                    ? 'Reactivate User'
+                    : 'Suspend User'}
+            </button>
+          </>
+        }
+      >
+        {actionState.user ? (
+          <>
+            <div className="wwus-modal-copy">
+              {actionState.type === 'delete' ? (
+                <>
+                  Delete <strong>"{actionState.user.displayName || actionState.user.username || actionState.user.email || actionState.user.id}"</strong>?
+                </>
+              ) : (
+                <>
+                  {actionState.type === 'reactivate' ? 'Reactivate' : 'Suspend'}{' '}
+                  <strong>{actionState.user.displayName || actionState.user.username || actionState.user.email || actionState.user.id}</strong>
+                  {actionState.user.email ? ` (${actionState.user.email})` : ''}?
+                </>
+              )}
+            </div>
+            {actionState.type === 'delete' ? (
+              <FormSection columns={1}>
+                <FormField label="Confirmation" labelFor="user-delete-confirmation" required fullWidth>
+                  <input
+                    id="user-delete-confirmation"
+                    type="text"
+                    className="wwa-input"
+                    value={actionState.deleteConfirmation}
+                    onChange={(event) => setActionState((prev) => ({ ...prev, deleteConfirmation: event.target.value }))}
+                    placeholder={DELETE_CONFIRMATION}
+                  />
+                </FormField>
+                <FormField label="User UID" labelFor="user-delete-uid" required fullWidth>
+                  <input
+                    id="user-delete-uid"
+                    type="text"
+                    className="wwa-input"
+                    value={actionState.uidConfirmation}
+                    onChange={(event) => setActionState((prev) => ({ ...prev, uidConfirmation: event.target.value }))}
+                    placeholder={actionState.user.id}
+                  />
+                </FormField>
+              </FormSection>
+            ) : null}
+            {actionState.error ? <div className="wwa-alert-error">{actionState.error}</div> : null}
+          </>
+        ) : null}
+      </ModalDialog>
     </div>
   );
 }

@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { functions } from '../firebase';
 import { httpsCallable } from 'firebase/functions';
-import { Pencil } from 'lucide-react';
+import { Pencil, ShieldCheck, ShieldOff, Trash2 } from 'lucide-react';
 import Badge from './ui/Badge';
 import ToggleSwitch from './ui/ToggleSwitch';
 import DetailDrawer from './ui/DetailDrawer';
 import FormSection from './ui/FormSection';
 import FormField from './ui/FormField';
 import SelectField from './ui/SelectField';
+import ModalDialog from './ui/ModalDialog';
 import { formatEquipment } from '../utils/formatUtils';
 
 function UserDetailPanelStyles() {
@@ -175,7 +176,9 @@ const formatReminderTime = (hour, minute) => {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 };
 
-function UserDetailPanel({ user, onClose, onSave }) {
+const emptyPlanConfirmState = { type: null, error: '', saving: false };
+
+function UserDetailPanel({ user, onClose, onSave, onSuspend, onReactivate, onDelete }) {
   const [isEditing, setIsEditing] = useState(false);
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -189,6 +192,7 @@ function UserDetailPanel({ user, onClose, onSave }) {
   const [savingBreakMode, setSavingBreakMode] = useState(false);
   const [savingCompress, setSavingCompress] = useState(false);
   const [breakDaysInput, setBreakDaysInput] = useState(DEFAULT_BREAK_DAYS);
+  const [planConfirmState, setPlanConfirmState] = useState(emptyPlanConfirmState);
 
   useEffect(() => {
     setIsEditing(false);
@@ -196,6 +200,7 @@ function UserDetailPanel({ user, onClose, onSave }) {
     setError('');
     setSuccessMsg('');
     setBreakDaysInput(DEFAULT_BREAK_DAYS);
+    setPlanConfirmState(emptyPlanConfirmState);
   }, [userId]);
 
   useEffect(() => {
@@ -248,16 +253,11 @@ function UserDetailPanel({ user, onClose, onSave }) {
   const compressedDays = Array.isArray(planProgress?.compressedDays) ? planProgress.compressedDays : [];
   const isCurrentDayCompressed = compressedDays.includes(currentDayIndex);
 
-  const handleToggleBreakMode = async () => {
+  const runToggleBreakMode = async () => {
     if (!userId || !trackedPlanId) return;
 
     const currentlyActive = planProgress?.breakModeActive === true;
     const newActiveState = !currentlyActive;
-    const action = newActiveState ? 'start Break Mode' : 'end Break Mode';
-
-    if (!window.confirm(`Are you sure you want to ${action}?`)) {
-      return;
-    }
 
     setSavingBreakMode(true);
     setPlanActionError('');
@@ -282,17 +282,10 @@ function UserDetailPanel({ user, onClose, onSave }) {
     }
   };
 
-  const handleToggleCompress = async () => {
+  const runToggleCompress = async () => {
     if (!userId || !trackedPlanId) return;
 
     const newCompressedState = !isCurrentDayCompressed;
-    const action = newCompressedState
-      ? `compress Day ${currentDayIndex}`
-      : `restore Day ${currentDayIndex} to the full session`;
-
-    if (!window.confirm(`Are you sure you want to ${action}?`)) {
-      return;
-    }
 
     setSavingCompress(true);
     setPlanActionError('');
@@ -316,6 +309,42 @@ function UserDetailPanel({ user, onClose, onSave }) {
       setPlanActionError(err.message || 'Failed to update compress control. Please try again.');
     } finally {
       setSavingCompress(false);
+    }
+  };
+
+  const handleToggleBreakMode = () => {
+    if (!userId || !trackedPlanId) return;
+    setPlanConfirmState({ type: 'breakMode', error: '', saving: false });
+  };
+
+  const handleToggleCompress = () => {
+    if (!userId || !trackedPlanId) return;
+    setPlanConfirmState({ type: 'compress', error: '', saving: false });
+  };
+
+  const closePlanConfirmModal = () => {
+    if (planConfirmState.saving) return;
+    setPlanConfirmState(emptyPlanConfirmState);
+  };
+
+  const submitPlanConfirmModal = async () => {
+    setPlanConfirmState((prev) => ({ ...prev, saving: true, error: '' }));
+
+    try {
+      if (planConfirmState.type === 'breakMode') {
+        await runToggleBreakMode();
+      } else if (planConfirmState.type === 'compress') {
+        await runToggleCompress();
+      }
+
+      setPlanConfirmState(emptyPlanConfirmState);
+    } catch (err) {
+      console.error(err);
+      setPlanConfirmState((prev) => ({
+        ...prev,
+        saving: false,
+        error: err?.message || 'Failed to apply the plan change.',
+      }));
     }
   };
 
@@ -416,6 +445,9 @@ function UserDetailPanel({ user, onClose, onSave }) {
   const initial = (initialSource || '?').trim().charAt(0).toUpperCase();
   const savedPlansCount = Array.isArray(user.savedPlanIds) ? user.savedPlanIds.length : undefined;
   const equipmentLabel = formatEquipment(user.planMatchEquipment);
+  const canSuspend = user.accountStatus !== 'suspended' && typeof onSuspend === 'function';
+  const canReactivate = user.accountStatus === 'suspended' && typeof onReactivate === 'function';
+  const canDelete = typeof onDelete === 'function';
 
   const summary = (
     <div className="wwudp-summary">
@@ -443,10 +475,30 @@ function UserDetailPanel({ user, onClose, onSave }) {
         viewportLocked
         actions={
           !isEditing ? (
-            <button type="button" className="wwa-btn wwa-btn-secondary" onClick={startEdit}>
-              <Pencil aria-hidden="true" size={16} strokeWidth={2} />
-              Edit
-            </button>
+            <>
+              {canSuspend ? (
+                <button type="button" className="wwa-btn wwa-btn-danger" onClick={onSuspend}>
+                  <ShieldOff aria-hidden="true" size={16} strokeWidth={2} />
+                  Suspend
+                </button>
+              ) : null}
+              {canReactivate ? (
+                <button type="button" className="wwa-btn wwa-btn-primary" onClick={onReactivate}>
+                  <ShieldCheck aria-hidden="true" size={16} strokeWidth={2} />
+                  Reinstate
+                </button>
+              ) : null}
+              {canDelete ? (
+                <button type="button" className="wwa-btn wwa-btn-danger" onClick={onDelete}>
+                  <Trash2 aria-hidden="true" size={16} strokeWidth={2} />
+                  Delete
+                </button>
+              ) : null}
+              <button type="button" className="wwa-btn wwa-btn-secondary" onClick={startEdit}>
+                <Pencil aria-hidden="true" size={16} strokeWidth={2} />
+                Edit
+              </button>
+            </>
           ) : null
         }
         summary={summary}
@@ -811,6 +863,35 @@ function UserDetailPanel({ user, onClose, onSave }) {
           </>
         )}
       </DetailDrawer>
+
+      <ModalDialog
+        open={Boolean(planConfirmState.type)}
+        title={planConfirmState.type === 'breakMode' ? 'Break Mode' : 'Compress Control'}
+        description={
+          planConfirmState.type === 'breakMode'
+            ? planProgress?.breakModeActive
+              ? 'This will end Break Mode for the tracked plan immediately.'
+              : 'This will start Break Mode for the tracked plan using the selected duration.'
+            : planConfirmState.type === 'compress'
+              ? isCurrentDayCompressed
+                ? `This will restore Day ${currentDayIndex} to the full session.`
+                : `This will compress Day ${currentDayIndex} of the tracked plan.`
+              : undefined
+        }
+        onClose={closePlanConfirmModal}
+        footer={
+          <>
+            <button type="button" className="wwa-btn wwa-btn-ghost" onClick={closePlanConfirmModal} disabled={planConfirmState.saving}>
+              Cancel
+            </button>
+            <button type="button" className="wwa-btn wwa-btn-primary" onClick={submitPlanConfirmModal} disabled={planConfirmState.saving}>
+              {planConfirmState.saving ? 'Saving...' : 'Confirm'}
+            </button>
+          </>
+        }
+      >
+        {planConfirmState.error ? <div className="wwa-alert-error">{planConfirmState.error}</div> : null}
+      </ModalDialog>
     </>
   );
 }
