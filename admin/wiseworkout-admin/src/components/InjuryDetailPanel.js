@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import DetailDrawer from './ui/DetailDrawer';
 import FormSection from './ui/FormSection';
 import FormField from './ui/FormField';
+import { getCallableErrorMessage } from '../utils/planUtils';
 
 function InjuryDetailStyles() {
   return (
@@ -47,6 +48,12 @@ function InjuryDetailStyles() {
         color: var(--ww-text);
         line-height: 1.6;
       }
+      .wwid-readonly-note {
+        margin-top: -4px;
+        font-size: var(--ww-type-secondary-size);
+        color: var(--ww-text-sec);
+        line-height: 1.5;
+      }
     `}</style>
   );
 }
@@ -62,7 +69,14 @@ function DetailRow({ label, value, multiline = false }) {
   );
 }
 
-function InjuryDetailPanel({ injury, startInEdit, onClose, onSave }) {
+function formatMeta(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+function InjuryDetailPanel({ injury, startInEdit, onClose, onSave, onEdit, onDelete }) {
   const [isEditing, setIsEditing] = useState(false);
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -82,8 +96,6 @@ function InjuryDetailPanel({ injury, startInEdit, onClose, onSave }) {
 
     if (startInEdit) {
       setForm({
-        name: injury.name || '',
-        bodyPart: injury.bodyPart || '',
         description: injury.description || '',
       });
       setIsEditing(true);
@@ -102,22 +114,16 @@ function InjuryDetailPanel({ injury, startInEdit, onClose, onSave }) {
   };
 
   const handleSave = async () => {
-    if (!form.name.trim()) {
-      setError('Name is required.');
-      return;
-    }
-    if (!form.bodyPart.trim()) {
-      setError('Body Part is required.');
-      return;
-    }
     if (!form.description.trim()) {
       setError('Description is required.');
       return;
     }
+    if (form.description.trim().length > 500) {
+      setError('Description cannot exceed 500 characters.');
+      return;
+    }
 
     const changes = {};
-    if (form.name.trim() !== (injury.name || '')) changes.name = form.name.trim();
-    if (form.bodyPart.trim() !== (injury.bodyPart || '')) changes.bodyPart = form.bodyPart.trim();
     if (form.description.trim() !== (injury.description || '')) changes.description = form.description.trim();
 
     if (Object.keys(changes).length === 0) {
@@ -137,7 +143,7 @@ function InjuryDetailPanel({ injury, startInEdit, onClose, onSave }) {
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error(err);
-      setError('Failed to update injury category. Please try again.');
+      setError(getCallableErrorMessage(err, 'Failed to update injury category. Please try again.'));
     }
 
     setSaving(false);
@@ -157,6 +163,13 @@ function InjuryDetailPanel({ injury, startInEdit, onClose, onSave }) {
         title="Injury"
         open={Boolean(injury)}
         onClose={onClose}
+        actions={
+          !isEditing && onEdit ? (
+            <button type="button" className="wwa-btn wwa-btn-secondary wwa-btn-sm" onClick={() => onEdit(injury)}>
+              Edit
+            </button>
+          ) : null
+        }
         summary={summary}
         footer={
           isEditing ? (
@@ -168,6 +181,10 @@ function InjuryDetailPanel({ injury, startInEdit, onClose, onSave }) {
                 {saving ? 'Saving...' : 'Save Changes'}
               </button>
             </div>
+          ) : onDelete ? (
+            <button type="button" className="wwa-btn wwa-btn-danger" onClick={() => onDelete(injury)}>
+              Delete
+            </button>
           ) : null
         }
       >
@@ -186,25 +203,29 @@ function InjuryDetailPanel({ injury, startInEdit, onClose, onSave }) {
         {isEditing ? (
           <div className="wwid-form">
             <FormSection title="Injury Details" columns={2}>
-              <FormField label="Name" labelFor="edit-injury-name" required>
+              <FormField label="Name" labelFor="edit-injury-name">
                 <input
                   id="edit-injury-name"
                   className="wwa-input"
-                  value={form.name}
-                  onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
-                  placeholder="e.g. Lower Back"
+                  value={injury.name || ''}
+                  disabled
+                  readOnly
                 />
               </FormField>
 
-              <FormField label="Body Part" labelFor="edit-injury-body-part" required>
+              <FormField label="Body Part" labelFor="edit-injury-body-part">
                 <input
                   id="edit-injury-body-part"
                   className="wwa-input"
-                  value={form.bodyPart}
-                  onChange={(event) => setForm((prev) => ({ ...prev, bodyPart: event.target.value }))}
-                  placeholder="e.g. Lower Back"
+                  value={injury.bodyPart || ''}
+                  disabled
+                  readOnly
                 />
               </FormField>
+
+              <div className="wwid-readonly-note">
+                Name and body part cannot be changed after creation because exercises and user injury records reference this category.
+              </div>
 
               <FormField label="Description" labelFor="edit-injury-description" required fullWidth>
                 <input
@@ -218,11 +239,22 @@ function InjuryDetailPanel({ injury, startInEdit, onClose, onSave }) {
             </FormSection>
           </div>
         ) : (
-          <section className="wwa-detail-section">
-            <div className="wwa-detail-section__title">Details</div>
-            <DetailRow label="Body Part" value={injury.bodyPart || '—'} />
-            <DetailRow label="Description" value={injury.description || '—'} multiline />
-          </section>
+          <>
+            <section className="wwa-detail-section">
+              <div className="wwa-detail-section__title">Details</div>
+              <DetailRow label="Name" value={injury.name || '—'} />
+              <DetailRow label="Body Part" value={injury.bodyPart || '—'} />
+              <DetailRow label="Description" value={injury.description || '—'} multiline />
+            </section>
+
+            {(injury.createdAt || injury.updatedAt) ? (
+              <section className="wwa-detail-section">
+                <div className="wwa-detail-section__title">Metadata</div>
+                <DetailRow label="Created" value={formatMeta(injury.createdAt)} />
+                <DetailRow label="Updated" value={formatMeta(injury.updatedAt)} />
+              </section>
+            ) : null}
+          </>
         )}
       </DetailDrawer>
     </>

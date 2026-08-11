@@ -106,6 +106,10 @@ class _ClubScreenState extends State<ClubScreen> {
     letterSpacing: 0.2,
   );
 
+  List<Map<String, dynamic>> _visiblePosts(List<Map<String, dynamic>> posts) {
+    return posts.where((post) => post['isHidden'] != true).toList(growable: false);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -852,7 +856,7 @@ class _ClubScreenState extends State<ClubScreen> {
           );
         }
 
-        final posts = snapshot.data ?? [];
+        final posts = _visiblePosts(snapshot.data ?? []);
         if (posts.isEmpty) {
           return Center(
             child: Padding(

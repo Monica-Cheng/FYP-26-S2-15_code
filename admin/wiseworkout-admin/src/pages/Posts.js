@@ -92,9 +92,71 @@ function PostsStyles() {
         color: var(--ww-text-sec);
         line-height: 1.55;
       }
+      .wwa-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1200;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(15, 23, 42, 0.58);
+        backdrop-filter: blur(2px);
+      }
+      .wwa-modal__panel {
+        width: min(100%, 560px);
+        max-height: calc(100vh - 48px);
+        overflow: auto;
+        background: var(--ww-card);
+        border: 1px solid var(--ww-divider);
+        border-radius: 20px;
+        box-shadow: var(--ww-shadow-lg);
+      }
+      .wwa-modal__header,
+      .wwa-modal__footer {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--ww-divider);
+      }
+      .wwa-modal__footer {
+        align-items: center;
+        justify-content: flex-end;
+        border-top: 1px solid var(--ww-divider);
+        border-bottom: 0;
+        flex-wrap: wrap;
+      }
+      .wwa-modal__header-main {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .wwa-modal__title {
+        margin: 0;
+        font-size: var(--ww-type-card-title-size);
+        font-weight: var(--ww-type-card-title-weight);
+        color: var(--ww-primary-dark);
+      }
+      .wwa-modal__description {
+        margin: 0;
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text-sec);
+        line-height: 1.55;
+      }
+      .wwa-modal__body {
+        padding: 20px;
+      }
       @media (max-width: 1160px) {
         .wwpo-layout.has-detail {
           grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      @media (max-width: 720px) {
+        .wwa-modal {
+          padding: 12px;
         }
       }
     `}</style>
@@ -182,6 +244,8 @@ function Posts() {
   };
 
   const openModerationModal = (postId, nextHidden) => {
+    setDeletePostId(null);
+    setDeleteConfirmation('');
     setModerationTarget({ postId, nextHidden });
     setActionError('');
   };
@@ -192,6 +256,7 @@ function Posts() {
   };
 
   const openDeleteModal = (postId) => {
+    setModerationTarget(null);
     setDeletePostId(postId);
     setDeleteConfirmation('');
     setActionError('');

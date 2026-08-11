@@ -6,14 +6,32 @@ import AdminStyles from '../styles/AdminStyles';
 import PageHeader from '../components/ui/PageHeader';
 import InjuryDetailPanel from '../components/InjuryDetailPanel';
 import DataTable from '../components/ui/DataTable';
+import TableActions from '../components/ui/TableActions';
+import ModalDialog from '../components/ui/ModalDialog';
 import FilterBar from '../components/ui/FilterBar';
 import SearchInput from '../components/ui/SearchInput';
 import FormSection from '../components/ui/FormSection';
 import FormField from '../components/ui/FormField';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
+import { getCallableErrorMessage } from '../utils/planUtils';
 
 const emptyForm = { name: '', bodyPart: '', description: '' };
+const DELETE_CONFIRMATION = 'DELETE INJURY';
+
+function validateCategoryForm(form) {
+  const name = (form.name || '').trim();
+  const bodyPart = (form.bodyPart || '').trim();
+  const description = (form.description || '').trim();
+
+  if (!name) return 'Name is required.';
+  if (!bodyPart) return 'Body Part is required.';
+  if (!description) return 'Description is required.';
+  if (name.length > 100) return 'Name cannot exceed 100 characters.';
+  if (bodyPart.length > 100) return 'Body Part cannot exceed 100 characters.';
+  if (description.length > 500) return 'Description cannot exceed 500 characters.';
+  return '';
+}
 
 function InjuriesStyles() {
   return (
@@ -67,9 +85,79 @@ function InjuriesStyles() {
         gap: 8px;
         white-space: nowrap;
       }
+      .wwin-modal-copy {
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text);
+        line-height: 1.6;
+      }
+      .wwin-modal-copy strong {
+        color: var(--ww-primary-dark);
+      }
+      .wwa-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1200;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(15, 23, 42, 0.58);
+        backdrop-filter: blur(2px);
+      }
+      .wwa-modal__panel {
+        width: min(100%, 560px);
+        max-height: calc(100vh - 48px);
+        overflow: auto;
+        background: var(--ww-card);
+        border: 1px solid var(--ww-divider);
+        border-radius: 20px;
+        box-shadow: var(--ww-shadow-lg);
+      }
+      .wwa-modal__header,
+      .wwa-modal__footer {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--ww-divider);
+      }
+      .wwa-modal__footer {
+        align-items: center;
+        justify-content: flex-end;
+        border-top: 1px solid var(--ww-divider);
+        border-bottom: 0;
+        flex-wrap: wrap;
+      }
+      .wwa-modal__header-main {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .wwa-modal__title {
+        margin: 0;
+        font-size: var(--ww-type-card-title-size);
+        font-weight: var(--ww-type-card-title-weight);
+        color: var(--ww-primary-dark);
+      }
+      .wwa-modal__description {
+        margin: 0;
+        font-size: var(--ww-type-body-size);
+        color: var(--ww-text-sec);
+        line-height: 1.55;
+      }
+      .wwa-modal__body {
+        padding: 20px;
+      }
       @media (max-width: 1120px) {
         .wwin-layout.has-detail {
           grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      @media (max-width: 720px) {
+        .wwa-modal {
+          padding: 12px;
         }
       }
     `}</style>
@@ -89,6 +177,10 @@ function Injuries() {
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [deleteState, setDeleteState] = useState({ open: false, injuryId: null, blocked: false, usageCount: 0 });
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [deleteError, setDeleteError] = useState('');
+  const [deleteSaving, setDeleteSaving] = useState(false);
 
   const fetchData = async () => {
     setLoading(true);
@@ -102,9 +194,7 @@ function Injuries() {
       setExercises(Array.isArray(data.exercises) ? data.exercises : []);
     } catch (err) {
       console.error('Failed to load injuries dashboard:', err);
-      const detail = err?.code ? ` (${err.code})` : '';
-      setLoadError(`Failed to load injuries dashboard.${detail}`);
-      window.alert(`Failed to load injuries dashboard.${detail}`);
+      setLoadError(getCallableErrorMessage(err, 'Failed to load injuries dashboard.'));
     } finally {
       setLoading(false);
     }
@@ -115,24 +205,45 @@ function Injuries() {
   }, []);
 
   const countExercisesUsingInjury = (injuryName) => {
-    const lower = (injuryName || '').toLowerCase();
+    const lower = (injuryName || '').trim().toLowerCase();
     return exercises.filter((exercise) =>
       Array.isArray(exercise.injuryRisk) &&
-      exercise.injuryRisk.some((risk) => (risk || '').toLowerCase() === lower)
+      exercise.injuryRisk.some((risk) => (risk || '').trim().toLowerCase() === lower)
     ).length;
   };
 
+  const openDeleteDialog = (injury) => {
+    const usageCount = countExercisesUsingInjury(injury.name);
+    setDeleteState({
+      open: true,
+      injuryId: injury.id,
+      blocked: usageCount > 0,
+      usageCount,
+    });
+    setDeleteConfirmation('');
+    setDeleteError('');
+  };
+
+  const closeDeleteDialog = () => {
+    if (deleteSaving) return;
+    setDeleteState({ open: false, injuryId: null, blocked: false, usageCount: 0 });
+    setDeleteConfirmation('');
+    setDeleteError('');
+  };
+
+  const openView = (injury, edit = false) => {
+    setShowAddForm(false);
+    setAddError('');
+    setSelectedInjuryId(injury.id);
+    setOpenInEdit(edit);
+  };
+
+  const openEdit = (injury) => openView(injury, true);
+
   const handleAddInjury = async () => {
-    if (!addForm.name.trim()) {
-      setAddError('Name is required.');
-      return;
-    }
-    if (!addForm.bodyPart.trim()) {
-      setAddError('Body Part is required.');
-      return;
-    }
-    if (!addForm.description.trim()) {
-      setAddError('Description is required.');
+    const validationError = validateCategoryForm(addForm);
+    if (validationError) {
+      setAddError(validationError);
       return;
     }
 
@@ -165,8 +276,7 @@ function Injuries() {
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err) {
       console.error('Failed to add injury category:', err);
-      const detail = err?.code ? ` (${err.code})` : '';
-      setAddError(`Failed to add injury category. Please try again.${detail}`);
+      setAddError(getCallableErrorMessage(err, 'Failed to add injury category. Please try again.'));
     } finally {
       setAddSaving(false);
     }
@@ -189,37 +299,32 @@ function Injuries() {
     );
   };
 
-  const handleDeleteInjury = async (injuryId) => {
-    const injury = injuries.find((item) => item.id === injuryId);
-    if (!injury) return;
+  const handleDeleteInjury = async () => {
+    const injury = injuries.find((item) => item.id === deleteState.injuryId);
+    if (!injury || deleteState.blocked) return;
 
-    const usageCount = countExercisesUsingInjury(injury.name);
-    if (usageCount > 0) {
-      window.alert(
-        `"${injury.name}" is currently used by ` +
-        `${usageCount} exercise${usageCount === 1 ? '' : 's'}. ` +
-        'Remove this injury risk from those exercises before deleting the category.'
-      );
-      return;
+    setDeleteSaving(true);
+    setDeleteError('');
+
+    try {
+      const adminDeleteInjuryCategory = httpsCallable(functions, 'adminDeleteInjuryCategory');
+      await adminDeleteInjuryCategory({
+        categoryId: injury.id,
+        confirmation: deleteConfirmation,
+      });
+
+      setInjuries((prev) => prev.filter((item) => item.id !== injury.id));
+      setSelectedInjuryId((prev) => (prev === injury.id ? null : prev));
+      setDeleteSaving(false);
+      closeDeleteDialog();
+      setSuccessMsg('Injury category deleted successfully');
+      setTimeout(() => setSuccessMsg(''), 3000);
+    } catch (err) {
+      console.error('Failed to delete injury category:', err);
+      setDeleteError(getCallableErrorMessage(err, 'Failed to delete injury category. Please try again.'));
+    } finally {
+      setDeleteSaving(false);
     }
-
-    const confirmation = window.prompt(
-      `Permanently delete "${injury.name}"?\n\n` +
-      'Type DELETE INJURY exactly to continue:'
-    );
-
-    if (confirmation !== 'DELETE INJURY') return;
-
-    const adminDeleteInjuryCategory = httpsCallable(functions, 'adminDeleteInjuryCategory');
-    await adminDeleteInjuryCategory({
-      categoryId: injuryId,
-      confirmation,
-    });
-
-    setInjuries((prev) => prev.filter((item) => item.id !== injuryId));
-    setSelectedInjuryId((prev) => (prev === injuryId ? null : prev));
-    setSuccessMsg('Injury category deleted successfully');
-    setTimeout(() => setSuccessMsg(''), 3000);
   };
 
   const filtered = injuries.filter((injury) => {
@@ -232,6 +337,7 @@ function Injuries() {
   });
 
   const selectedInjury = injuries.find((injury) => injury.id === selectedInjuryId) || null;
+  const deleteInjury = injuries.find((injury) => injury.id === deleteState.injuryId) || null;
 
   const columns = [
     {
@@ -373,6 +479,7 @@ function Injuries() {
                 rows={filtered}
                 getRowKey={(injury) => injury.id}
                 selectedRowKey={selectedInjuryId}
+                onRowClick={(injury) => openView(injury)}
                 minWidth={760}
                 emptyIcon={null}
                 emptyTitle="No injury categories found"
@@ -382,40 +489,31 @@ function Injuries() {
                     <button
                       type="button"
                       className="wwa-btn wwa-btn-sm wwa-btn-brand-soft"
-                      onClick={() => {
-                        setShowAddForm(false);
-                        setAddError('');
-                        setSelectedInjuryId(injury.id);
-                        setOpenInEdit(false);
-                      }}
+                      onClick={() => openView(injury)}
                       aria-label={`View ${injury.name || 'injury'}`}
                     >
                       <Eye aria-hidden="true" size={14} strokeWidth={2} />
                       View
                     </button>
-                    <button
-                      type="button"
-                      className="wwa-btn wwa-btn-sm wwa-btn-secondary"
-                      onClick={() => {
-                        setShowAddForm(false);
-                        setAddError('');
-                        setSelectedInjuryId(injury.id);
-                        setOpenInEdit(true);
-                      }}
-                      aria-label={`Edit ${injury.name || 'injury'}`}
-                    >
-                      <Pencil aria-hidden="true" size={14} strokeWidth={2} />
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      className="wwa-btn wwa-btn-sm wwa-btn-danger"
-                      onClick={() => handleDeleteInjury(injury.id)}
-                      aria-label={`Delete ${injury.name || 'injury'}`}
-                    >
-                      <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
-                      Delete
-                    </button>
+                    <TableActions
+                      label={`Actions for ${injury.name || 'injury'}`}
+                      items={[
+                        {
+                          key: 'edit',
+                          label: 'Edit',
+                          icon: <Pencil aria-hidden="true" size={14} strokeWidth={2} />,
+                          onSelect: () => openEdit(injury),
+                        },
+                        { type: 'divider' },
+                        {
+                          key: 'delete',
+                          label: 'Delete',
+                          tone: 'danger',
+                          icon: <Trash2 aria-hidden="true" size={14} strokeWidth={2} />,
+                          onSelect: () => openDeleteDialog(injury),
+                        },
+                      ]}
+                    />
                   </div>
                 )}
               />
@@ -427,11 +525,70 @@ function Injuries() {
                 startInEdit={openInEdit}
                 onClose={() => setSelectedInjuryId(null)}
                 onSave={handleSaveInjury}
+                onEdit={openEdit}
+                onDelete={openDeleteDialog}
               />
             ) : null}
           </div>
         </>
       )}
+
+      <ModalDialog
+        open={deleteState.open}
+        title={deleteState.blocked ? 'Cannot Delete Injury Category' : 'Delete Injury Category'}
+        description={
+          deleteState.blocked
+            ? undefined
+            : 'This permanently removes the category from the injury library. Historical user injury entries may remain.'
+        }
+        onClose={closeDeleteDialog}
+        footer={
+          deleteState.blocked ? (
+            <button type="button" className="wwa-btn wwa-btn-primary" onClick={closeDeleteDialog}>
+              Close
+            </button>
+          ) : (
+            <>
+              <button type="button" className="wwa-btn wwa-btn-ghost" onClick={closeDeleteDialog} disabled={deleteSaving}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="wwa-btn wwa-btn-danger"
+                onClick={handleDeleteInjury}
+                disabled={deleteSaving || deleteConfirmation !== DELETE_CONFIRMATION}
+              >
+                {deleteSaving ? 'Deleting...' : 'Delete Injury Category'}
+              </button>
+            </>
+          )
+        }
+      >
+        {deleteState.blocked ? (
+          <div className="wwin-modal-copy">
+            This category is currently referenced by <strong>{deleteState.usageCount}</strong> exercise{deleteState.usageCount === 1 ? '' : 's'}. Remove the injury-risk references from those exercises before deleting the category.
+          </div>
+        ) : (
+          <>
+            <div className="wwin-modal-copy">
+              Delete <strong>"{deleteInjury?.name || 'this category'}"</strong>?
+            </div>
+            <FormSection columns={1}>
+              <FormField label="Confirmation" labelFor="injury-delete-confirmation" required fullWidth>
+                <input
+                  id="injury-delete-confirmation"
+                  type="text"
+                  className="wwa-input"
+                  value={deleteConfirmation}
+                  onChange={(event) => setDeleteConfirmation(event.target.value)}
+                  placeholder={DELETE_CONFIRMATION}
+                />
+              </FormField>
+            </FormSection>
+            {deleteError ? <div className="wwa-alert-error">{deleteError}</div> : null}
+          </>
+        )}
+      </ModalDialog>
     </div>
   );
 }

@@ -623,6 +623,10 @@ _isLoading
     return '$n';
   }
 
+  List<Map<String, dynamic>> _visiblePosts(List<Map<String, dynamic>> posts) {
+    return posts.where((post) => post['isHidden'] != true).toList(growable: false);
+  }
+
   // ── Posts section ────────────────────────────────────────────────────────
 
   Widget _buildPostsSection(String currentUid) {
@@ -663,7 +667,7 @@ _isLoading
                 );
               }
 
-              final posts = snapshot.data ?? [];
+              final posts = _visiblePosts(snapshot.data ?? []);
               if (posts.isEmpty) {
                 return const Padding(
                   padding: EdgeInsets.symmetric(vertical: 32),

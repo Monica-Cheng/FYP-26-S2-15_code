@@ -1614,16 +1614,20 @@ class FirestoreService {
     if (userInjuries.isEmpty) return null;
     final injuryRisk =
         (exercise['injuryRisk'] as List<dynamic>?)
-            ?.map((e) => e.toString().toLowerCase())
+            ?.map((e) => e.toString().trim().toLowerCase())
+            .where((value) => value.isNotEmpty)
             .toList() ??
         [];
     if (injuryRisk.isEmpty) return null;
     for (final injury in userInjuries) {
-      final bodyPart =
-          (injury['bodyPart'] as String? ?? '')
+      final injuryName =
+          (injury['name'] as String? ?? '')
+              .trim()
               .toLowerCase();
-      if (injuryRisk.contains(bodyPart)) {
-        return injury['name'] as String?;
+      if (injuryName.isEmpty) continue;
+      if (injuryRisk.contains(injuryName)) {
+        final rawName = (injury['name'] as String? ?? '').trim();
+        return rawName.isNotEmpty ? rawName : null;
       }
     }
     return null;

@@ -2853,6 +2853,19 @@ exports.adminUpdateInjuryCategory = onCall(async (request) => {
     );
   }
 
+  const attemptedIdentityFieldChange = ["name", "bodyPart"].find((field) =>
+    Object.prototype.hasOwnProperty.call(requestedChanges, field),
+  );
+
+  if (attemptedIdentityFieldChange) {
+    throw new HttpsError(
+        "failed-precondition",
+        "Injury category name and body part cannot be changed after " +
+        "creation because exercises and user injury records reference " +
+        "this category.",
+    );
+  }
+
   const categoryRef =
     db.collection("injuryCategories").doc(categoryId);
 
@@ -2868,50 +2881,13 @@ exports.adminUpdateInjuryCategory = onCall(async (request) => {
   const existing = categorySnapshot.data() || {};
 
   const mergedCategory = normalizeInjuryCategoryInput({
-    name:
-      requestedChanges.name !== undefined ?
-        requestedChanges.name :
-        existing.name,
-    bodyPart:
-      requestedChanges.bodyPart !== undefined ?
-        requestedChanges.bodyPart :
-        existing.bodyPart,
+    name: existing.name,
+    bodyPart: existing.bodyPart,
     description:
       requestedChanges.description !== undefined ?
         requestedChanges.description :
         existing.description,
   });
-
-  const oldName =
-    typeof existing.name === "string" ?
-      existing.name.trim() :
-      "";
-
-  const nameChanged =
-    mergedCategory.name.toLowerCase() !== oldName.toLowerCase();
-
-  if (nameChanged) {
-    await ensureUniqueInjuryCategoryName(
-        mergedCategory.name,
-        categoryId,
-    );
-
-    const exercisesSnapshot =
-      await db.collection("exercises").get();
-
-    const usageCount = exercisesSnapshot.docs.filter((exerciseDoc) =>
-      exerciseUsesInjuryName(exerciseDoc.data(), oldName)
-    ).length;
-
-    if (usageCount > 0) {
-      throw new HttpsError(
-          "failed-precondition",
-          `"${oldName}" is used by ${usageCount} exercise` +
-          `${usageCount === 1 ? "" : "s"}. Update those exercises ` +
-          "before renaming this category.",
-      );
-    }
-  }
 
   await categoryRef.update({
     ...mergedCategory,

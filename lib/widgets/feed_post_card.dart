@@ -160,6 +160,10 @@ class FeedPostCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (post['isHidden'] == true) {
+      return const SizedBox.shrink();
+    }
+
     final postId = post['id'] as String;
     final authorName = (post['authorName'] as String?) ?? 'Someone';
     final authorInitial = (post['authorInitial'] as String?) ?? '?';
