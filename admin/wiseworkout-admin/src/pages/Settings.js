@@ -501,7 +501,6 @@ function Settings() {
       <PageHeader
         title="Settings"
         subtitle="Configure platform rules and gamification"
-        actions={renderPageActions()}
       />
 
       <div className="wwa-settings-sticky-actions">
