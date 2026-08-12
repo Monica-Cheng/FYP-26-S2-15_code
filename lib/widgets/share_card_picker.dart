@@ -14,7 +14,18 @@ import '../core/share_card_gradients.dart';
 
 class ShareCardOption {
   final String label;
-  final WidgetBuilder builder;
+  // Takes the CURRENTLY selected gradient colors as an explicit
+  // parameter, supplied fresh by the picker sheet on every rebuild —
+  // NOT a plain WidgetBuilder(BuildContext) anymore. That used to let a
+  // caller bake a gradient List<Color> into the closure once, at the
+  // moment the ShareCardOption list was constructed (before the sheet
+  // even opened); tapping a swatch updated the caller's own field but
+  // never rebuilt this already-captured closure, so neither the on-
+  // screen preview nor the final captured/shared image ever reflected a
+  // later swatch tap — both kept reading the stale snapshot. Only the
+  // colored-background card actually uses this parameter; every other
+  // card type ignores it.
+  final Widget Function(BuildContext context, List<Color> gradientColors) builder;
   // True only for the colored-background card — gates the gradient swatch
   // row below the preview so it only shows up on the page it applies to.
   final bool supportsColorPicker;
@@ -132,7 +143,10 @@ class _ShareCardPickerSheetState extends State<_ShareCardPickerSheet> {
                       borderRadius: BorderRadius.circular(20),
                       child: FittedBox(
                         fit: BoxFit.contain,
-                        child: widget.cards[i].builder(context),
+                        child: widget.cards[i].builder(
+                          context,
+                          ShareCardGradients.presets[_gradientIndex].colors,
+                        ),
                       ),
                     ),
                   ),
@@ -202,6 +216,8 @@ class _ShareCardPickerSheetState extends State<_ShareCardPickerSheet> {
         final selected = i == _gradientIndex;
         return GestureDetector(
           onTap: () {
+            debugPrint('[ShareCardPicker] swatch tapped: index=$i '
+                'colors=${preset.colors}');
             widget.onGradientChanged?.call(preset.colors);
             setState(() => _gradientIndex = i);
           },
