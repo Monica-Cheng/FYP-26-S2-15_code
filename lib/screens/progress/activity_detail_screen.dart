@@ -12,6 +12,8 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/share_card_gradients.dart';
+import '../../services/auth_service.dart';
+import '../../services/firestore_service.dart';
 import '../../utils/image_encode.dart';
 import '../../utils/widget_capture.dart';
 import '../../widgets/photo_background_share_card.dart';
@@ -32,9 +34,13 @@ class ActivityDetailScreen extends StatefulWidget {
 }
 
 class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
+  final _authService = AuthService();
+  final _firestoreService = FirestoreService();
+
   bool _exercisesExpanded = true;
   bool _wiseCoachExpanded = false;
   bool _deleteDialogOpen = false;
+  bool _isDeleting = false;
   // Share flow state — same shape as post_session_summary_screen.dart's
   // own _isSharing/_selectedGradientColors, reused via
   // buildSessionShareCardOptions() (lib/widgets/session_share_cards.dart)
@@ -359,6 +365,51 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
     } finally {
       if (mounted) setState(() => _isSharing = false);
     }
+  }
+
+  // Deletes the current manually-logged activity (_isManual-gated by the
+  // caller — see _buildDeleteDialog()). No XP/streak/leaderboard reversal:
+  // manual activities never contributed to any of those, confirmed by a
+  // prior investigation. Mirrors plan_detail_screen.dart's
+  // _handleDeleteCustomPlan(): try/catch around the delete call itself,
+  // snackbar, a 600ms delay before popping (popping immediately after
+  // showSnackBar() tears the route down before the SnackBar ever renders —
+  // same precedent build_routine_screen.dart's _saveRoutine() documents),
+  // then pop back to the Activities tab. On failure, stays put with an
+  // error snackbar so the user can retry.
+  Future<void> _deleteActivity() async {
+    if (_isDeleting) return;
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    final sessionId = _session['id'] as String?;
+    if (sessionId == null) return;
+
+    setState(() => _isDeleting = true);
+    try {
+      await _firestoreService.deleteSession(uid, sessionId);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isDeleting = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not delete: $e'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Activity deleted.'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (!mounted) return;
+    context.pop();
   }
 
   // Zero-new-dependency substitute for a VisibilityDetector package (not
@@ -1720,12 +1771,7 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
                     GestureDetector(
                       onTap: () {
                         setState(() => _deleteDialogOpen = false);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Delete coming soon'),
-                            behavior: SnackBarBehavior.floating,
-                          ),
-                        );
+                        _deleteActivity();
                       },
                       child: Container(
                         width: double.infinity,

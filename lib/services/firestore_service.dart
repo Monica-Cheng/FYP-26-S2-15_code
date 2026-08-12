@@ -981,6 +981,22 @@ class FirestoreService {
   }
 
   // ---------------------------------------------------------------------------
+  // Deletes a single session doc at users/{uid}/sessions/{sessionId}.
+  // Firestore rules already restrict this to the owning user. Used by
+  // activity_detail_screen.dart to delete manually-logged activities —
+  // deliberately no XP/streak/leaderboard reversal here, since manual
+  // activities never contributed to any of those in the first place.
+  // ---------------------------------------------------------------------------
+  Future<void> deleteSession(String uid, String sessionId) async {
+    await _db
+        .collection(Collections.users)
+        .doc(uid)
+        .collection(Collections.sessions)
+        .doc(sessionId)
+        .delete();
+  }
+
+  // ---------------------------------------------------------------------------
   // Returns lifetime totals across all sessions for users/{uid}: session
   // count, summed gym volume (kg) — both used by the Profile stats row —
   // and totalDistanceMeters, added for badge conditions (see
@@ -2940,6 +2956,11 @@ class FirestoreService {
     // a cardio session either. Matches gym_session_screen.dart's standalone
     // finish flow, which calls both right after its own session write.
     await addXpToUser(uid, xpEarned);
+    await saveXpEvent(uid, {
+      'amount': xpEarned,
+      'reason': 'Completed $sessionName',
+      'type': 'cardio',
+    });
     final newlyEarnedBadges = await checkAndAwardBadges(uid);
     return (sessionId: ref.id, newlyEarnedBadges: newlyEarnedBadges);
   }
@@ -3668,6 +3689,11 @@ class FirestoreService {
     // either. Matches gym_session_screen.dart's standalone finish flow,
     // which calls both right after its own session write.
     await addXpToUser(uid, xpEarned);
+    await saveXpEvent(uid, {
+      'amount': xpEarned,
+      'reason': 'Completed $sessionName',
+      'type': type,
+    });
     final newlyEarnedBadges = await checkAndAwardBadges(uid);
     return (sessionId: ref.id, newlyEarnedBadges: newlyEarnedBadges);
   }

@@ -157,6 +157,22 @@ class _ProgressScreenState extends State<ProgressScreen> {
   bool _checkInsLoading = true;
   Stream<List<Map<String, dynamic>>>? _checkInsStream;
 
+  // Fed by a single .listen() on _checkInsStream, attached in
+  // _loadCheckIns() at initState() time — same broadcast stream
+  // _buildCheckInsTab()'s own StreamBuilder consumes, untouched. This
+  // second, EARLY subscription (not a late one attached only once a
+  // collapsible section is expanded) is what lets
+  // _buildMissedReasonsChart() read already-loaded data synchronously
+  // instead of mounting its own StreamBuilder against the same broadcast
+  // stream — a late .listen() there previously missed the one-time
+  // initial snapshot and hung on ConnectionState.waiting indefinitely.
+  // _checkInsListLoaded distinguishes "no check-ins yet" from "first
+  // snapshot hasn't arrived yet", so first-expansion still shows a brief
+  // spinner instead of a false empty state.
+  List<Map<String, dynamic>> _checkIns = [];
+  bool _checkInsListLoaded = false;
+  StreamSubscription<List<Map<String, dynamic>>>? _checkInsSub;
+
   List<Map<String, dynamic>> _weightLogs = [];
   bool _weightLoading = true;
   double? _goalWeight;
@@ -194,6 +210,21 @@ class _ProgressScreenState extends State<ProgressScreen> {
   // _buildCalendarSection() below for why they don't need to sync).
   bool _calendarExpanded = false;
   DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
+
+  // Missed Workout Reasons chart — collapsed by default, same reasoning as
+  // _calendarExpanded above. No dedicated data-loading field of its own:
+  // it's built directly off _checkInsStream (see _loadCheckIns()), the
+  // same live stream the Check-Ins tab already uses, so a "Change reason"
+  // edit (an overwrite of the same missedSessions/{date} doc) is picked up
+  // automatically with no separate refresh plumbing.
+  bool _missedReasonsChartExpanded = false;
+  static const List<String> _missedReasonOrder = [
+    'busy',
+    'sick',
+    'injured',
+    'rest',
+    'skip',
+  ];
 
   List<Map<String, dynamic>> _nutritionLogs = [];
   bool _nutritionLoading = true;
@@ -274,6 +305,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
   @override
   void dispose() {
     _weightSub?.cancel();
+    _checkInsSub?.cancel();
     super.dispose();
   }
 
@@ -389,9 +421,20 @@ class _ProgressScreenState extends State<ProgressScreen> {
       if (mounted) setState(() => _checkInsLoading = false);
       return;
     }
+    final stream = FirestoreService().getMissedSessionsStream(uid);
     setState(() {
-      _checkInsStream = FirestoreService().getMissedSessionsStream(uid);
+      _checkInsStream = stream;
       _checkInsLoading = false;
+    });
+    // See _checkIns' own field comment above for why this exists alongside
+    // _checkInsStream rather than replacing it.
+    _checkInsSub = stream.listen((list) {
+      if (mounted) {
+        setState(() {
+          _checkIns = list;
+          _checkInsListLoaded = true;
+        });
+      }
     });
   }
 
@@ -930,6 +973,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
           _sectionDivider(),
           const SizedBox(height: 12),
           _buildCalendarSection(),
+          const SizedBox(height: 12),
+          _sectionDivider(),
+          const SizedBox(height: 12),
+          _buildMissedReasonsChart(),
         ],
       ),
     );
@@ -2694,6 +2741,198 @@ class _ProgressScreenState extends State<ProgressScreen> {
     );
   }
 
+  // Reads _checkIns (kept current by the single .listen() in
+  // _loadCheckIns(), see that field's own comment) rather than mounting
+  // its own StreamBuilder on _checkInsStream — a second, LATE listener on
+  // that broadcast stream, only attached once this section is expanded,
+  // previously missed the stream's one-time initial snapshot and hung on
+  // ConnectionState.waiting indefinitely. _checkIns is already live and
+  // current the moment this widget builds, so no subscription is needed
+  // here at all. "Change reason" overwrites the same missedSessions/{date}
+  // doc (see _CheckInRow's "Change reason" link / missed_checkin_screen
+  // .dart's _handleLog()), so the shared stream's .snapshots() listener
+  // still fires on every edit, updates _checkIns via setState, and this
+  // method naturally rebuilds with the new counts — no manual refresh
+  // trigger needed.
+  Widget _buildMissedReasonsChart() {
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: () => setState(
+            () => _missedReasonsChartExpanded = !_missedReasonsChartExpanded,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: WW.tealBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.insights_rounded,
+                    color: WW.teal,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Missed Workout Reasons',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: WW.text,
+                    ),
+                  ),
+                ),
+                Icon(
+                  _missedReasonsChartExpanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  color: WW.textSec,
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_missedReasonsChartExpanded) ...[
+          const Divider(height: 1, color: WW.elevated),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: !_checkInsListLoaded
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 40),
+                    child: Center(
+                      child: CircularProgressIndicator(color: WW.primary),
+                    ),
+                  )
+                : _buildMissedReasonsChartBody(_checkIns),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildMissedReasonsChartBody(List<Map<String, dynamic>> checkIns) {
+    final counts = [
+      for (final key in _missedReasonOrder)
+        checkIns.where((c) => (c['reason'] as String? ?? 'skip') == key).length,
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          height: 160,
+          child: BarChart(
+            BarChartData(
+              barGroups: List.generate(_missedReasonOrder.length, (i) {
+                final key = _missedReasonOrder[i];
+                final count = counts[i];
+                final color = _reasonData[key]!['color'] as Color;
+                if (count <= 0) {
+                  return BarChartGroupData(
+                    x: i,
+                    barRods: [
+                      BarChartRodData(
+                        toY: 0.3,
+                        color: WW.border,
+                        width: 22,
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                    ],
+                  );
+                }
+                return BarChartGroupData(
+                  x: i,
+                  barRods: [
+                    BarChartRodData(
+                      toY: count.toDouble(),
+                      color: color,
+                      width: 22,
+                      borderRadius: BorderRadius.circular(5),
+                    ),
+                  ],
+                );
+              }),
+              titlesData: FlTitlesData(
+                show: true,
+                bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 28,
+                    getTitlesWidget: (value, meta) {
+                      final i = value.toInt();
+                      if (i < 0 || i >= _missedReasonOrder.length) {
+                        return const SizedBox.shrink();
+                      }
+                      final label =
+                          _reasonData[_missedReasonOrder[i]]!['label'] as String;
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          label,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w600,
+                            color: WW.textSec,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                leftTitles: const AxisTitles(
+                  sideTitles: SideTitles(showTitles: false),
+                ),
+                topTitles: const AxisTitles(
+                  sideTitles: SideTitles(showTitles: false),
+                ),
+                rightTitles: const AxisTitles(
+                  sideTitles: SideTitles(showTitles: false),
+                ),
+              ),
+              borderData: FlBorderData(show: false),
+              gridData: const FlGridData(show: false),
+              barTouchData: BarTouchData(
+                touchTooltipData: BarTouchTooltipData(
+                  getTooltipColor: (_) => WW.primaryDark,
+                  getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                    final count = counts[group.x];
+                    if (count <= 0) return null;
+                    final label = _reasonData[_missedReasonOrder[group.x]]!['label']
+                        as String;
+                    return BarTooltipItem(
+                      '$count · $label',
+                      const TextStyle(
+                        color: Colors.white,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (checkIns.isEmpty) ...[
+          const SizedBox(height: 8),
+          const Text(
+            'No missed workouts logged yet.',
+            style: TextStyle(fontSize: 12, color: WW.textSec),
+          ),
+        ],
+      ],
+    );
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // ACTIVITIES TAB
   // ══════════════════════════════════════════════════════════════════════════
@@ -2862,7 +3101,17 @@ class _ProgressScreenState extends State<ProgressScreen> {
             xpLabel: 'Manual',
             isCardio: false,
             isManual: true,
-            onTap: () => context.push(Routes.activityDetail, extra: s),
+            // Manual activities can be deleted from the detail screen (see
+            // activity_detail_screen.dart's _deleteActivity()) — that's a
+            // one-time paginated fetch, not a live listener, so re-fetch on
+            // return to pick up a deletion. Same .then((_) => ...) pattern
+            // as home_screen.dart's manualActivityLog push and
+            // plans_screen.dart's buildRoutine push; unconditional since
+            // the pushed screen doesn't return a value to branch on, and a
+            // refresh is harmless when nothing changed.
+            onTap: () => context
+                .push(Routes.activityDetail, extra: s)
+                .then((_) => _loadSessionsPage(reset: true)),
           );
         }
 

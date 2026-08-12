@@ -61,9 +61,25 @@ class _RegisterScreenState extends State<RegisterScreen> {
       ? 'Enter a valid email address'
       : null;
 
-  String? get _passwordError => _passwordController.text.length < 8
-      ? 'Password must be at least 8 characters'
-      : null;
+  String? get _passwordError {
+    final password = _passwordController.text;
+    if (password.length < 8) {
+      return 'Password must be at least 8 characters';
+    }
+    if (!password.contains(RegExp(r'[A-Z]'))) {
+      return 'Password must include an uppercase letter';
+    }
+    if (!password.contains(RegExp(r'[a-z]'))) {
+      return 'Password must include a lowercase letter';
+    }
+    if (!password.contains(RegExp(r'[0-9]'))) {
+      return 'Password must include a number';
+    }
+    if (!password.contains(RegExp(r'[^A-Za-z0-9]'))) {
+      return 'Password must include a special character';
+    }
+    return null;
+  }
 
   String? get _confirmError =>
       _confirmController.text != _passwordController.text
@@ -206,7 +222,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
               _RegisterField(
                 label: 'Password',
                 controller: _passwordController,
-                hint: 'Min. 8 characters',
+                hint: 'Password',
                 obscureText: _obscurePassword,
                 error: _tried ? _passwordError : null,
                 onChanged: (_) => setState(() {}),

@@ -16,6 +16,7 @@ class QuickAddOption {
   final Color iconBg;
   final String title;
   final String subtitle;
+  final bool showSubtitle;
   final VoidCallback onTap;
 
   const QuickAddOption({
@@ -24,6 +25,7 @@ class QuickAddOption {
     required this.iconBg,
     required this.title,
     required this.subtitle,
+    this.showSubtitle = true,
     required this.onTap,
   });
 }
@@ -111,7 +113,10 @@ class _QuickAddTile extends StatelessWidget {
             option.onTap();
           },
           child: Container(
-            padding: const EdgeInsets.all(12),
+            padding: EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: option.showSubtitle ? 12 : 15,
+            ),
             decoration: BoxDecoration(
               color: WW.elevated,
               borderRadius: BorderRadius.circular(16),
@@ -129,17 +134,22 @@ class _QuickAddTile extends StatelessWidget {
                 ),
                 const SizedBox(width: 14),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        option.title,
-                        style: WW.titleMed.copyWith(fontSize: 15),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(option.subtitle, style: WW.labelMed),
-                    ],
-                  ),
+                  child: option.showSubtitle
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              option.title,
+                              style: WW.titleMed.copyWith(fontSize: 15),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(option.subtitle, style: WW.labelMed),
+                          ],
+                        )
+                      : Text(
+                          option.title,
+                          style: WW.titleMed.copyWith(fontSize: 15),
+                        ),
                 ),
                 const Icon(Icons.chevron_right_rounded, color: WW.textSec),
               ],

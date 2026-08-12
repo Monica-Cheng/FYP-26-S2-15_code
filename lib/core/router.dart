@@ -21,6 +21,7 @@ import '../screens/onboarding/onboarding_walkthrough_screen.dart';
 import '../screens/plans/post_session_summary_screen.dart';
 import '../screens/home/manual_activity_log_screen.dart';
 import '../screens/home/missed_checkin_screen.dart';
+import '../screens/profile/all_badges_screen.dart';
 import '../screens/profile/edit_profile_screen.dart';
 import '../screens/profile/profile_screen.dart';
 import '../screens/profile/user_profile_screen.dart';
@@ -74,6 +75,7 @@ class Routes {
   static const String gymSession = '/gym-session';
   static const String postSessionSummary = '/post-session-summary';
   static const String profile = '/profile';
+  static const String allBadges = '/all-badges';
   static const String userProfile = '/user-profile';
   static const String settings = '/settings';
   static const String healthProfile = '/health-profile';
@@ -364,6 +366,16 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.profile,
         builder: (context, state) => const ProfileScreen(),
+      ),
+      GoRoute(
+        path: Routes.allBadges,
+        builder: (context, state) {
+          final extra = state.extra as Map<String, dynamic>?;
+          final badges =
+              extra?['badges'] as List<Map<String, dynamic>>? ?? const [];
+          final earnedIds = extra?['earnedIds'] as Set<String>? ?? const {};
+          return AllBadgesScreen(badges: badges, earnedIds: earnedIds);
+        },
       ),
       GoRoute(
         path: Routes.userProfile,

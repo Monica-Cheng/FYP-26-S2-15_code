@@ -19,9 +19,15 @@ class SplashScreen extends StatefulWidget {
 
 class _SplashScreenState extends State<SplashScreen>
     with TickerProviderStateMixin {
-  late AnimationController _spinCtrl;
   late AnimationController _fadeCtrl;
   late Animation<double> _fadeAnim;
+
+  // Creeps toward 88% over an unknown-duration window (real loading time
+  // varies with network conditions) instead of a bar hardcoded to fill in a
+  // fixed span; _checkAndNavigate animates the remaining stretch to 100%
+  // right when navigation actually fires, whether that's fast or slow.
+  late AnimationController _progressCtrl;
+
   Timer? _timer;
 
   final _auth = AuthService();
@@ -31,11 +37,6 @@ class _SplashScreenState extends State<SplashScreen>
   void initState() {
     super.initState();
 
-    _spinCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat();
-
     _fadeCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 600),
@@ -43,14 +44,19 @@ class _SplashScreenState extends State<SplashScreen>
 
     _fadeAnim = CurvedAnimation(parent: _fadeCtrl, curve: Curves.easeOut);
 
+    _progressCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 5000),
+    )..animateTo(0.88, curve: Curves.easeOutCubic);
+
     _timer = Timer(const Duration(seconds: 2), _checkAndNavigate);
   }
 
   @override
   void dispose() {
     _timer?.cancel();
-    _spinCtrl.dispose();
     _fadeCtrl.dispose();
+    _progressCtrl.dispose();
     super.dispose();
   }
 
@@ -60,6 +66,11 @@ class _SplashScreenState extends State<SplashScreen>
     final user = _auth.getCurrentUser();
 
     if (user == null) {
+      _progressCtrl.animateTo(
+        1.0,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
       context.go(Routes.walkthrough);
       return;
     }
@@ -68,11 +79,23 @@ class _SplashScreenState extends State<SplashScreen>
       final profile = await _firestore.getUserProfile(user.uid);
       if (!mounted) return;
       final onboardingComplete = profile?['onboardingComplete'] == true;
+      _progressCtrl.animateTo(
+        1.0,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
       context.go(
         onboardingComplete ? Routes.home : Routes.onboardingStep1,
       );
     } catch (_) {
-      if (mounted) context.go(Routes.walkthrough);
+      if (mounted) {
+        _progressCtrl.animateTo(
+          1.0,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+        context.go(Routes.walkthrough);
+      }
     }
   }
 
@@ -114,6 +137,20 @@ class _SplashScreenState extends State<SplashScreen>
             ),
           ),
 
+          // Soft wave/glow graphic decorating the bottom of the screen
+          const Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: 200,
+            child: IgnorePointer(
+              child: CustomPaint(
+                size: Size.infinite,
+                painter: _BottomWavePainter(),
+              ),
+            ),
+          ),
+
           // Main content
           Center(
             child: Column(
@@ -129,23 +166,25 @@ class _SplashScreenState extends State<SplashScreen>
                     ).animate(_fadeAnim),
                     child: Column(
                       children: [
-                        // Logo mark
-                        Container(
-                          width: 72,
-                          height: 72,
-                          decoration: BoxDecoration(
-                            color: WW.primaryDark,
-                            borderRadius: BorderRadius.circular(22),
-                            boxShadow: const [
-                              BoxShadow(
-                                color: Color(0x382D3A8C),
-                                blurRadius: 24,
-                                offset: Offset(0, 8),
-                              ),
-                            ],
-                          ),
-                          child: CustomPaint(
-                            painter: _LogoPainter(),
+                        // Logo mark, ringed by 6 static feature badges
+                        _IconRing(
+                          child: Container(
+                            width: 72,
+                            height: 72,
+                            decoration: BoxDecoration(
+                              color: WW.primaryDark,
+                              borderRadius: BorderRadius.circular(22),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Color(0x382D3A8C),
+                                  blurRadius: 24,
+                                  offset: Offset(0, 8),
+                                ),
+                              ],
+                            ),
+                            child: CustomPaint(
+                              painter: _LogoPainter(),
+                            ),
                           ),
                         ),
                         const SizedBox(height: 16),
@@ -177,9 +216,6 @@ class _SplashScreenState extends State<SplashScreen>
 
                 const SizedBox(height: 56),
 
-                // Spinner
-                _ArcSpinner(controller: _spinCtrl),
-                const SizedBox(height: 14),
                 const Text(
                   'Loading your profile...',
                   style: TextStyle(
@@ -188,24 +224,18 @@ class _SplashScreenState extends State<SplashScreen>
                     color: Colors.white,
                   ),
                 ),
+                const SizedBox(height: 12),
+                _ProgressBar(animation: _progressCtrl),
+                const SizedBox(height: 10),
+                Text(
+                  "This won't take long",
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.white.withOpacity(0.5),
+                  ),
+                ),
               ],
-            ),
-          ),
-
-          // Version tag
-          const Positioned(
-            bottom: 28,
-            left: 0,
-            right: 0,
-            child: Text(
-              'v1.0 · FYP-26-S2-15',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w500,
-                color: Colors.white54,
-                letterSpacing: 0.3,
-              ),
             ),
           ),
         ],
@@ -214,63 +244,187 @@ class _SplashScreenState extends State<SplashScreen>
   }
 }
 
-// ── Arc spinner ───────────────────────────────────────────────────────────────
+// ── Icon ring ────────────────────────────────────────────────────────────────
+// Static (non-animated, per time-constraint decision) ring of 6 feature
+// badges around the central logo, connected by a faint circular guide line
+// with a few decorative dots — purely decorative, no interaction/state.
 
-class _ArcSpinner extends StatelessWidget {
-  final AnimationController controller;
+class _IconRing extends StatelessWidget {
+  final Widget child;
 
-  const _ArcSpinner({required this.controller});
+  const _IconRing({required this.child});
+
+  static const List<IconData> _icons = [
+    Icons.fitness_center_rounded,
+    Icons.monitor_heart_rounded,
+    Icons.directions_run_rounded,
+    Icons.chat_bubble_rounded,
+    Icons.trending_up_rounded,
+    Icons.local_fire_department_rounded,
+  ];
+
+  static const double _size = 240;
+  static const double _ringRadius = 96;
+  static const double _badgeSize = 40;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: _size,
+      height: _size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          const CustomPaint(
+            size: Size(_size, _size),
+            painter: _RingGuidePainter(),
+          ),
+          for (var i = 0; i < _icons.length; i++) _badge(i),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _badge(int index) {
+    final angle = (2 * math.pi / _icons.length) * index - math.pi / 2;
+    final offset = Offset(
+      _ringRadius * math.cos(angle),
+      _ringRadius * math.sin(angle),
+    );
+    return Transform.translate(
+      offset: offset,
+      child: Container(
+        width: _badgeSize,
+        height: _badgeSize,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: WW.lavender.withOpacity(0.22),
+          border: Border.all(color: Colors.white.withOpacity(0.20)),
+        ),
+        child: Icon(
+          _icons[index],
+          color: Colors.white.withOpacity(0.9),
+          size: 18,
+        ),
+      ),
+    );
+  }
+}
+
+class _RingGuidePainter extends CustomPainter {
+  const _RingGuidePainter();
+
+  static const List<double> _dotAnglesDeg = [20, 95, 160, 230, 300];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+
+    final linePaint = Paint()
+      ..color = Colors.white.withOpacity(0.10)
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+    canvas.drawCircle(center, _IconRing._ringRadius, linePaint);
+
+    final dotPaint = Paint()
+      ..color = Colors.white.withOpacity(0.28)
+      ..style = PaintingStyle.fill;
+    for (final deg in _dotAnglesDeg) {
+      final rad = deg * math.pi / 180;
+      final p = center +
+          Offset(
+            _IconRing._ringRadius * math.cos(rad),
+            _IconRing._ringRadius * math.sin(rad),
+          );
+      canvas.drawCircle(p, 2.2, dotPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter old) => false;
+}
+
+// ── Progress bar ─────────────────────────────────────────────────────────────
+
+class _ProgressBar extends StatelessWidget {
+  final Animation<double> animation;
+
+  const _ProgressBar({required this.animation});
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: controller,
+      animation: animation,
       builder: (context, _) {
-        return CustomPaint(
-          size: const Size(32, 32),
-          painter: _ArcSpinnerPainter(turn: controller.value),
+        return Container(
+          width: 180,
+          height: 5,
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.14),
+            borderRadius: BorderRadius.circular(3),
+          ),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: FractionallySizedBox(
+              widthFactor: animation.value.clamp(0.0, 1.0),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: WW.lavender,
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+            ),
+          ),
         );
       },
     );
   }
 }
 
-class _ArcSpinnerPainter extends CustomPainter {
-  final double turn;
-  const _ArcSpinnerPainter({required this.turn});
+// ── Bottom wave/glow ─────────────────────────────────────────────────────────
+
+class _BottomWavePainter extends CustomPainter {
+  const _BottomWavePainter();
 
   @override
   void paint(Canvas canvas, Size size) {
-    final cx = size.width / 2;
-    final cy = size.height / 2;
-    final radius = (size.width - 3) / 2;
-    final rect = Rect.fromCircle(center: Offset(cx, cy), radius: radius);
+    _layer(canvas, size,
+        amplitude: 20,
+        phase: 0,
+        yFraction: 0.55,
+        color: WW.primaryDark.withOpacity(0.35));
+    _layer(canvas, size,
+        amplitude: 14,
+        phase: math.pi / 2.5,
+        yFraction: 0.72,
+        color: WW.lavender.withOpacity(0.22));
+  }
 
-    // Track
-    final trackPaint = Paint()
-      ..color = WW.elevated
-      ..strokeWidth = 3
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-    canvas.drawCircle(Offset(cx, cy), radius, trackPaint);
-
-    // Arc
-    final arcPaint = Paint()
-      ..color = WW.primary
-      ..strokeWidth = 3
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-    canvas.drawArc(
-      rect,
-      turn * 2 * math.pi - math.pi / 2,
-      math.pi * 0.75,
-      false,
-      arcPaint,
-    );
+  void _layer(
+    Canvas canvas,
+    Size size, {
+    required double amplitude,
+    required double phase,
+    required double yFraction,
+    required Color color,
+  }) {
+    final baseY = size.height * yFraction;
+    final path = Path()..moveTo(0, baseY);
+    for (double x = 0; x <= size.width; x += 8) {
+      final y = baseY +
+          amplitude * math.sin((x / size.width * 2 * math.pi) + phase);
+      path.lineTo(x, y);
+    }
+    path
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(path, Paint()..color = color);
   }
 
   @override
-  bool shouldRepaint(covariant _ArcSpinnerPainter old) => old.turn != turn;
+  bool shouldRepaint(covariant CustomPainter old) => false;
 }
 
 // ── Logo painter ──────────────────────────────────────────────────────────────

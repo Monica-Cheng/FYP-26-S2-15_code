@@ -17,6 +17,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/barcode_service.dart';
 import '../../services/firestore_service.dart';
@@ -56,10 +57,31 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
   bool _isSharing = false;
   bool _isPosting = false;
 
+  // Gates the Scan/Barcode tabs inside _ModeToggle below — a second,
+  // independent premium check from home_screen.dart's own entry-point
+  // gate on the "Scan Food" quick-add option. That gate blocks free users
+  // before they ever reach this screen; this one covers a free user who
+  // enters via "Describe a Meal" (ungated, free) and then taps into Scan
+  // or Barcode from inside. Defaults to false (locked) until the read
+  // resolves — same "assume free until confirmed" default
+  // settings_screen.dart's own _isPremium field uses.
+  bool _isPremium = false;
+
   @override
   void initState() {
     super.initState();
     if (widget.startInDescribeMode) _mode = _Mode.describe;
+    _loadPremiumStatus();
+  }
+
+  // Same read pattern as home_screen.dart's _handleNutritionQuickAddTap /
+  // settings_screen.dart's _loadPrefs / coach_screen.dart.
+  Future<void> _loadPremiumStatus() async {
+    final uid = _authService.getCurrentUser()?.uid;
+    if (uid == null) return;
+    final profile = await _firestoreService.getUserProfile(uid);
+    if (!mounted) return;
+    setState(() => _isPremium = profile?['isPremium'] as bool? ?? false);
   }
 
   @override
@@ -570,11 +592,20 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
       children: [
         _ModeToggle(
           mode: _mode,
-          onChanged: (m) => setState(() {
-            _mode = m;
-            _stage = _Stage.input;
-            _errorMessage = null;
-          }),
+          isPremium: _isPremium,
+          onChanged: (m) {
+            // Describe is always free; Scan/Barcode need isPremium — same
+            // branch shape as home_screen.dart's _handleNutritionQuickAddTap.
+            if (m != _Mode.describe && !_isPremium) {
+              context.push(Routes.upgrade);
+              return;
+            }
+            setState(() {
+              _mode = m;
+              _stage = _Stage.input;
+              _errorMessage = null;
+            });
+          },
         ),
         const SizedBox(height: 20),
         if (_errorMessage != null) ...[
@@ -606,8 +637,13 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
 
 class _ModeToggle extends StatelessWidget {
   final _Mode mode;
+  final bool isPremium;
   final ValueChanged<_Mode> onChanged;
-  const _ModeToggle({required this.mode, required this.onChanged});
+  const _ModeToggle({
+    required this.mode,
+    required this.isPremium,
+    required this.onChanged,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -623,12 +659,14 @@ class _ModeToggle extends StatelessWidget {
             label: 'Scan',
             icon: Icons.camera_alt_rounded,
             selected: mode == _Mode.scan,
+            locked: !isPremium,
             onTap: () => onChanged(_Mode.scan),
           ),
           _ToggleTab(
             label: 'Barcode',
             icon: Icons.qr_code_scanner_rounded,
             selected: mode == _Mode.barcode,
+            locked: !isPremium,
             onTap: () => onChanged(_Mode.barcode),
           ),
           _ToggleTab(
@@ -647,43 +685,59 @@ class _ToggleTab extends StatelessWidget {
   final String label;
   final IconData icon;
   final bool selected;
+  final bool locked;
   final VoidCallback onTap;
   const _ToggleTab({
     required this.label,
     required this.icon,
     required this.selected,
+    this.locked = false,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(
-            color: selected ? WW.card : Colors.transparent,
-            borderRadius: BorderRadius.circular(10),
-            boxShadow: selected ? WW.shadow : null,
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 18, color: selected ? WW.primary : WW.textSec),
-              const SizedBox(width: 6),
-              Text(
-                label,
-                style: WW.labelMed.copyWith(
-                  color: selected ? WW.primary : WW.textSec,
-                  fontWeight: FontWeight.w700,
-                ),
+    // onTap still fires when locked — _NutritionScanScreenState's
+    // onChanged callback is what redirects to Routes.upgrade instead of
+    // switching _mode, so the tap can't be swallowed here the way
+    // manage_app_screen.dart's IgnorePointer swallows a locked toggle's
+    // tap (that row has no separate "go unlock" action to reach).
+    final tab = GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          color: selected ? WW.card : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          boxShadow: selected ? WW.shadow : null,
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 18, color: selected ? WW.primary : WW.textSec),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: WW.labelMed.copyWith(
+                color: selected ? WW.primary : WW.textSec,
+                fontWeight: FontWeight.w700,
               ),
+            ),
+            if (locked) ...[
+              const SizedBox(width: 4),
+              const Icon(Icons.lock_rounded, size: 12, color: WW.textSec),
             ],
-          ),
+          ],
         ),
       ),
+    );
+
+    // Same dimmed-locked-row convention as manage_app_screen.dart's
+    // _toggleRow() (0.5 opacity), minus the IgnorePointer — see this
+    // widget's build() comment above for why the tap has to stay live.
+    return Expanded(
+      child: locked ? Opacity(opacity: 0.5, child: tab) : tab,
     );
   }
 }
@@ -1341,7 +1395,7 @@ class _ConfirmAccuracyPromptState extends State<_ConfirmAccuracyPrompt> {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                   ),
                   child: const Text(
-                    "Yes, that's correct",
+                    'Yes',
                     style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
                   ),
                 ),
@@ -1357,7 +1411,7 @@ class _ConfirmAccuracyPromptState extends State<_ConfirmAccuracyPrompt> {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                   ),
                   child: const Text(
-                    'No, let me fix it',
+                    'No',
                     style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
                   ),
                 ),

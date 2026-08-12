@@ -383,6 +383,7 @@ class _PlansScreenState extends State<PlansScreen> {
 
   Widget _buildNoTrackedPlan() {
     return Container(
+      width: double.infinity,
       padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
       decoration: WW.cardDecoration,
       child: const Column(

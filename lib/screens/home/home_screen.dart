@@ -138,6 +138,7 @@ class _HomeScreenState extends State<HomeScreen> {
           iconBg: WW.lavenderBg,
           title: 'Scan Food',
           subtitle: 'Snap a photo for instant calories',
+          showSubtitle: false,
           onTap: () => _handleNutritionQuickAddTap(null),
         ),
         QuickAddOption(
@@ -146,6 +147,7 @@ class _HomeScreenState extends State<HomeScreen> {
           iconBg: WW.tealBg,
           title: 'Describe a Meal',
           subtitle: 'Type what you ate instead',
+          showSubtitle: false,
           onTap: () => _handleNutritionQuickAddTap('describe'),
         ),
         QuickAddOption(
@@ -154,6 +156,7 @@ class _HomeScreenState extends State<HomeScreen> {
           iconBg: WW.gold.withValues(alpha: 0.14),
           title: 'Log Activity',
           subtitle: 'Manually add a workout or exercise',
+          showSubtitle: false,
           onTap: () => context
               .push(Routes.manualActivityLog)
               .then((_) => _homeTabKey.currentState?._loadUserData()),
@@ -164,22 +167,26 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Gated on isPremium — 'Log Activity' above stays ungated. QuickAddOption
-  // .onTap already fires after the sheet has closed (see quick_add_sheet
-  // .dart's own doc comment), so it's safe to await here and only navigate
-  // into the real scanner once isPremium is confirmed true; free users are
-  // sent to the full-page Upgrade screen (Routes.upgrade) instead and
-  // never reach Routes.nutritionScan at all.
+  // Gated on isPremium — 'Log Activity' above stays ungated. Only the scan
+  // path (extra == null) is premium; 'describe' (extra == 'describe') is
+  // free for all users and skips the check entirely. QuickAddOption.onTap
+  // already fires after the sheet has closed (see quick_add_sheet.dart's
+  // own doc comment), so it's safe to await here and only navigate into
+  // the real scanner once isPremium is confirmed true; free users hitting
+  // the scan path are sent to the full-page Upgrade screen (Routes.upgrade)
+  // instead and never reach Routes.nutritionScan at all.
   Future<void> _handleNutritionQuickAddTap(String? extra) async {
-    final uid = _authService.getCurrentUser()?.uid;
-    if (uid == null) return;
-    final profile = await _firestoreService.getUserProfile(uid);
-    final isPremium = profile?['isPremium'] as bool? ?? false;
-    if (!isPremium) {
-      if (mounted) {
-        await context.push(Routes.upgrade);
+    if (extra == null) {
+      final uid = _authService.getCurrentUser()?.uid;
+      if (uid == null) return;
+      final profile = await _firestoreService.getUserProfile(uid);
+      final isPremium = profile?['isPremium'] as bool? ?? false;
+      if (!isPremium) {
+        if (mounted) {
+          await context.push(Routes.upgrade);
+        }
+        return;
       }
-      return;
     }
     if (!mounted) return;
     await context.push(Routes.nutritionScan, extra: extra);

@@ -12,12 +12,10 @@ import '../../core/router.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 import '../../utils/image_encode.dart';
+import '../../widgets/badge_tile.dart';
 import '../../widgets/quick_add_sheet.dart';
 
 // ── Hardcoded data ────────────────────────────────────────────────────────────
-
-// Off-white — locked-badge background not present in WW palette
-const _kLockedBg = Color(0xFFF2F2F7);
 
 // Same comma-grouped XP formatting as club_screen.dart's private _fmtXp() —
 // not importable across files (leading underscore), so mirrored here rather
@@ -656,10 +654,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   // ── Badges section — real, from getBadgeDefinitions()/
-  // getEarnedBadgeIds() (see _loadBadges()). Shows every defined badge in
-  // an equal-square grid, earned ones in full color, locked ones dimmed/
-  // greyscale with a lock overlay. Tapping any badge — earned or locked —
-  // opens a detail sheet with its name/description/conditions. ───────────
+  // getEarnedBadgeIds() (see _loadBadges()). Shows up to _kBadgeGridCap (2
+  // rows) of every defined badge in an equal-square grid, earned ones in
+  // full color, locked ones dimmed/greyscale with a lock overlay. Tapping
+  // any badge — earned or locked — opens a detail sheet with its name/
+  // description/conditions. Tile + detail sheet are shared with
+  // all_badges_screen.dart via widgets/badge_tile.dart. ───────────────────
+
+  // 2 rows at crossAxisCount: 4 below.
+  static const _kBadgeGridCap = 8;
 
   Widget _buildBadgesSection() {
     if (_badgesLoading) {
@@ -673,6 +676,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       // empty card.
       return const SizedBox.shrink();
     }
+    final showSeeAll = _allBadges.length > _kBadgeGridCap;
+    final gridBadges =
+        showSeeAll ? _allBadges.sublist(0, _kBadgeGridCap) : _allBadges;
     return Padding(
       // Matches the 12px bottom gap ProfileCard's margin/CoachDashboardLink's
       // padding already use between sections on this screen — the real fix
@@ -682,13 +688,36 @@ class _ProfileScreenState extends State<ProfileScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Badges',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
-              color: WW.text,
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'Badges',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: WW.text,
+                ),
+              ),
+              if (showSeeAll)
+                GestureDetector(
+                  onTap: () => context.push(
+                    Routes.allBadges,
+                    extra: {
+                      'badges': _allBadges,
+                      'earnedIds': _earnedBadgeIds,
+                    },
+                  ),
+                  child: const Text(
+                    'See all',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: WW.primary,
+                    ),
+                  ),
+                ),
+            ],
           ),
           const SizedBox(height: 12),
           GridView.builder(
@@ -711,223 +740,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
               crossAxisSpacing: 10,
               mainAxisExtent: 90,
             ),
-            itemCount: _allBadges.length,
+            itemCount: gridBadges.length,
             itemBuilder: (context, i) {
-              final badge = _allBadges[i];
+              final badge = gridBadges[i];
               final earned = _earnedBadgeIds.contains(badge['id'] as String);
               return GestureDetector(
-                onTap: () => _showBadgeDetail(badge, earned),
-                child: _buildBadgeTile(badge, earned),
+                onTap: () => showBadgeDetailSheet(context, badge, earned),
+                child: BadgeTile(badge: badge, earned: earned),
               );
             },
           ),
         ],
       ),
-    );
-  }
-
-  // Locked badges: dimmed (reduced opacity) AND greyscale (a standard
-  // luminance-preserving color matrix) together, matching "dimmed/
-  // greyscale" — either alone read as too subtle a distinction from an
-  // earned badge at this tile size.
-  Widget _buildBadgeImage(String imageUrl, double size, bool earned) {
-    final image = Image.network(
-      imageUrl,
-      width: size,
-      height: size,
-      fit: BoxFit.cover,
-      errorBuilder: (_, __, ___) => Icon(
-        Icons.emoji_events_rounded,
-        size: size * 0.4,
-        color: earned ? WW.primary : WW.border,
-      ),
-    );
-    if (earned) return image;
-    return Opacity(
-      opacity: 0.35,
-      child: ColorFiltered(
-        colorFilter: const ColorFilter.matrix(<double>[
-          0.2126, 0.7152, 0.0722, 0, 0,
-          0.2126, 0.7152, 0.0722, 0, 0,
-          0.2126, 0.7152, 0.0722, 0, 0,
-          0, 0, 0, 1, 0,
-        ]),
-        child: image,
-      ),
-    );
-  }
-
-  Widget _buildBadgeTile(Map<String, dynamic> badge, bool earned, {double size = 56}) {
-    final imageUrl = badge['imageUrl'] as String? ?? '';
-    final name = badge['name'] as String? ?? '';
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            color: earned ? WW.chipBg : _kLockedBg,
-            borderRadius: BorderRadius.circular(size * 0.28),
-            border: earned ? null : Border.all(color: WW.border, width: 1.5),
-          ),
-          clipBehavior: Clip.hardEdge,
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              if (imageUrl.isNotEmpty)
-                _buildBadgeImage(imageUrl, size, earned)
-              else
-                Icon(
-                  Icons.emoji_events_rounded,
-                  size: size * 0.4,
-                  color: earned ? WW.primary : WW.border,
-                ),
-              if (!earned)
-                Container(
-                  decoration: const BoxDecoration(
-                    color: Colors.black26,
-                    shape: BoxShape.circle,
-                  ),
-                  padding: const EdgeInsets.all(4),
-                  child: Icon(Icons.lock_rounded, size: size * 0.28, color: Colors.white),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 4),
-        SizedBox(
-          width: size,
-          child: Text(
-            name,
-            textAlign: TextAlign.center,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 10,
-              color: earned ? WW.text : WW.border,
-              height: 1.2,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // Plain-language phrasing for one condition — e.g. {statType: 'level',
-  // value: 5} -> "reach level 5". Used by _describeConditions() below,
-  // joined into a single readable sentence rather than shown as raw
-  // statType/value pairs.
-  String _describeCondition(Map<String, dynamic> cond) {
-    final statType = cond['statType'] as String? ?? '';
-    final rawValue = cond['value'];
-    if (rawValue is! num) return 'meet a special condition';
-    String fmt(num v) => v == v.roundToDouble() ? v.toInt().toString() : v.toString();
-    switch (statType) {
-      case 'level':
-        return 'reach level ${fmt(rawValue)}';
-      case 'totalXp':
-        return 'earn ${fmt(rawValue)} total XP';
-      case 'sessionCount':
-        return 'complete ${fmt(rawValue)} session${rawValue == 1 ? '' : 's'}';
-      case 'totalVolume':
-        return 'lift ${fmt(rawValue)} kg total volume';
-      case 'totalDistance':
-        // Badge conditions store distance in the same unit as
-        // computeChallengeProgress()'s 'km'-converted output — see
-        // checkAndAwardBadges()'s totalDistance stat, which reads
-        // getLifetimeStats()'s totalDistanceMeters and is compared
-        // directly against this condition's raw value, so this value is
-        // already in km, not meters, for a readable admin-facing number.
-        return 'cover ${fmt(rawValue)} km total distance';
-      case 'streak':
-        return 'reach a ${fmt(rawValue)}-day streak';
-      default:
-        return 'meet a special condition';
-    }
-  }
-
-  String _describeConditions(List<dynamic> conditions) {
-    final parts = conditions
-        .whereType<Map>()
-        .map((c) => _describeCondition(Map<String, dynamic>.from(c)))
-        .toList();
-    if (parts.isEmpty) return 'No conditions set';
-    final joined = parts.length == 1
-        ? parts.first
-        : '${parts.sublist(0, parts.length - 1).join(', ')} and ${parts.last}';
-    return joined[0].toUpperCase() + joined.substring(1);
-  }
-
-  void _showBadgeDetail(Map<String, dynamic> badge, bool earned) {
-    final name = badge['name'] as String? ?? 'Badge';
-    final description = badge['description'] as String? ?? '';
-    final conditions = (badge['conditions'] as List?) ?? const [];
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: WW.card,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(24, 24, 24, 36),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              _buildBadgeTile(badge, earned, size: 72),
-              const SizedBox(height: 16),
-              Text(
-                name,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w800,
-                  color: WW.primaryDark,
-                ),
-              ),
-              if (description.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Text(
-                  description,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 13, color: WW.textSec),
-                ),
-              ],
-              const SizedBox(height: 16),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: WW.elevated,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      earned ? Icons.check_circle_rounded : Icons.flag_rounded,
-                      color: earned ? WW.teal : WW.textSec,
-                      size: 18,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        earned ? 'Unlocked!' : _describeConditions(conditions),
-                        style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: WW.text,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
-      },
     );
   }
 

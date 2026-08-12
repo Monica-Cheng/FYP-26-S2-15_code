@@ -710,10 +710,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
                       const SizedBox(height: 12),
                       _buildWiseCoachCard(),
                       const SizedBox(height: 12),
-                      if (_isGym || _isCombined) ...[
-                        ..._xpCardWidgets(),
-                        const SizedBox(height: 12),
-                      ],
+                      ..._xpCardWidgets(),
                       // Badges are earned for ANY session type (gym,
                       // plan-linked gym, cardio, combined) — this must NOT
                       // share the XP card's gym/combined-only gate above.
