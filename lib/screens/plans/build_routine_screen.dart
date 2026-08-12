@@ -956,13 +956,13 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
     final wasEditMode = _isEditMode;
 
     try {
-      print('Saving routine: $_routineName');
+      debugPrint('Saving routine: $_routineName');
       final uid = AuthService().getCurrentUser()?.uid;
       if (uid == null) {
         _snack('Please sign in to save');
         return;
       }
-      print('UID: $uid');
+      debugPrint('UID: $uid');
 
       final sessions = _days.asMap().entries.map((entry) {
         final i = entry.key;
@@ -1021,7 +1021,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         };
       }).toList();
 
-      print('Sessions: $sessions');
+      debugPrint('Sessions: $sessions');
 
       final activeDays =
           _days.where((d) => (d['exercises'] as List).isNotEmpty).length;
@@ -1061,7 +1061,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
         );
       }
 
-      print('Saved successfully!');
+      debugPrint('Saved successfully!');
 
       if (mounted) setState(() => _hasChanges = false);
       // Uses the messenger captured before the write, not _snack(context) —
@@ -1084,7 +1084,7 @@ class _BuildRoutineScreenState extends State<BuildRoutineScreen> {
       if (!mounted) return;
       context.pop(wasEditMode);
     } catch (e) {
-      print('Save error: $e');
+      debugPrint('Save error: $e');
       if (mounted) _snack('Failed to save. Please try again.');
     } finally {
       if (mounted) setState(() => _isSaving = false);

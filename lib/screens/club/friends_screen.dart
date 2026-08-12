@@ -215,7 +215,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
       // leaving _searchResults untouched — a real error (e.g. a
       // PERMISSION_DENIED from a rules regression) rendered identically
       // to "no results", with nothing printed anywhere to debug from.
-      print('friends_screen: username search failed: $e');
+      debugPrint('friends_screen: username search failed: $e');
       if (mounted) {
         setState(() => _isSearching = false);
         _snack('Search failed. Please try again.');

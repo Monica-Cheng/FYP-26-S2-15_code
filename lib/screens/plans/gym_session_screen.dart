@@ -321,10 +321,6 @@ class _GymSessionState extends State<GymSessionScreen> {
   }
 
   Future<void> _loadPlanSession() async {
-    // TEMPORARY DEBUG — remove once the post-always-fresh-key regression is
-    // confirmed fixed.
-    print('DEBUG_REGRESSION: _loadPlanSession() called at '
-        '${DateTime.now().toIso8601String()}');
     try {
       final uid = AuthService().getCurrentUser()?.uid;
       if (uid == null) {
@@ -345,17 +341,9 @@ class _GymSessionState extends State<GymSessionScreen> {
       final routeExtra =
           GoRouterState.of(context).extra as Map<String, dynamic>?;
       final extraSessionRunId = routeExtra?['sessionRunId'] as String?;
-      // TEMPORARY DEBUG — remove once the post-always-fresh-key regression
-      // is confirmed fixed.
-      print('DEBUG_REGRESSION: _loadPlanSession branch check '
-          'extraSessionRunId=${extraSessionRunId ?? 'null'}');
       if (extraSessionRunId != null) {
         final hydrated = await _hydrateFromInProgressSession(
             uid, extraSessionRunId, routeExtra);
-        // TEMPORARY DEBUG — remove once the post-always-fresh-key
-        // regression is confirmed fixed.
-        print('DEBUG_REGRESSION: _loadPlanSession HYDRATE branch '
-            'sessionRunId=$extraSessionRunId hydrated=$hydrated');
         if (hydrated) return;
       }
 
@@ -474,8 +462,7 @@ class _GymSessionState extends State<GymSessionScreen> {
         List<dynamic> rawExercises =
             _assignBlockIds(applyCompression(rawExerciseMaps, compressedDayData));
 
-        final exercises = _parseExercises(rawExercises,
-            isListSets: null, debugSource: 'FRESH_START_TRACKED');
+        final exercises = _parseExercises(rawExercises, isListSets: null);
         final designedBy = plan['designedBy'] as Map<String, dynamic>?;
         final isCustom = plan['isCustom'] as bool? ?? false;
         final creatorName = isCustom
@@ -484,11 +471,6 @@ class _GymSessionState extends State<GymSessionScreen> {
         // Not awaited here — see _createInProgressSession's doc comment —
         // but the Future is cached so _buildCardioPlaceholderCard's tap
         // handler can await it (fixes the sessionRunId race condition).
-        // TEMPORARY DEBUG — remove once the post-always-fresh-key
-        // regression is confirmed fixed.
-        print('DEBUG_REGRESSION: _loadPlanSession FRESH_START_TRACKED '
-            'branch — creating new in-progress session planId=$planId '
-            'dayIndex=$effectiveDayIndex');
         _sessionInitFuture =
             _createInProgressSession(uid, planId, effectiveDayIndex, rawExercises);
         if (mounted) {
@@ -530,8 +512,7 @@ class _GymSessionState extends State<GymSessionScreen> {
 
       final rawExercises =
           _assignBlockIds((session['exercises'] as List<dynamic>?) ?? []);
-      final exercises = _parseExercises(rawExercises,
-          isListSets: null, debugSource: 'FRESH_START_FREE_SESSION');
+      final exercises = _parseExercises(rawExercises, isListSets: null);
       final designedBy = plan['designedBy'] as Map<String, dynamic>?;
       final isCustom = plan['isCustom'] as bool? ?? false;
       final creatorName = isCustom
@@ -540,11 +521,6 @@ class _GymSessionState extends State<GymSessionScreen> {
       // Not awaited here — see _createInProgressSession's doc comment —
       // but the Future is cached so _buildCardioPlaceholderCard's tap
       // handler can await it (fixes the sessionRunId race condition).
-      // TEMPORARY DEBUG — remove once the post-always-fresh-key regression
-      // is confirmed fixed.
-      print('DEBUG_REGRESSION: _loadPlanSession FRESH_START_FREE_SESSION '
-          'branch — creating new in-progress session planId=$planId '
-          'dayIndex=$effectiveDayIndex');
       _sessionInitFuture =
           _createInProgressSession(uid, planId, effectiveDayIndex, rawExercises);
 
@@ -560,13 +536,13 @@ class _GymSessionState extends State<GymSessionScreen> {
         });
       }
     } catch (e) {
-      // Logged (matching this file's print()-based convention elsewhere —
+      // Logged (matching this file's debugPrint()-based convention elsewhere —
       // see _createInProgressSession/_saveAndNavigate) so a genuine error
       // here is visible instead of silently presenting as "no active plan
       // found" — this is exactly the failure mode the initState timing bug
       // above produced. Behavior is unchanged: still fails soft to the
       // same empty-_exercises/not-loading state either way.
-      print('_loadPlanSession error: $e');
+      debugPrint('_loadPlanSession error: $e');
       if (mounted) setState(() => _isLoadingSession = false);
     }
   }
@@ -684,22 +660,6 @@ class _GymSessionState extends State<GymSessionScreen> {
     final data = await FirestoreService().getInProgressSession(uid, sessionRunId);
     if (data == null) return false;
 
-    // TEMPORARY DEBUG — remove once the second-cardio-block bug is
-    // confirmed fixed.
-    final debugRawBlocks = data['blocks'];
-    print('DEBUG_BLOCKINDEX: _hydrateFromInProgressSession read back '
-        'sessionRunId=$sessionRunId blocks.length='
-        '${debugRawBlocks is List ? debugRawBlocks.length : 'N/A'}');
-    if (debugRawBlocks is List) {
-      for (var i = 0; i < debugRawBlocks.length; i++) {
-        final b = debugRawBlocks[i];
-        if (b is Map) {
-          print('DEBUG_BLOCKINDEX:   [$i] name=${b['name']} '
-              'isCardio=${b['isCardio']} done=${b['done']}');
-        }
-      }
-    }
-
     final rawBlocks = data['blocks'];
     if (rawBlocks is! List) return false;
 
@@ -737,8 +697,7 @@ class _GymSessionState extends State<GymSessionScreen> {
       FirestoreService()
           .backfillInProgressSessionBlocks(uid, sessionRunId, blocks);
     }
-    final exercises =
-        _parseExercises(blocks, isListSets: null, debugSource: 'HYDRATE');
+    final exercises = _parseExercises(blocks, isListSets: null);
 
     // Best-effort plan-metadata lookup for display (session name, creator)
     // — in its own try/catch so a failure here doesn't throw away the
@@ -819,7 +778,7 @@ class _GymSessionState extends State<GymSessionScreen> {
           .createInProgressSession(uid, planId, dayIndex, blocks);
       if (mounted) setState(() => _sessionRunId = sessionRunId);
     } catch (e) {
-      print('createInProgressSession error: $e');
+      debugPrint('createInProgressSession error: $e');
     }
   }
 
@@ -1028,7 +987,7 @@ class _GymSessionState extends State<GymSessionScreen> {
     _dismissedInjuryReviewSessionRunIds.add(sessionRunId);
 
     if (!persisted) {
-      print('_applyInjuryFilter: dismissInjuryReview failed after '
+      debugPrint('_applyInjuryFilter: dismissInjuryReview failed after '
           '$maxAttempts attempts for sessionRunId=$sessionRunId — '
           'dismissal may not survive an app restart.');
     }
@@ -1382,7 +1341,7 @@ class _GymSessionState extends State<GymSessionScreen> {
   // placeholders instead of its real activity.
   List<_ExerciseData> _parseExercises(
       List<dynamic> rawExercises,
-      {required bool? isListSets, String debugSource = ''}) {
+      {required bool? isListSets}) {
     return rawExercises.asMap().entries.map((exEntry) {
       final e = exEntry.value;
       final exMap = e as Map<String, dynamic>;
@@ -1451,11 +1410,6 @@ class _GymSessionState extends State<GymSessionScreen> {
                 .toList() ??
             [],
       );
-      // TEMPORARY DEBUG — remove once the second-cardio-block bug is
-      // confirmed fixed.
-      print('DEBUG_BLOCKINDEX: _parseExercises[$debugSource] '
-          'name=${parsedEx.name} isCardio=${parsedEx.isCardio} '
-          'blockId=${parsedEx.blockId} done=${parsedEx.done}');
       return parsedEx;
     }).toList();
   }
@@ -1744,7 +1698,7 @@ class _GymSessionState extends State<GymSessionScreen> {
         context.go(Routes.postSessionSummary, extra: sessionData);
         return;
       } catch (e) {
-        print('_saveAndNavigate: plan-linked finalize path failed — $e. '
+        debugPrint('_saveAndNavigate: plan-linked finalize path failed — $e. '
             'Falling back to standalone saveGymSession().');
       }
     }
@@ -1774,8 +1728,8 @@ class _GymSessionState extends State<GymSessionScreen> {
     String? sessionId;
     List<Map<String, dynamic>> newlyEarnedBadges = [];
     try {
-      print('Saving session for uid: $uid');
-      print('Session data: $sessionData');
+      debugPrint('Saving session for uid: $uid');
+      debugPrint('Session data: $sessionData');
       if (uid != null) {
         sessionId = await FirestoreService().saveGymSession(uid, sessionData);
         final totalCompletedSets = _exercises
@@ -1793,10 +1747,10 @@ class _GymSessionState extends State<GymSessionScreen> {
         // after it, not before.
         newlyEarnedBadges = await FirestoreService().checkAndAwardBadges(uid);
       } else {
-        print('saveGymSession skipped: no authenticated user');
+        debugPrint('saveGymSession skipped: no authenticated user');
       }
     } catch (e) {
-      print('saveGymSession error: $e');
+      debugPrint('saveGymSession error: $e');
     }
 
     if (sessionId != null) sessionData['sessionId'] = sessionId;
@@ -3796,12 +3750,6 @@ class _GymSessionState extends State<GymSessionScreen> {
                       if (syncFuture != null) await syncFuture;
                       if (!mounted) return;
 
-                      // TEMPORARY DEBUG — remove once the second-cardio-block
-                      // bug is confirmed fixed.
-                      print(
-                          'DEBUG_BLOCKID: _buildCardioPlaceholderCard onTap '
-                          'name=${ex.name} blockId=$blockId '
-                          'sessionRunId=$_sessionRunId');
                       // Awaited (unlike before) specifically so
                       // _isNavigatingToCardio can be reset below once this
                       // resolves — matters for the case where the user

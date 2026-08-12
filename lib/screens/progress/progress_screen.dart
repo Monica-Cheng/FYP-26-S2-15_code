@@ -514,7 +514,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
       // sessions" instead of a visible error — see this field's own doc
       // comment. Printed (not rethrown) to match this file's existing
       // fail-soft convention for background loads elsewhere.
-      print('_loadSessionsPage error: $e');
+      debugPrint('_loadSessionsPage error: $e');
       if (mounted) {
         setState(() {
           _sessionsLoading = false;

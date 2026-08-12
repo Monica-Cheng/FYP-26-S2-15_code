@@ -2710,10 +2710,6 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
           'photoBase64': ?photoBase64,
           'mapSnapshotBase64': ?mapSnapshotBase64,
         };
-        // TEMPORARY DEBUG — remove once the second-cardio-block bug is
-        // confirmed fixed.
-        print('DEBUG_BLOCKID: outdoor_cardio_screen finish uid=$uid '
-            'sessionRunId=$sessionRunId blockId=$blockId');
         await FirestoreService().updateInProgressSessionBlock(
             uid, sessionRunId, blockId, blockData);
 

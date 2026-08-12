@@ -2,7 +2,6 @@
 // Read-only profile view for a user OTHER than the current one — tapped
 // into from a feed post's avatar/name (see feed_post_card.dart). Shows
 // their name/avatar, a Follow/Unfollow button, and their recent feed posts.
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -311,52 +310,6 @@ _isLoading
             _buildFollowButton(currentUid),
           ],
         ],
-      ),
-    );
-  }
-
-  // Real photo when present (same field/decode pattern as
-  // profile_screen.dart's _buildAvatarContent()), falling back to the
-  // initials circle otherwise. Populated for both own and other users'
-  // profiles — _loadProfile() reads getUserProfile() for your own uid and
-  // getPublicProfile() (the publicProfiles/{uid} mirror) for anyone else's,
-  // since users/{uid} itself is owner-only per firestore.rules.
-  Widget _buildAvatarContent() {
-    if (_isLoading) {
-      return const Center(
-        child: SizedBox(
-          width: 24,
-          height: 24,
-          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
-        ),
-      );
-    }
-    final photo = _photoBase64;
-    if (photo != null && photo.isNotEmpty) {
-      try {
-        return Image.memory(
-          base64Decode(photo),
-          width: 72,
-          height: 72,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => _buildInitialAvatar(),
-        );
-      } catch (_) {
-        return _buildInitialAvatar();
-      }
-    }
-    return _buildInitialAvatar();
-  }
-
-  Widget _buildInitialAvatar() {
-    return Center(
-      child: Text(
-        _initial,
-        style: const TextStyle(
-          fontSize: 26,
-          fontWeight: FontWeight.w800,
-          color: Colors.white,
-        ),
       ),
     );
   }

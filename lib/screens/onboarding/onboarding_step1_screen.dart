@@ -37,11 +37,8 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
   bool _usernameValid = false;
 
   int _subStep = 0;
-  String _displayName = '';
   DateTime? _dob;
   String _biologicalSex = '';
-  double? _heightCm;
-  double? _weightKg;
   String _heightUnit = 'cm';
   String _weightUnit = 'kg';
   bool _isLoading = false;
@@ -267,7 +264,7 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
       // failure, both in the console and to the user. Logged here so a
       // future issue like that shows up immediately instead of needing to
       // be independently investigated from scratch.
-      print('onboarding_step1_screen: save failed: $e');
+      debugPrint('onboarding_step1_screen: save failed: $e');
       if (mounted) {
         final isNetworkError = e is SocketException ||
             e.toString().toLowerCase().contains('network');
@@ -425,7 +422,6 @@ class _OnboardingStep1ScreenState extends State<OnboardingStep1Screen> {
                 _PlainTextField(
                   controller: _displayNameController,
                   hint: 'e.g. Alex',
-                  onChanged: (v) => setState(() => _displayName = v),
                 ),
                 const SizedBox(height: 16),
 
@@ -836,15 +832,11 @@ class _SegmentedChips extends StatelessWidget {
 class _PlainTextField extends StatelessWidget {
   final TextEditingController controller;
   final String hint;
-  final ValueChanged<String>? onChanged;
-  final TextInputType keyboardType;
   final FocusNode? focusNode;
 
   const _PlainTextField({
     required this.controller,
     required this.hint,
-    this.onChanged,
-    this.keyboardType = TextInputType.text,
     this.focusNode,
   });
 
@@ -859,8 +851,6 @@ class _PlainTextField extends StatelessWidget {
       child: TextField(
         controller: controller,
         focusNode: focusNode,
-        keyboardType: keyboardType,
-        onChanged: onChanged,
         style: const TextStyle(fontSize: 15, color: WW.text),
         decoration: InputDecoration(
           hintText: hint,

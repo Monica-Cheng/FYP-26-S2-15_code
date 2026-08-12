@@ -6,6 +6,7 @@ import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:flutter/foundation.dart';
 
 import '../core/constants.dart';
 
@@ -823,7 +824,7 @@ class FirestoreService {
     }
 
     try {
-      print('Writing to Firestore...');
+      debugPrint('Writing to Firestore...');
       // notes/photoBase64 are optional — only ever present on sessionData
       // when the standalone gym-session finish form (gym_session_screen
       // .dart's _showStandaloneFinishForm()) actually collected one; a
@@ -856,10 +857,10 @@ class FirestoreService {
         if (photoBase64 != null && photoBase64.isNotEmpty)
           'photoBase64': photoBase64,
       });
-      print('Firestore write successful!');
+      debugPrint('Firestore write successful!');
       return ref.id;
     } catch (e) {
-      print('Firestore write error: $e');
+      debugPrint('Firestore write error: $e');
       rethrow;
     }
   }
@@ -2978,12 +2979,12 @@ class FirestoreService {
           .doc(sessionId)
           .get();
       if (!doc.exists) {
-        print('getSession: no such session $sessionId');
+        debugPrint('getSession: no such session $sessionId');
         return null;
       }
       return {'id': doc.id, ...doc.data()!};
     } catch (e) {
-      print('getSession error: $e');
+      debugPrint('getSession error: $e');
       return null;
     }
   }
@@ -3049,15 +3050,6 @@ class FirestoreService {
       final blockId = b['blockId'] as String? ?? generateBlockId(i);
       return {...b, 'done': false, 'blockId': blockId};
     }).toList();
-    // TEMPORARY DEBUG — remove once the second-cardio-block bug is
-    // confirmed fixed.
-    print('DEBUG_BLOCKINDEX: createInProgressSession planId=$planId '
-        'dayIndex=$dayIndex blocks.length=${seededBlocks.length}');
-    for (var i = 0; i < seededBlocks.length; i++) {
-      final b = seededBlocks[i];
-      print('DEBUG_BLOCKINDEX:   [$i] name=${b['name']} '
-          'isCardio=${b['isCardio']} blockId=${b['blockId']}');
-    }
     final ref = await _db
         .collection(Collections.users)
         .doc(uid)
@@ -3068,10 +3060,6 @@ class FirestoreService {
       'blocks': seededBlocks,
       'createdAt': FieldValue.serverTimestamp(),
     });
-    // TEMPORARY DEBUG — remove once the post-always-fresh-key regression is
-    // confirmed fixed.
-    print('DEBUG_REGRESSION: createInProgressSession created '
-        'sessionRunId=${ref.id} planId=$planId dayIndex=$dayIndex');
     return ref.id;
   }
 
@@ -3099,7 +3087,7 @@ class FirestoreService {
           .doc(sessionRunId)
           .update({'blocks': blocks});
     } catch (e) {
-      print('backfillInProgressSessionBlocks error: $e');
+      debugPrint('backfillInProgressSessionBlocks error: $e');
     }
   }
 
@@ -3160,10 +3148,6 @@ class FirestoreService {
         .doc(uid)
         .collection(_inProgressSessions)
         .doc(sessionRunId);
-    // TEMPORARY DEBUG — remove once the second-cardio-block bug is
-    // confirmed fixed.
-    print('DEBUG_BLOCKINDEX: updateInProgressSessionBlock called '
-        'sessionRunId=$sessionRunId blockId=$blockId');
     try {
       await _db.runTransaction((transaction) async {
         // transaction.get()/transaction.update(), not docRef.get()/
@@ -3173,12 +3157,12 @@ class FirestoreService {
         // opt that read out of the transaction's isolation guarantee.
         final doc = await transaction.get(docRef);
         if (!doc.exists) {
-          print('updateInProgressSessionBlock: no such session $sessionRunId');
+          debugPrint('updateInProgressSessionBlock: no such session $sessionRunId');
           return;
         }
         final rawBlocks = doc.data()?['blocks'];
         if (rawBlocks is! List) {
-          print('updateInProgressSessionBlock: no blocks[] for session '
+          debugPrint('updateInProgressSessionBlock: no blocks[] for session '
               '$sessionRunId');
           return;
         }
@@ -3187,7 +3171,7 @@ class FirestoreService {
             .toList();
         final index = blocks.indexWhere((b) => b['blockId'] == blockId);
         if (index < 0) {
-          print('updateInProgressSessionBlock: blockId $blockId not found '
+          debugPrint('updateInProgressSessionBlock: blockId $blockId not found '
               'for session $sessionRunId');
           return;
         }
@@ -3200,22 +3184,10 @@ class FirestoreService {
         // this is a full slot replacement, not a merge, so leaving it out
         // would silently drop the block's own identity on every write.
         blocks[index] = {...blockData, 'done': done, 'blockId': blockId};
-        // TEMPORARY DEBUG — remove once the second-cardio-block bug is
-        // confirmed fixed. Note this whole callback (including these
-        // prints) can legitimately run more than once for a single call
-        // to this function if Firestore retries the transaction after a
-        // conflicting write — that's expected, not a bug in the logging.
-        print('DEBUG_BLOCKINDEX: updateInProgressSessionBlock about to write '
-            'sessionRunId=$sessionRunId blocks.length=${blocks.length}');
-        for (var i = 0; i < blocks.length; i++) {
-          final b = blocks[i];
-          print('DEBUG_BLOCKINDEX:   [$i] blockId=${b['blockId']} '
-              'name=${b['name']} isCardio=${b['isCardio']} done=${b['done']}');
-        }
         transaction.update(docRef, {'blocks': blocks});
       });
     } catch (e) {
-      print('updateInProgressSessionBlock error: $e');
+      debugPrint('updateInProgressSessionBlock error: $e');
     }
   }
 
@@ -3251,7 +3223,7 @@ class FirestoreService {
     try {
       final doc = await docRef.get();
       if (!doc.exists) {
-        print('appendInProgressSessionBlock: no such session $sessionRunId');
+        debugPrint('appendInProgressSessionBlock: no such session $sessionRunId');
         return null;
       }
       final rawBlocks = doc.data()?['blocks'];
@@ -3263,7 +3235,7 @@ class FirestoreService {
       await docRef.update({'blocks': blocks});
       return blockId;
     } catch (e) {
-      print('appendInProgressSessionBlock error: $e');
+      debugPrint('appendInProgressSessionBlock error: $e');
       return null;
     }
   }
@@ -3312,7 +3284,7 @@ class FirestoreService {
     try {
       final doc = await docRef.get();
       if (!doc.exists) {
-        print('dismissInjuryReview: no such session $sessionRunId');
+        debugPrint('dismissInjuryReview: no such session $sessionRunId');
         return false;
       }
       final rawBlocks = doc.data()?['blocks'];
@@ -3326,7 +3298,7 @@ class FirestoreService {
       });
       return true;
     } catch (e) {
-      print('dismissInjuryReview error: $e');
+      debugPrint('dismissInjuryReview error: $e');
       return false;
     }
   }
@@ -3352,12 +3324,12 @@ class FirestoreService {
           .doc(sessionRunId)
           .get();
       if (!doc.exists) {
-        print('getInProgressSession: no such session $sessionRunId');
+        debugPrint('getInProgressSession: no such session $sessionRunId');
         return null;
       }
       return doc.data();
     } catch (e) {
-      print('getInProgressSession error: $e');
+      debugPrint('getInProgressSession error: $e');
       return null;
     }
   }
@@ -3419,18 +3391,6 @@ class FirestoreService {
     final blocks = rawBlocks is List
         ? rawBlocks.map((b) => Map<String, dynamic>.from(b as Map)).toList()
         : <Map<String, dynamic>>[];
-
-    // TEMPORARY DEBUG — remove once the post-always-fresh-key regression is
-    // confirmed fixed. Same name/isCardio/done format as the earlier
-    // DEBUG_BLOCKINDEX logs. Logs every block (done or not) — see
-    // doneBlocks below for what's actually finalized.
-    print('DEBUG_REGRESSION: finalizeInProgressSession sessionRunId='
-        '$sessionRunId blocks.length=${blocks.length}');
-    for (var i = 0; i < blocks.length; i++) {
-      final b = blocks[i];
-      print('DEBUG_REGRESSION:   [$i] name=${b['name']} '
-          'isCardio=${b['isCardio']} done=${b['done']}');
-    }
 
     // Cardio blocks: completion is genuinely all-or-nothing, so the
     // existing block-level done == true gate is semantically correct here
@@ -3762,7 +3722,7 @@ class FirestoreService {
       if (snapshot.docs.isEmpty) return null;
       return snapshot.docs.first.id;
     } catch (e) {
-      print('findInProgressSessionRunId error: $e');
+      debugPrint('findInProgressSessionRunId error: $e');
       return null;
     }
   }
@@ -3789,14 +3749,14 @@ class FirestoreService {
           .doc(sessionRunId)
           .get();
       if (!doc.exists) {
-        print('isInProgressSessionFullyDone: no such session $sessionRunId');
+        debugPrint('isInProgressSessionFullyDone: no such session $sessionRunId');
         return false;
       }
       final rawBlocks = doc.data()?['blocks'];
       if (rawBlocks is! List) return false;
       return rawBlocks.every((b) => b is Map && b['done'] == true);
     } catch (e) {
-      print('isInProgressSessionFullyDone error: $e');
+      debugPrint('isInProgressSessionFullyDone error: $e');
       return false;
     }
   }
@@ -4013,7 +3973,7 @@ class FirestoreService {
       // permission-denied here is otherwise easy to misdiagnose as a
       // coachRequests/coachClients rules bug rather than the actual
       // cross-user users/{uid} read it almost always turns out to be.
-      print('[acceptCoachRequest] batch commit FAILED: coachUid=$coachUid '
+      debugPrint('[acceptCoachRequest] batch commit FAILED: coachUid=$coachUid '
           'clientUid=$clientUid requestId=$requestId error=$e');
       rethrow;
     }
@@ -4346,11 +4306,11 @@ class FirestoreService {
       final display = (v is String && v.length > 80)
           ? '${v.substring(0, 80)}...<${v.length} chars total>'
           : v;
-      print('[createFeedPost] ${entry.key} '
+      debugPrint('[createFeedPost] ${entry.key} '
           '(${v.runtimeType}) = $display');
     }
     if (imageBase64 != null) {
-      print('[createFeedPost] imageBase64 length=${imageBase64.length} '
+      debugPrint('[createFeedPost] imageBase64 length=${imageBase64.length} '
           'chars (~${(imageBase64.length / 1024).toStringAsFixed(1)} KB)');
     }
 

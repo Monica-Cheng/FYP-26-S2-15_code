@@ -421,19 +421,6 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // TEMPORARY DEBUG — remove once the post-always-fresh-key regression is
-    // confirmed fixed. No safe initState() equivalent exists in this file
-    // (_session depends on GoRouterState.of(context).extra, which isn't
-    // readable that early — see _session's own getter) so this logs on
-    // every build() pass instead, same as this file's other diagnostics.
-    final debugSession = _session;
-    final debugCardioBlocks = debugSession['cardioBlocks'];
-    print('DEBUG_REGRESSION: ActivityDetailScreen.build() session '
-        'type=${debugSession['type']} '
-        'sessionName=${debugSession['sessionName']} '
-        'exercises.length=${(debugSession['exercises'] as List?)?.length ?? 'absent'} '
-        'cardioBlocks.length=${debugCardioBlocks is List ? debugCardioBlocks.length : 'null/absent'}');
-
     final hasNotes = (_session['notes'] as String?)?.isNotEmpty == true;
     final photoWidget = _isCardio ? _buildPhotoWidget() : null;
 

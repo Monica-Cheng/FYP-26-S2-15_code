@@ -107,8 +107,6 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
   // loading view for this short window.
   bool _isPreparingSession = true;
   String _activity = 'Run';
-  int _plannedMinutes = 30;
-  bool _fromPlan = false;
   int _goalMinutes = 0;
   // Which in-progress plan session (and which cardio block within it) this
   // session belongs to, if reached via a plan's cardio block — see
@@ -152,7 +150,6 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
   int _accrualResumeDebounceTicks = _kFallbackIndoorAccrualResumeDebounceTicks;
   String? _uid;
   double? _liveHeartRate;
-  bool _healthPermissionGranted = false;
   Timer? _heartRateTimer;
   DateTime? _sessionStartTime;
   bool _showInjuryWarning = false;
@@ -174,8 +171,6 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
       final extra = GoRouterState.of(context).extra as Map<String, dynamic>?;
       setState(() {
         _activity = extra?['activity'] as String? ?? 'Run';
-        _plannedMinutes = extra?['plannedMinutes'] as int? ?? 30;
-        _fromPlan = extra?['fromPlan'] as bool? ?? false;
         _goalMinutes = extra?['goalMinutes'] as int? ??
             extra?['plannedMinutes'] as int? ?? 0;
         _sessionRunId = extra?['sessionRunId'] as String?;
@@ -318,7 +313,6 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
   Future<void> _initHealthKit() async {
     final granted = await HealthService().requestPermissions();
     if (!mounted) return;
-    setState(() => _healthPermissionGranted = granted);
     if (granted) {
       // Manage App screen's Heart Rate toggle (default true) — see
       // FirestoreService.isHealthCategoryEnabled()'s own doc comment.
@@ -898,10 +892,6 @@ class _CardioSessionScreenState extends State<CardioSessionScreen> {
         'avgHeartRate': ?avgHR,
         'maxHeartRate': ?maxHR,
       };
-      // TEMPORARY DEBUG — remove once the second-cardio-block bug is
-      // confirmed fixed.
-      print('DEBUG_BLOCKID: cardio_session_screen finish uid=$uid '
-          'sessionRunId=$sessionRunId blockId=$blockId');
       await FirestoreService()
           .updateInProgressSessionBlock(uid, sessionRunId, blockId, blockData);
 

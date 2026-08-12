@@ -4,7 +4,6 @@
 // FAB shown only on Home tab; tapping shows SnackBar.
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -329,7 +328,6 @@ class _HomeTabState extends State<_HomeTab> {
   StreamSubscription<List<Map<String, dynamic>>>? _notificationsSub;
   int _unreadNotificationCount = 0;
   bool _showMissedBanner = false;
-  String _missedSessionDate = '';
   String _missedPlanId = '';
   String _missedPlanName = '';
   int _missedDayIndex = 1;
@@ -565,7 +563,6 @@ class _HomeTabState extends State<_HomeTab> {
 
       if (!mounted) return;
       setState(() {
-        _missedSessionDate = yesterday;
         _missedPlanId = trackedPlanId;
         _missedPlanName = trackedPlanName;
         _missedDayIndex = currentDayIndex;
@@ -1487,40 +1484,6 @@ child: UserAvatar(
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  // Shows the real uploaded photo when present (same field/decode pattern
-  // as profile_screen.dart's _buildAvatarContent()), falling back to the
-  // initials circle otherwise.
-  Widget _buildTopBarAvatarContent(String initials) {
-    final photo = _photoBase64;
-    if (photo != null && photo.isNotEmpty) {
-      try {
-        return Image.memory(
-          base64Decode(photo),
-          width: 38,
-          height: 38,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => _buildTopBarInitialAvatar(initials),
-        );
-      } catch (_) {
-        return _buildTopBarInitialAvatar(initials);
-      }
-    }
-    return _buildTopBarInitialAvatar(initials);
-  }
-
-  Widget _buildTopBarInitialAvatar(String initials) {
-    return Center(
-      child: Text(
-        initials,
-        style: const TextStyle(
-          fontSize: 15,
-          fontWeight: FontWeight.w800,
-          color: WW.primary,
-        ),
       ),
     );
   }

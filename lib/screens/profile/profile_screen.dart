@@ -760,11 +760,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Widget _buildBadgeTile(Map<String, dynamic> badge, bool earned, {double size = 56}) {
     final imageUrl = badge['imageUrl'] as String? ?? '';
     final name = badge['name'] as String? ?? '';
-    // TEMPORARY — remove once the real imageUrl value is confirmed (see
-    // this session's Phase 2 investigation into badge images not rendering).
-    if (imageUrl.isNotEmpty) {
-      print('DEBUG_BADGE: badge "${badge['id']}" ($name) imageUrl = $imageUrl');
-    }
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [

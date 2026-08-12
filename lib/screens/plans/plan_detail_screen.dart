@@ -1286,8 +1286,6 @@ class _SectionCard extends StatelessWidget {
 
 class _DayCard extends StatefulWidget {
   final Map<String, dynamic> sessionData;
-  final bool showStartButton;
-  final VoidCallback? onStart;
   final VoidCallback? onPreview;
   // True when this day is in the lifetime completedDayIndices ledger (see
   // _isDayCompleted()) — shows a small teal "Completed" pill (same
@@ -1306,8 +1304,6 @@ class _DayCard extends StatefulWidget {
 
   const _DayCard({
     required this.sessionData,
-    this.showStartButton = false,
-    this.onStart,
     this.onPreview,
     this.isCompleted = false,
     this.compressedData,
@@ -1500,26 +1496,6 @@ class _DayCardState extends State<_DayCard> {
                         ),
                       ],
                     ),
-                  ),
-                ],
-                if (widget.showStartButton) ...[
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    onPressed: widget.onStart,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: WW.primary,
-                      minimumSize: const Size(56, 30),
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 10),
-                      textStyle: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    child: const Text('Start'),
                   ),
                 ],
                 GestureDetector(
