@@ -55,7 +55,6 @@ List<ShareCardOption> buildSessionShareCardOptions({
   required Map<String, dynamic> session,
   required bool isCardio,
   required List<LatLng> routePoints,
-  required List<Color> selectedGradientColors,
   String? photoBase64,
 }) {
   final hasRoute = routePoints.isNotEmpty;
@@ -88,7 +87,7 @@ List<ShareCardOption> buildSessionShareCardOptions({
       )) {
     cards.add(ShareCardOption(
       label: 'Map',
-      builder: (_) => RouteMapShareCard(
+      builder: (_, _) => RouteMapShareCard(
         mapSnapshotBase64: mapSnapshotBase64,
         routePoints: routePoints,
         sessionName: sessionName,
@@ -116,7 +115,7 @@ List<ShareCardOption> buildSessionShareCardOptions({
           ];
     cards.add(ShareCardOption(
       label: 'Photo',
-      builder: (_) => SizedBox(
+      builder: (_, _) => SizedBox(
         width: RouteMapShareCard.width,
         height: RouteMapShareCard.height,
         child: Stack(
@@ -144,7 +143,13 @@ List<ShareCardOption> buildSessionShareCardOptions({
   cards.add(ShareCardOption(
     label: 'Color',
     supportsColorPicker: true,
-    builder: (_) => SizedBox(
+    // Reads the gradient LIVE from the picker sheet's current swatch
+    // selection (passed in fresh on every rebuild) instead of a value
+    // snapshotted once when this options list was first built — see
+    // ShareCardOption.builder's own doc comment in share_card_picker.dart
+    // for the bug this fixes (swatch taps silently not changing the
+    // card).
+    builder: (_, gradientColors) => SizedBox(
       width: RouteMapShareCard.width,
       height: RouteMapShareCard.height,
       child: Stack(
@@ -163,7 +168,7 @@ List<ShareCardOption> buildSessionShareCardOptions({
             // set" display elsewhere.
             goalMinutes: 0,
             date: date,
-            gradientColors: selectedGradientColors,
+            gradientColors: gradientColors,
           ),
           if (hasRoute)
             Positioned.fill(

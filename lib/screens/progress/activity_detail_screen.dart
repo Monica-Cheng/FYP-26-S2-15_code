@@ -311,7 +311,6 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
       session: _session,
       isCardio: _isCardio,
       routePoints: _routePoints,
-      selectedGradientColors: _selectedGradientColors,
       photoBase64: photoBase64,
     );
     final chosenIndex = await showShareCardPicker(
@@ -331,7 +330,7 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
       if (!mounted) return;
       final bytes = await captureWidgetAsPngBytes(
         context,
-        card.builder(context),
+        card.builder(context, _selectedGradientColors),
         size: const Size(360, 640),
       );
       if (bytes == null) {

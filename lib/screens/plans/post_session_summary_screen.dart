@@ -441,7 +441,6 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       session: _session,
       isCardio: _isCardio,
       routePoints: _routePoints,
-      selectedGradientColors: _selectedGradientColors,
       photoBase64: photoBase64,
     );
   }
@@ -453,7 +452,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       if (!mounted) return;
       final bytes = await captureWidgetAsPngBytes(
         context,
-        card.builder(context),
+        card.builder(context, _selectedGradientColors),
         size: const Size(360, 640),
       );
       debugPrint('[ShareCard] label=${card.label} captured bytes=${bytes?.length}');
@@ -597,7 +596,7 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       if (!mounted) return;
       final pngBytes = await captureWidgetAsPngBytes(
         context,
-        card.builder(context),
+        card.builder(context, _selectedGradientColors),
         size: const Size(360, 640),
       );
       debugPrint('[PostToFeed] label=${card.label} captured bytes=${pngBytes?.length}');
