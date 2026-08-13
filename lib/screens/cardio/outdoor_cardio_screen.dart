@@ -219,6 +219,17 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
   _TrackingState _trackingState = _TrackingState.notStarted;
 
   MapLibreMapController? _mapController;
+  // Signals the next MapLibreMap.onMapIdle firing — completed exactly
+  // once each time an idle callback arrives while this is non-null/
+  // pending, then cleared. Used by _captureMapSnapshot() below as a real
+  // "tiles finished loading" event instead of a blind delay — see that
+  // method's own doc comment for why the package's own
+  // waitUntilMapTilesAreLoaded() can't be used for this (confirmed via
+  // its source: a literal no-op on native platforms). onMapIdle's own
+  // doc comment (maplibre_map.dart) explicitly guarantees "All currently
+  // requested tiles have loaded" among its firing conditions, which is
+  // exactly the signal needed here.
+  Completer<void>? _mapIdleCompleter;
   Position? _currentPosition;
   StreamSubscription<Position>? _positionSub;
 
@@ -550,6 +561,17 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     // vice versa) — centering runs from both places and no-ops if either
     // piece isn't ready yet.
     _centerMapOnCurrentPosition();
+  }
+
+  // Fires on every idle settle (live tracking, user panning, etc.), not
+  // just the one _captureMapSnapshot() cares about — _mapIdleCompleter is
+  // only non-null while that method is actively awaiting one, so this is
+  // a no-op the rest of the time.
+  void _onMapIdle() {
+    final completer = _mapIdleCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete();
+    }
   }
 
   // Follows the user's live position (re-centering only, no rotation)
@@ -1555,6 +1577,7 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
                       zoom: 2,
                     ),
                     onMapCreated: _onMapCreated,
+                    onMapIdle: _onMapIdle,
                     // Only turn on the native location puck once
                     // permission is actually confirmed granted.
                     myLocationEnabled:
@@ -2565,19 +2588,37 @@ class _OutdoorCardioScreenState extends State<OutdoorCardioScreen>
     try {
       final allPoints = _segments.expand((segment) => segment).toList();
       await _ensureFullRouteDrawnForSnapshot(controller, allPoints);
+
+      // Real "tiles finished loading" signal instead of a blind delay —
+      // confirmed via maplibre_gl 0.26.2's own source
+      // (method_channel_maplibre_gl.dart) that
+      // waitUntilMapTilesAreLoaded() (called inside _fitCameraToRoute()
+      // below) is a literal no-op on native platforms, so it can never be
+      // trusted here. MapLibreMap's onMapIdle callback (wired to
+      // _onMapIdle()/_mapIdleCompleter above) is a real, native-
+      // functional event whose own doc comment explicitly guarantees "All
+      // currently requested tiles have loaded" among its firing
+      // conditions — set up BEFORE the camera jump so an idle event
+      // firing unusually fast can't be missed. A previous version of this
+      // method used a blind 500ms delay as a stopgap, which real-device
+      // testing showed was insufficient after a large camera jump over a
+      // real network connection (a stretched, low-tile-count share-card
+      // background). 3s timeout fallback so a session with a genuinely
+      // slow/unreachable tile server still finishes instead of hanging
+      // Finish indefinitely.
+      final idleCompleter = Completer<void>();
+      _mapIdleCompleter = idleCompleter;
       final bounds = await _fitCameraToRoute(controller, allPoints);
-      // _fitCameraToRoute()'s waitUntilMapTilesAreLoaded() call is a
-      // documented no-op on native platforms (see that method's own doc
-      // comment) — on a real device this can mean takeSnapshot() below
-      // fires before the just-panned/zoomed viewport's tiles have
-      // actually finished rendering, capturing a blank/grey tile
-      // placeholder instead of the real map underneath. This explicit
-      // delay is a plausible mitigation based on that documented gap, NOT
-      // a confirmed fix — pairs with the debugPrint further down (and in
-      // RouteMapShareCard.build()) to check on retest whether
-      // mapSnapshotBase64 is empty (upstream capture skipped entirely) or
-      // present-but-blank (this timing gap) if the bug reproduces again.
-      await Future.delayed(const Duration(milliseconds: 500));
+      await idleCompleter.future.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {
+          debugPrint('Outdoor cardio: onMapIdle did not fire within 3s of '
+              'the post-tracking camera jump — capturing the snapshot '
+              'with whatever tiles had loaded by then instead of '
+              'blocking Finish indefinitely.');
+        },
+      );
+      _mapIdleCompleter = null;
       final bytes = await controller.takeSnapshot(width: 480, height: 300);
 
       // takeSnapshot() only ever returns a bare base map (see
