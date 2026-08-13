@@ -336,6 +336,17 @@ class FirestoreService {
         if (_publicProfileFields.contains(entry.key)) entry.key: entry.value,
     };
 
+    // Diagnostic for the "leaderboard still not showing photos" investigation
+    // — this is the single chokepoint every photo upload (profile_screen
+    // .dart / edit_profile_screen.dart) goes through, so logging here covers
+    // both call sites without duplicating in each screen.
+    final touchesPhoto = data.containsKey('photoBase64');
+    if (touchesPhoto) {
+      debugPrint('[ProfilePhoto] updateUserProfile uid=$uid — data contains '
+          'photoBase64 (length=${(data['photoBase64'] as String?)?.length ?? 0}); '
+          'will mirror to publicProfiles=${publicUpdates.containsKey('photoBase64')}');
+    }
+
     final batch = _db.batch();
     batch.update(_db.collection(Collections.users).doc(uid), data);
     if (publicUpdates.isNotEmpty) {
@@ -346,6 +357,12 @@ class FirestoreService {
       );
     }
     await batch.commit();
+
+    if (touchesPhoto) {
+      debugPrint('[ProfilePhoto] updateUserProfile uid=$uid — batch committed. '
+          'Wrote users/$uid'
+          '${publicUpdates.isNotEmpty ? ' AND publicProfiles/$uid' : ' ONLY — publicUpdates was empty, publicProfiles NOT written'}.');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -4340,7 +4357,33 @@ class FirestoreService {
           'chars (~${(imageBase64.length / 1024).toStringAsFixed(1)} KB)');
     }
 
-    await _db.collection(Collections.posts).add(postData);
+    // Diagnostic for the "Post to Feed failing" investigation — a single
+    // consolidated line (uid/type/approx payload size) plus an explicit
+    // try/catch around the write itself, so a permission-denied failure
+    // (security rules) is unambiguously distinguishable in the logs from
+    // a null-value/serialization error or a genuine network failure —
+    // all three look identical from the caller's point of view otherwise.
+    final approxPayloadBytes = postData.entries
+        .fold<int>(0, (total, e) => total + '${e.value}'.length);
+    debugPrint('[PostToFeed] createFeedPost: uid=$uid type=$type '
+        'approxPayloadBytes=$approxPayloadBytes — writing to '
+        '${Collections.posts} at ${DateTime.now()}');
+    try {
+      await _db.collection(Collections.posts).add(postData);
+      debugPrint('[PostToFeed] createFeedPost: write succeeded at '
+          '${DateTime.now()}');
+    } on FirebaseException catch (e, stack) {
+      debugPrint('[PostToFeed] createFeedPost: FirebaseException at '
+          '${DateTime.now()} — code=${e.code} message=${e.message} '
+          '${e.code == 'permission-denied' ? '(LIKELY A SECURITY RULES ISSUE)' : ''}');
+      debugPrint('Stack: $stack');
+      rethrow;
+    } catch (e, stack) {
+      debugPrint('[PostToFeed] createFeedPost: non-Firebase exception at '
+          '${DateTime.now()}: $e');
+      debugPrint('Stack: $stack');
+      rethrow;
+    }
   }
 
   bool _isVisibleFeedPost(Map<String, dynamic> data) {
@@ -4880,6 +4923,20 @@ class FirestoreService {
         final visible = e['leaderboardVisible'] as bool;
         return visible || e['uid'] == uid;
       }).toList();
+
+      // Diagnostic for the "leaderboard still not showing photos"
+      // investigation — logs exactly what each entry's publicProfiles doc
+      // actually contained for photoBase64 at read time, per uid.
+      for (final e in entries) {
+        final photo = e['photoBase64'] as String?;
+        final photoState = photo == null
+            ? 'null (no photoBase64 field on publicProfiles doc)'
+            : photo.isEmpty
+                ? 'empty string'
+                : '<present, ${photo.length} chars>';
+        debugPrint('[LeaderboardPhoto] uid=${e['uid']} '
+            'displayName=${e['displayName']} photoBase64=$photoState');
+      }
 
       entries.sort((a, b) {
         final xpA = a['weeklyXp'] as int;

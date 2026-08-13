@@ -345,6 +345,9 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
   }
 
   Future<void> _shareResultCard() async {
+    debugPrint('[ShareButton] nutrition_scan_screen Share tapped at '
+        '${DateTime.now()} — guard(result==null)=${_result == null}, '
+        'guard(isSharing)=$_isSharing');
     final result = _result;
     if (result == null || _isSharing) return;
 
@@ -352,12 +355,20 @@ class _NutritionScanScreenState extends State<NutritionScanScreen> {
     try {
       final image = _mode == _Mode.scan ? _pickedImage : null;
       final text = 'Just logged ${result.foodName} on WiseWorkout! 🍽️';
+      debugPrint('[ShareButton] nutrition_scan_screen calling '
+          '${image != null ? 'Share.shareXFiles' : 'Share.share'} at '
+          '${DateTime.now()} — image=${image?.path}');
       if (image != null) {
         await Share.shareXFiles([XFile(image.path)], text: text);
       } else {
         await Share.share(text);
       }
-    } catch (e) {
+      debugPrint('[ShareButton] nutrition_scan_screen share call returned '
+          'successfully at ${DateTime.now()}');
+    } catch (e, stack) {
+      debugPrint('[ShareButton] nutrition_scan_screen Share error at '
+          '${DateTime.now()}: $e');
+      debugPrint('Stack: $stack');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not share: $e')),
@@ -1500,13 +1511,44 @@ class _BarcodeScannerViewState extends State<_BarcodeScannerView> {
   final _picker = ImagePicker();
   bool _busy = false;
 
+  // Temporary diagnostics for the black-screen/lag investigation — logs
+  // every isRunning/isInitialized/error transition on the controller,
+  // which also captures the WIDGET's own internal auto-start (autoStart:
+  // true is mobile_scanner's default, and this app never overrides it —
+  // so there is no explicit app-level "first start()" call to log
+  // directly; MobileScanner calls controller.start() itself on mount).
+  // Purely observational — does not call setState or alter behavior.
+  void _logControllerState() {
+    final value = _scannerController.value;
+    debugPrint('[BarcodeScanner] controller state changed at '
+        '${DateTime.now()}: isInitialized=${value.isInitialized} '
+        'isRunning=${value.isRunning} '
+        'hasCameraPermission=${value.hasCameraPermission} '
+        'error=${value.error} size=${value.size}');
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    debugPrint('[BarcodeScanner] controller created at ${DateTime.now()} '
+        '(instance hashCode=${_scannerController.hashCode}, State '
+        'hashCode=$hashCode)');
+    _scannerController.addListener(_logControllerState);
+  }
+
   @override
   void dispose() {
+    debugPrint('[BarcodeScanner] dispose() called at ${DateTime.now()} '
+        '(instance hashCode=${_scannerController.hashCode}, State '
+        'hashCode=$hashCode)');
+    _scannerController.removeListener(_logControllerState);
     _scannerController.dispose();
     super.dispose();
   }
 
   Future<void> _handleDetect(BarcodeCapture capture) async {
+    debugPrint('[BarcodeScanner] onDetect fired at ${DateTime.now()} — '
+        '${capture.barcodes.length} barcode(s), busy=$_busy');
     if (_busy) return;
     final code = capture.barcodes.isNotEmpty
         ? capture.barcodes.first.rawValue
@@ -1514,6 +1556,7 @@ class _BarcodeScannerViewState extends State<_BarcodeScannerView> {
     if (code == null || code.isEmpty) return;
 
     setState(() => _busy = true);
+    debugPrint('[BarcodeScanner] calling stop() at ${DateTime.now()}');
     await _scannerController.stop();
     await _lookupAndShowSheet(code);
   }
@@ -1533,6 +1576,7 @@ class _BarcodeScannerViewState extends State<_BarcodeScannerView> {
     if (picked == null) return;
 
     setState(() => _busy = true);
+    debugPrint('[BarcodeScanner] calling stop() (gallery pick) at ${DateTime.now()}');
     await _scannerController.stop();
 
     BarcodeCapture? capture;
@@ -1554,6 +1598,8 @@ class _BarcodeScannerViewState extends State<_BarcodeScannerView> {
           ),
         ),
       );
+      debugPrint('[BarcodeScanner] calling start() (no code found in photo) '
+          'at ${DateTime.now()}');
       await _scannerController.start();
       if (mounted) setState(() => _busy = false);
       return;
@@ -1591,6 +1637,8 @@ class _BarcodeScannerViewState extends State<_BarcodeScannerView> {
         widget.onFinished();
         return;
       }
+      debugPrint('[BarcodeScanner] calling start() (keep scanning) '
+          'at ${DateTime.now()}');
       await _scannerController.start();
       if (mounted) setState(() => _busy = false);
     } catch (e) {
@@ -1598,6 +1646,8 @@ class _BarcodeScannerViewState extends State<_BarcodeScannerView> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Lookup failed: $e')),
       );
+      debugPrint('[BarcodeScanner] calling start() (lookup failed) '
+          'at ${DateTime.now()}');
       await _scannerController.start();
       if (mounted) setState(() => _busy = false);
     }

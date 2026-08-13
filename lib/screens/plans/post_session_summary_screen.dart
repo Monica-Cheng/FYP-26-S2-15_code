@@ -348,6 +348,9 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       PhotoBackgroundShareCard.reusablePhotoBase64(_session);
 
   Future<void> _startCardFlow({required bool forPost}) async {
+    debugPrint('[ShareButton] _startCardFlow(forPost: $forPost) entered at '
+        '${DateTime.now()} — guard(isPosting/isSharing)='
+        '${forPost ? _isPosting : _isSharing}');
     if (forPost ? _isPosting : _isSharing) return;
 
     final existingPhoto = _reusablePhotoBase64;
@@ -409,14 +412,21 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
     required bool forPost,
   }) async {
     if (!mounted) return;
+    debugPrint('[ShareButton] _showCardPickerAndContinue entered at '
+        '${DateTime.now()} — photoBase64=${photoBase64 != null}, '
+        'forPost=$forPost');
     _selectedGradientColors = ShareCardGradients.presets.first.colors;
     final cards = _buildCardOptions(photoBase64: photoBase64);
+    debugPrint('[ShareButton] built ${cards.length} card option(s), '
+        'opening picker sheet at ${DateTime.now()}');
     final chosenIndex = await showShareCardPicker(
       context,
       cards: cards,
       confirmLabel: forPost ? 'Use This Design' : 'Share This Design',
       onGradientChanged: (colors) => _selectedGradientColors = colors,
     );
+    debugPrint('[ShareButton] picker sheet closed at ${DateTime.now()} — '
+        'chosenIndex=$chosenIndex');
     if (chosenIndex == null || !mounted) return;
     final chosen = cards[chosenIndex];
     if (forPost) {
@@ -468,13 +478,19 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
           '${tempDir.path}/wiseworkout_session_'
           '${DateTime.now().millisecondsSinceEpoch}.png');
       await file.writeAsBytes(bytes);
+      debugPrint('[ShareButton] post_session_summary_screen calling '
+          'Share.shareXFiles at ${DateTime.now()} — file=${file.path} '
+          'exists=${await file.exists()} bytes=${bytes.length}');
 
       await Share.shareXFiles(
         [XFile(file.path)],
         text: 'Just crushed a session on WiseWorkout! 💪',
       );
+      debugPrint('[ShareButton] post_session_summary_screen '
+          'Share.shareXFiles returned successfully at ${DateTime.now()}');
     } catch (e, stack) {
-      debugPrint('Share error: $e');
+      debugPrint('[ShareButton] post_session_summary_screen Share error at '
+          '${DateTime.now()}: $e');
       debugPrint('Stack: $stack');
       _snack('Could not share. Please try again.');
     } finally {
@@ -1900,7 +1916,13 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
             children: [
               Expanded(
                 child: GestureDetector(
-                  onTap: _isSharing ? null : () => _startCardFlow(forPost: false),
+                  onTap: _isSharing
+                      ? null
+                      : () {
+                          debugPrint('[ShareButton] post_session_summary_screen '
+                              'Share tapped at ${DateTime.now()}');
+                          _startCardFlow(forPost: false);
+                        },
                   child: Container(
                     height: 48,
                     decoration: BoxDecoration(
