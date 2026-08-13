@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
 import { Download, Eye, EyeOff, Pencil, Trash2 } from 'lucide-react';
@@ -15,6 +15,7 @@ import TableActions from '../components/ui/TableActions';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
 import ModalDialog from '../components/ui/ModalDialog';
+import useClientPagination from '../hooks/useClientPagination';
 import { toDate, formatDate } from '../utils/dateUtils';
 import { getCallableErrorMessage } from '../utils/planUtils';
 
@@ -378,38 +379,47 @@ function Posts() {
     setDateFilter('all');
   };
 
-  const matchesDateFilter = (post) => {
-    if (dateFilter === 'all') return true;
+  const filtered = useMemo(() => {
+    return posts.filter((post) => {
+      const query = search.toLowerCase();
+      const matchesSearch =
+        !query ||
+        (post.authorName || '').toLowerCase().includes(query) ||
+        (post.foodName || '').toLowerCase().includes(query) ||
+        (post.sessionName || '').toLowerCase().includes(query) ||
+        (post.caption || '').toLowerCase().includes(query);
+      const matchesType = typeFilter === 'all' || post.type === typeFilter;
+      const isHidden = !!post.isHidden;
+      const matchesStatus =
+        statusFilter === 'all' ||
+        (statusFilter === 'hidden' ? isHidden : !isHidden);
 
-    const created = toDate(post.createdAt);
-    if (!created) return false;
+      let matchesDate = true;
+      if (dateFilter !== 'all') {
+        const created = toDate(post.createdAt);
 
-    const now = new Date();
-    const daysAgo = (now - created) / (1000 * 60 * 60 * 24);
+        if (!created) {
+          matchesDate = false;
+        } else {
+          const now = new Date();
+          const daysAgo = (now - created) / (1000 * 60 * 60 * 24);
 
-    if (dateFilter === 'today') {
-      return created.toDateString() === now.toDateString();
-    }
-    if (dateFilter === '7days') return daysAgo <= 7;
-    if (dateFilter === '30days') return daysAgo <= 30;
-    return true;
-  };
+          if (dateFilter === 'today') {
+            matchesDate = created.toDateString() === now.toDateString();
+          } else if (dateFilter === '7days') {
+            matchesDate = daysAgo <= 7;
+          } else if (dateFilter === '30days') {
+            matchesDate = daysAgo <= 30;
+          }
+        }
+      }
 
-  const filtered = posts.filter((post) => {
-    const query = search.toLowerCase();
-    const matchesSearch =
-      !query ||
-      (post.authorName || '').toLowerCase().includes(query) ||
-      (post.foodName || '').toLowerCase().includes(query) ||
-      (post.sessionName || '').toLowerCase().includes(query) ||
-      (post.caption || '').toLowerCase().includes(query);
-    const matchesType = typeFilter === 'all' || post.type === typeFilter;
-    const isHidden = !!post.isHidden;
-    const matchesStatus =
-      statusFilter === 'all' ||
-      (statusFilter === 'hidden' ? isHidden : !isHidden);
+      return matchesSearch && matchesType && matchesStatus && matchesDate;
+    });
+  }, [posts, search, typeFilter, statusFilter, dateFilter]);
 
-    return matchesSearch && matchesType && matchesStatus && matchesDateFilter(post);
+  const postsPagination = useClientPagination(filtered, {
+    resetKey: [search, typeFilter, statusFilter, dateFilter].join('|'),
   });
 
   const selectedPost = posts.find((post) => post.id === selectedPostId) || null;
@@ -613,11 +623,20 @@ function Posts() {
             <DataTable
               className="wwpo-table"
               columns={columns}
-              rows={filtered}
+              rows={postsPagination.paginatedItems}
               getRowKey={(post) => post.id}
               selectedRowKey={selectedPostId}
               onRowClick={(post) => openPostDetails(post.id)}
               minWidth={920}
+              pagination={{
+                currentPage: postsPagination.currentPage,
+                pageSize: postsPagination.pageSize,
+                totalItems: postsPagination.totalItems,
+                totalPages: postsPagination.totalPages,
+                pageSizeOptions: postsPagination.pageSizeOptions,
+                onPageChange: postsPagination.setCurrentPage,
+                onPageSizeChange: postsPagination.setPageSize,
+              }}
               emptyIcon={null}
               emptyTitle="No posts found"
               emptyMessage={hasActiveFilters ? 'Try adjusting your search or filters.' : 'No posts on the platform yet.'}

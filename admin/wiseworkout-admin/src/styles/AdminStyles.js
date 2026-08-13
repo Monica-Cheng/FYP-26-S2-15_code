@@ -190,6 +190,54 @@ function AdminStyles() {
         margin-top: 2px;
       }
       .wwa-cell-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      .wwa-table-pagination {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 14px 18px;
+        border-top: 1px solid var(--ww-divider);
+        background: color-mix(in srgb, var(--ww-elevated) 40%, white);
+        flex-wrap: wrap;
+      }
+      .wwa-table-pagination__summary {
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        color: var(--ww-text-sec);
+      }
+      .wwa-table-pagination__controls {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 16px;
+        flex-wrap: wrap;
+        min-width: 0;
+      }
+      .wwa-table-pagination__pages {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .wwa-table-pagination__ellipsis {
+        color: var(--ww-text-sec);
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        padding: 0 2px;
+      }
+      .wwa-table-pagination__page-size {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--ww-text-sec);
+        font-size: var(--ww-type-secondary-size);
+        font-weight: var(--ww-type-secondary-weight);
+        flex-wrap: wrap;
+      }
+      .wwa-table-pagination__page-size .wwa-select {
+        width: auto;
+        min-width: 74px;
+      }
 
       .wwa-row-card {
         background: var(--ww-card);
@@ -1386,6 +1434,9 @@ function AdminStyles() {
         }
         .wwa-detail-summary {
           flex-direction: column;
+        }
+        .wwa-table-pagination__controls {
+          justify-content: flex-start;
         }
       }
       @media (max-width: 900px) {

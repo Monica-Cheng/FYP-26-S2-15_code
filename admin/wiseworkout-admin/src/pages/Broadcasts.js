@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { functions } from '../firebase';
 import { httpsCallable } from 'firebase/functions';
 import AdminStyles from '../styles/AdminStyles';
@@ -13,6 +13,7 @@ import SearchInput from '../components/ui/SearchInput';
 import FilterBar from '../components/ui/FilterBar';
 import FormSection from '../components/ui/FormSection';
 import FormField from '../components/ui/FormField';
+import useClientPagination from '../hooks/useClientPagination';
 import { formatDate } from '../utils/dateUtils';
 import { broadcastAudienceLabel, broadcastStatusLabel } from '../utils/broadcastUtils';
 
@@ -327,16 +328,22 @@ function Broadcasts() {
     }
   };
 
-  const filtered = broadcasts.filter((broadcast) => {
-    const query = search.toLowerCase();
-    if (!query) return true;
+  const filtered = useMemo(() => {
+    return broadcasts.filter((broadcast) => {
+      const query = search.toLowerCase();
+      if (!query) return true;
 
-    return (
-      (broadcast.message || '').toLowerCase().includes(query) ||
-      (broadcast.id || '').toLowerCase().includes(query) ||
-      (broadcast.createdByAdminUid || '').toLowerCase().includes(query) ||
-      broadcastStatusLabel(broadcast.processed).toLowerCase().includes(query)
-    );
+      return (
+        (broadcast.message || '').toLowerCase().includes(query) ||
+        (broadcast.id || '').toLowerCase().includes(query) ||
+        (broadcast.createdByAdminUid || '').toLowerCase().includes(query) ||
+        broadcastStatusLabel(broadcast.processed).toLowerCase().includes(query)
+      );
+    });
+  }, [broadcasts, search]);
+
+  const broadcastsPagination = useClientPagination(filtered, {
+    resetKey: search,
   });
 
   const columns = [
@@ -481,11 +488,20 @@ function Broadcasts() {
               <DataTable
                 className="wwbr-history-table"
                 columns={columns}
-                rows={filtered}
+                rows={broadcastsPagination.paginatedItems}
                 getRowKey={(broadcast) => broadcast.id}
                 selectedRowKey={selectedBroadcastId}
                 onRowClick={(broadcast) => setSelectedBroadcastId(broadcast.id)}
                 minWidth={860}
+                pagination={{
+                  currentPage: broadcastsPagination.currentPage,
+                  pageSize: broadcastsPagination.pageSize,
+                  totalItems: broadcastsPagination.totalItems,
+                  totalPages: broadcastsPagination.totalPages,
+                  pageSizeOptions: broadcastsPagination.pageSizeOptions,
+                  onPageChange: broadcastsPagination.setCurrentPage,
+                  onPageSizeChange: broadcastsPagination.setPageSize,
+                }}
                 emptyTitle="No broadcasts yet"
                 emptyMessage={search ? 'Try a different search term.' : 'Sent broadcasts will appear here.'}
                 emptyIcon={null}

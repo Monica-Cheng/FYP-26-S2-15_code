@@ -1,5 +1,6 @@
 import React from 'react';
 import EmptyState from './EmptyState';
+import TablePagination from './TablePagination';
 
 function DataTable({
   columns = [],
@@ -17,6 +18,7 @@ function DataTable({
   emptyMessage = 'Try adjusting your filters or search.',
   emptyIcon,
   className = '',
+  pagination,
 }) {
   const hasActions = typeof renderRowActions === 'function';
   const skeletonCount = Math.max(1, loadingRows);
@@ -123,6 +125,7 @@ function DataTable({
           </tbody>
         </table>
       </div>
+      {!loading && pagination ? <TablePagination {...pagination} /> : null}
     </div>
   );
 }

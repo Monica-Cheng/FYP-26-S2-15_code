@@ -15,6 +15,7 @@ import FormField from '../components/ui/FormField';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
 import ModalDialog from '../components/ui/ModalDialog';
+import useClientPagination from '../hooks/useClientPagination';
 import { formatDate } from '../utils/dateUtils';
 import { getCallableErrorMessage } from '../utils/planUtils';
 
@@ -537,6 +538,10 @@ function BusinessPartners() {
 
   const hasActiveFilters = Boolean(search || statusFilter !== 'all' || typeFilter !== 'all' || credentialsFilter !== 'all');
 
+  const partnersPagination = useClientPagination(filteredPartners, {
+    resetKey: [search, statusFilter, typeFilter, credentialsFilter].join('|'),
+  });
+
   const resetFilters = () => {
     setSearch('');
     setStatusFilter('all');
@@ -762,12 +767,21 @@ function BusinessPartners() {
           ) : (
             <DataTable
               columns={columns}
-              rows={filteredPartners}
+              rows={partnersPagination.paginatedItems}
               getRowKey={(partner) => partner.id}
               selectedRowKey={selectedPartnerId}
               onRowClick={(partner) => {
                 setSelectedPartnerId(partner.id);
                 setActionError('');
+              }}
+              pagination={{
+                currentPage: partnersPagination.currentPage,
+                pageSize: partnersPagination.pageSize,
+                totalItems: partnersPagination.totalItems,
+                totalPages: partnersPagination.totalPages,
+                pageSizeOptions: partnersPagination.pageSizeOptions,
+                onPageChange: partnersPagination.setCurrentPage,
+                onPageSizeChange: partnersPagination.setPageSize,
               }}
               renderRowActions={(partner) => {
                 const status = getPartnerStatus(partner);

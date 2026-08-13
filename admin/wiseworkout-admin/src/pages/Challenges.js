@@ -17,6 +17,7 @@ import TableActions from '../components/ui/TableActions';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
 import ModalDialog from '../components/ui/ModalDialog';
+import useClientPagination from '../hooks/useClientPagination';
 import { getCallableErrorMessage } from '../utils/planUtils';
 import {
   METRIC_TYPES,
@@ -407,6 +408,10 @@ function Challenges() {
     setStatusFilter('all');
     setCategoryFilter('all');
   };
+
+  const challengesPagination = useClientPagination(filteredChallenges, {
+    resetKey: [search, sourceFilter, statusFilter, categoryFilter].join('|'),
+  });
 
   const closeDeleteModal = () => {
     setDeleteChallengeTarget(null);
@@ -925,10 +930,19 @@ function Challenges() {
                   className="wwch-table"
                   dense
                   columns={challengeColumns}
-                  rows={filteredChallenges}
+                  rows={challengesPagination.paginatedItems}
                   getRowKey={(challenge) => challenge.id}
                   selectedRowKey={selectedChallengeId}
                   onRowClick={(challenge) => openChallengeView(challenge)}
+                  pagination={{
+                    currentPage: challengesPagination.currentPage,
+                    pageSize: challengesPagination.pageSize,
+                    totalItems: challengesPagination.totalItems,
+                    totalPages: challengesPagination.totalPages,
+                    pageSizeOptions: challengesPagination.pageSizeOptions,
+                    onPageChange: challengesPagination.setCurrentPage,
+                    onPageSizeChange: challengesPagination.setPageSize,
+                  }}
                   renderRowActions={(challenge) => {
                     const deletable = isChallengeDeletable(challenge);
 

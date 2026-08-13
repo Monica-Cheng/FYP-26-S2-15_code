@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { collection, getDocs } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
@@ -20,6 +20,7 @@ import TableActions from '../components/ui/TableActions';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
 import ModalDialog from '../components/ui/ModalDialog';
+import useClientPagination from '../hooks/useClientPagination';
 import { getCallableErrorMessage } from '../utils/planUtils';
 import {
   formatRepRange,
@@ -494,19 +495,25 @@ function Exercises() {
   const muscleOptions = Array.from(new Set(exercises.map((exercise) => exercise.muscle).filter(Boolean))).sort();
   const muscleGroupOptions = Array.from(new Set(exercises.map((exercise) => exercise.muscleGroup).filter(Boolean))).sort();
 
-  const filtered = exercises.filter((exercise) => {
-    const query = search.toLowerCase();
-    const matchesSearch =
-      (exercise.name || '').toLowerCase().includes(query) ||
-      (exercise.muscle || '').toLowerCase().includes(query) ||
-      (exercise.equipment || '').toLowerCase().includes(query) ||
-      (exercise.muscleGroup || '').toLowerCase().includes(query);
-    const matchesDifficulty = difficultyFilter === 'all' || exercise.difficulty === difficultyFilter;
-    const matchesEquipment = equipmentFilter === 'all' || exercise.equipment === equipmentFilter;
-    const matchesMuscle = muscleFilter === 'all' || exercise.muscle === muscleFilter;
-    const matchesMuscleGroup = muscleGroupFilter === 'all' || exercise.muscleGroup === muscleGroupFilter;
+  const filtered = useMemo(() => {
+    return exercises.filter((exercise) => {
+      const query = search.toLowerCase();
+      const matchesSearch =
+        (exercise.name || '').toLowerCase().includes(query) ||
+        (exercise.muscle || '').toLowerCase().includes(query) ||
+        (exercise.equipment || '').toLowerCase().includes(query) ||
+        (exercise.muscleGroup || '').toLowerCase().includes(query);
+      const matchesDifficulty = difficultyFilter === 'all' || exercise.difficulty === difficultyFilter;
+      const matchesEquipment = equipmentFilter === 'all' || exercise.equipment === equipmentFilter;
+      const matchesMuscle = muscleFilter === 'all' || exercise.muscle === muscleFilter;
+      const matchesMuscleGroup = muscleGroupFilter === 'all' || exercise.muscleGroup === muscleGroupFilter;
 
-    return matchesSearch && matchesDifficulty && matchesEquipment && matchesMuscle && matchesMuscleGroup;
+      return matchesSearch && matchesDifficulty && matchesEquipment && matchesMuscle && matchesMuscleGroup;
+    });
+  }, [exercises, search, difficultyFilter, equipmentFilter, muscleFilter, muscleGroupFilter]);
+
+  const exercisesPagination = useClientPagination(filtered, {
+    resetKey: [search, difficultyFilter, equipmentFilter, muscleFilter, muscleGroupFilter].join('|'),
   });
 
   const selectedExercise = exercises.find((exercise) => exercise.id === selectedExerciseId) || null;
@@ -908,11 +915,20 @@ function Exercises() {
             <DataTable
               className="wwex-table"
               columns={columns}
-              rows={filtered}
+              rows={exercisesPagination.paginatedItems}
               selectedRowKey={selectedExerciseId}
               getRowKey={(exercise) => exercise.id}
               onRowClick={(exercise) => openExerciseView(exercise)}
               minWidth={1040}
+              pagination={{
+                currentPage: exercisesPagination.currentPage,
+                pageSize: exercisesPagination.pageSize,
+                totalItems: exercisesPagination.totalItems,
+                totalPages: exercisesPagination.totalPages,
+                pageSizeOptions: exercisesPagination.pageSizeOptions,
+                onPageChange: exercisesPagination.setCurrentPage,
+                onPageSizeChange: exercisesPagination.setPageSize,
+              }}
               emptyIcon={null}
               emptyTitle="No exercises found"
               emptyMessage={search ? 'Try a different search term or clear one of the filters.' : 'No exercises in the library yet.'}

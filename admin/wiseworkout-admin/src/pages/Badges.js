@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { httpsCallable } from 'firebase/functions';
 import { Eye, Pencil, Plus, Trash2 } from 'lucide-react';
 import { functions } from '../firebase';
@@ -16,6 +16,7 @@ import ErrorState from '../components/ui/ErrorState';
 import TableActions from '../components/ui/TableActions';
 import ModalDialog from '../components/ui/ModalDialog';
 import ImageThumb from '../components/ui/ImageThumb';
+import useClientPagination from '../hooks/useClientPagination';
 import { formatDate } from '../utils/dateUtils';
 import {
   FALLBACK_BADGE_STAT_TYPES,
@@ -323,19 +324,25 @@ function Badges() {
     setDeleteError('');
   };
 
-  const filtered = badges.filter((badge) => {
-    const query = search.toLowerCase();
-    if (!query) return true;
+  const filtered = useMemo(() => {
+    return badges.filter((badge) => {
+      const query = search.toLowerCase();
+      if (!query) return true;
 
-    const matchesBasic =
-      (badge.name || '').toLowerCase().includes(query) ||
-      (badge.id || '').toLowerCase().includes(query) ||
-      (badge.description || '').toLowerCase().includes(query);
-    const matchesStat =
-      Array.isArray(badge.conditions) &&
-      badge.conditions.some((condition) => (condition?.statType || '').toLowerCase().includes(query));
+      const matchesBasic =
+        (badge.name || '').toLowerCase().includes(query) ||
+        (badge.id || '').toLowerCase().includes(query) ||
+        (badge.description || '').toLowerCase().includes(query);
+      const matchesStat =
+        Array.isArray(badge.conditions) &&
+        badge.conditions.some((condition) => (condition?.statType || '').toLowerCase().includes(query));
 
-    return matchesBasic || matchesStat;
+      return matchesBasic || matchesStat;
+    });
+  }, [badges, search]);
+
+  const badgesPagination = useClientPagination(filtered, {
+    resetKey: search,
   });
 
   const selectedBadge = badges.find((badge) => badge.id === selectedBadgeId) || null;
@@ -506,11 +513,20 @@ function Badges() {
               <DataTable
                 className="wwba-table"
                 columns={columns}
-                rows={filtered}
+                rows={badgesPagination.paginatedItems}
                 getRowKey={(badge) => badge.id}
                 selectedRowKey={selectedBadgeId}
                 onRowClick={(badge) => openBadgeView(badge)}
                 minWidth={980}
+                pagination={{
+                  currentPage: badgesPagination.currentPage,
+                  pageSize: badgesPagination.pageSize,
+                  totalItems: badgesPagination.totalItems,
+                  totalPages: badgesPagination.totalPages,
+                  pageSizeOptions: badgesPagination.pageSizeOptions,
+                  onPageChange: badgesPagination.setCurrentPage,
+                  onPageSizeChange: badgesPagination.setPageSize,
+                }}
                 emptyIcon={null}
                 emptyTitle="No badges found"
                 emptyMessage={search ? 'Try a different search term.' : 'No badges added yet.'}

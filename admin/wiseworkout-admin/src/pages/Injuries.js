@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { httpsCallable } from 'firebase/functions';
 import { Eye, Pencil, Plus, Trash2 } from 'lucide-react';
 import { functions } from '../firebase';
@@ -14,6 +14,7 @@ import FormSection from '../components/ui/FormSection';
 import FormField from '../components/ui/FormField';
 import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
+import useClientPagination from '../hooks/useClientPagination';
 import { getCallableErrorMessage } from '../utils/planUtils';
 
 const emptyForm = { name: '', bodyPart: '', description: '' };
@@ -327,13 +328,19 @@ function Injuries() {
     }
   };
 
-  const filtered = injuries.filter((injury) => {
-    const query = search.toLowerCase();
-    return (
-      !query ||
-      (injury.name || '').toLowerCase().includes(query) ||
-      (injury.bodyPart || '').toLowerCase().includes(query)
-    );
+  const filtered = useMemo(() => {
+    return injuries.filter((injury) => {
+      const query = search.toLowerCase();
+      return (
+        !query ||
+        (injury.name || '').toLowerCase().includes(query) ||
+        (injury.bodyPart || '').toLowerCase().includes(query)
+      );
+    });
+  }, [injuries, search]);
+
+  const injuriesPagination = useClientPagination(filtered, {
+    resetKey: search,
   });
 
   const selectedInjury = injuries.find((injury) => injury.id === selectedInjuryId) || null;
@@ -476,11 +483,20 @@ function Injuries() {
               <DataTable
                 className="wwin-table"
                 columns={columns}
-                rows={filtered}
+                rows={injuriesPagination.paginatedItems}
                 getRowKey={(injury) => injury.id}
                 selectedRowKey={selectedInjuryId}
                 onRowClick={(injury) => openView(injury)}
                 minWidth={760}
+                pagination={{
+                  currentPage: injuriesPagination.currentPage,
+                  pageSize: injuriesPagination.pageSize,
+                  totalItems: injuriesPagination.totalItems,
+                  totalPages: injuriesPagination.totalPages,
+                  pageSizeOptions: injuriesPagination.pageSizeOptions,
+                  onPageChange: injuriesPagination.setCurrentPage,
+                  onPageSizeChange: injuriesPagination.setPageSize,
+                }}
                 emptyIcon={null}
                 emptyTitle="No injury categories found"
                 emptyMessage={search ? 'Try a different search term.' : 'No injury categories added yet.'}

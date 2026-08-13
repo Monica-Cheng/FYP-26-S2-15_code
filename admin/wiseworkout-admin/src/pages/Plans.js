@@ -24,6 +24,7 @@ import LoadingState from '../components/ui/LoadingState';
 import ErrorState from '../components/ui/ErrorState';
 import TableActions from '../components/ui/TableActions';
 import ModalDialog from '../components/ui/ModalDialog';
+import useClientPagination from '../hooks/useClientPagination';
 import { formatDate } from '../utils/dateUtils';
 import {
   parseCommaList,
@@ -584,6 +585,10 @@ function Plans() {
     () => plans.find((plan) => plan.id === selectedPlanId) || null,
     [plans, selectedPlanId]
   );
+
+  const plansPagination = useClientPagination(filtered, {
+    resetKey: [search, levelFilter, typeFilter, sourceFilter, daysFilter, statusFilter].join('|'),
+  });
 
   const levelTone = (level) =>
     level === 'Advanced' ? 'danger' : level === 'Intermediate' ? 'warning' : 'success';
@@ -1251,11 +1256,20 @@ function Plans() {
               <DataTable
                 className="wwpl-table"
                 columns={columns}
-                rows={filtered}
+                rows={plansPagination.paginatedItems}
                 getRowKey={(plan) => plan.id}
                 selectedRowKey={selectedPlanId}
                 onRowClick={(plan) => openPlanView(plan)}
                 minWidth={1080}
+                pagination={{
+                  currentPage: plansPagination.currentPage,
+                  pageSize: plansPagination.pageSize,
+                  totalItems: plansPagination.totalItems,
+                  totalPages: plansPagination.totalPages,
+                  pageSizeOptions: plansPagination.pageSizeOptions,
+                  onPageChange: plansPagination.setCurrentPage,
+                  onPageSizeChange: plansPagination.setPageSize,
+                }}
                 emptyIcon={null}
                 emptyTitle="No plans found"
                 emptyMessage={hasActiveFilters ? 'Try adjusting your search or filters.' : 'No plans in the library yet.'}

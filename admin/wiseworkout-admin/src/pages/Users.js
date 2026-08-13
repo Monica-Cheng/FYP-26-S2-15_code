@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { functions } from '../firebase';
 import { httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
@@ -17,6 +17,7 @@ import TableActions from '../components/ui/TableActions';
 import ModalDialog from '../components/ui/ModalDialog';
 import FormSection from '../components/ui/FormSection';
 import FormField from '../components/ui/FormField';
+import useClientPagination from '../hooks/useClientPagination';
 import { formatDate } from '../utils/dateUtils';
 
 const exportValue = (value) => {
@@ -287,28 +288,34 @@ function Users() {
     setPremiumFilter('all');
   };
 
-  const filtered = users.filter((user) => {
-    const q = search.toLowerCase();
-    const matchesSearch =
-      (user.displayName || '').toLowerCase().includes(q) ||
-      (user.username || '').toLowerCase().includes(q) ||
-      (user.email || '').toLowerCase().includes(q) ||
-      (user.id || '').toLowerCase().includes(q);
-    const matchesLevel = levelFilter === 'all' || (user.level || 1) === Number(levelFilter);
-    const matchesOnboarded =
-      onboardedFilter === 'all' ||
-      (onboardedFilter === 'yes' ? !!user.onboardingComplete : !user.onboardingComplete);
-    const matchesHealth =
-      healthFilter === 'all' ||
-      (healthFilter === 'connected' ? !!user.healthConnected : !user.healthConnected);
-    const matchesStatus =
-      statusFilter === 'all' ||
-      (statusFilter === 'suspended' ? user.accountStatus === 'suspended' : user.accountStatus !== 'suspended');
-    const matchesPremium =
-      premiumFilter === 'all' ||
-      (premiumFilter === 'premium' ? !!user.isPremium : !user.isPremium);
+  const filtered = useMemo(() => {
+    return users.filter((user) => {
+      const q = search.toLowerCase();
+      const matchesSearch =
+        (user.displayName || '').toLowerCase().includes(q) ||
+        (user.username || '').toLowerCase().includes(q) ||
+        (user.email || '').toLowerCase().includes(q) ||
+        (user.id || '').toLowerCase().includes(q);
+      const matchesLevel = levelFilter === 'all' || (user.level || 1) === Number(levelFilter);
+      const matchesOnboarded =
+        onboardedFilter === 'all' ||
+        (onboardedFilter === 'yes' ? !!user.onboardingComplete : !user.onboardingComplete);
+      const matchesHealth =
+        healthFilter === 'all' ||
+        (healthFilter === 'connected' ? !!user.healthConnected : !user.healthConnected);
+      const matchesStatus =
+        statusFilter === 'all' ||
+        (statusFilter === 'suspended' ? user.accountStatus === 'suspended' : user.accountStatus !== 'suspended');
+      const matchesPremium =
+        premiumFilter === 'all' ||
+        (premiumFilter === 'premium' ? !!user.isPremium : !user.isPremium);
 
-    return matchesSearch && matchesLevel && matchesOnboarded && matchesHealth && matchesStatus && matchesPremium;
+      return matchesSearch && matchesLevel && matchesOnboarded && matchesHealth && matchesStatus && matchesPremium;
+    });
+  }, [users, search, levelFilter, onboardedFilter, healthFilter, statusFilter, premiumFilter]);
+
+  const usersPagination = useClientPagination(filtered, {
+    resetKey: [search, levelFilter, onboardedFilter, healthFilter, statusFilter, premiumFilter].join('|'),
   });
 
   const selectedUser = users.find((user) => user.id === selectedUserId) || null;
@@ -561,11 +568,20 @@ function Users() {
             <DataTable
               className="wwus-table"
               columns={columns}
-              rows={filtered}
+              rows={usersPagination.paginatedItems}
               getRowKey={(user) => user.id}
               selectedRowKey={selectedUserId}
               onRowClick={(user) => openUserView(user)}
               minWidth={920}
+              pagination={{
+                currentPage: usersPagination.currentPage,
+                pageSize: usersPagination.pageSize,
+                totalItems: usersPagination.totalItems,
+                totalPages: usersPagination.totalPages,
+                pageSizeOptions: usersPagination.pageSizeOptions,
+                onPageChange: usersPagination.setCurrentPage,
+                onPageSizeChange: usersPagination.setPageSize,
+              }}
               emptyTitle="No users found"
               emptyMessage={hasActiveFilters ? 'Try adjusting your search or filters.' : 'No registered accounts yet.'}
               emptyIcon={null}
