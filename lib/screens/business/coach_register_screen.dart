@@ -98,7 +98,9 @@ class _CoachRegisterScreenState extends State<CoachRegisterScreen> {
   }
 
   bool get _canSubmit =>
-      _nameCtrl.text.trim().isNotEmpty && _bioCtrl.text.trim().isNotEmpty;
+      _nameCtrl.text.trim().isNotEmpty &&
+      _bioCtrl.text.trim().isNotEmpty &&
+      _credentialFiles.isNotEmpty;
 
   void _showAddCredentialSheet() {
     showQuickAddSheet(
@@ -191,6 +193,9 @@ class _CoachRegisterScreenState extends State<CoachRegisterScreen> {
       final credentialUrls = _credentialFiles.isNotEmpty
           ? await _storageService.uploadCredentialFiles(uid, _credentialFiles)
           : null;
+      debugPrint('[CoachRegister] submitting with '
+          '${_credentialFiles.length} credential file(s), '
+          '${credentialUrls?.length ?? 0} uploaded url(s)');
       await _firestoreService.registerAsCoach(
         uid: uid,
         name: _nameCtrl.text.trim(),
@@ -361,10 +366,12 @@ class _CoachRegisterScreenState extends State<CoachRegisterScreen> {
 
           _fieldLabel('CREDENTIAL DOCUMENTS'),
           const SizedBox(height: 4),
-          const Text(
-            'A certificate, license, or proof of qualification helps your '
-            'application get reviewed faster. Optional, but recommended.',
-            style: WW.labelMed,
+          Text(
+            'At least one certificate, license, or proof of qualification '
+            'is required for admin review.',
+            style: WW.labelMed.copyWith(
+              color: _credentialFiles.isEmpty ? const Color(0xFFDC2626) : WW.textSec,
+            ),
           ),
           const SizedBox(height: 8),
           _buildCredentialPicker(),

@@ -254,6 +254,8 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
       PhotoBackgroundShareCard.reusablePhotoBase64(_session);
 
   Future<void> _startShareFlow() async {
+    debugPrint('[ShareButton] activity_detail_screen _startShareFlow entered '
+        'at ${DateTime.now()} — guard(isSharing)=$_isSharing');
     if (_isSharing) return;
 
     final existingPhoto = _reusablePhotoBase64;
@@ -306,6 +308,9 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
 
   Future<void> _showCardPickerAndShare({required String? photoBase64}) async {
     if (!mounted) return;
+    debugPrint('[ShareButton] activity_detail_screen '
+        '_showCardPickerAndShare entered at ${DateTime.now()} — '
+        'photoBase64=${photoBase64 != null}');
     _selectedGradientColors = ShareCardGradients.presets.first.colors;
     final cards = buildSessionShareCardOptions(
       session: _session,
@@ -313,12 +318,16 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
       routePoints: _routePoints,
       photoBase64: photoBase64,
     );
+    debugPrint('[ShareButton] built ${cards.length} card option(s), '
+        'opening picker sheet at ${DateTime.now()}');
     final chosenIndex = await showShareCardPicker(
       context,
       cards: cards,
       confirmLabel: 'Share This Design',
       onGradientChanged: (colors) => _selectedGradientColors = colors,
     );
+    debugPrint('[ShareButton] picker sheet closed at ${DateTime.now()} — '
+        'chosenIndex=$chosenIndex');
     if (chosenIndex == null || !mounted) return;
     await _shareCard(cards[chosenIndex]);
   }
@@ -347,12 +356,20 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
           '${tempDir.path}/wiseworkout_session_'
           '${DateTime.now().millisecondsSinceEpoch}.png');
       await file.writeAsBytes(bytes);
+      debugPrint('[ShareButton] activity_detail_screen calling '
+          'Share.shareXFiles at ${DateTime.now()} — file=${file.path} '
+          'exists=${await file.exists()} bytes=${bytes.length}');
 
       await Share.shareXFiles(
         [XFile(file.path)],
         text: 'Just crushed a session on WiseWorkout! 💪',
       );
-    } catch (e) {
+      debugPrint('[ShareButton] activity_detail_screen Share.shareXFiles '
+          'returned successfully at ${DateTime.now()}');
+    } catch (e, stack) {
+      debugPrint('[ShareButton] activity_detail_screen Share error at '
+          '${DateTime.now()}: $e');
+      debugPrint('Stack: $stack');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -587,7 +604,11 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
               ),
             ),
             GestureDetector(
-              onTap: _startShareFlow,
+              onTap: () {
+                debugPrint('[ShareButton] activity_detail_screen Share '
+                    'tapped at ${DateTime.now()}');
+                _startShareFlow();
+              },
               child: Container(
                 width: 34,
                 height: 34,
