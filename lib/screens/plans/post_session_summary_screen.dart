@@ -256,6 +256,10 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
           'Gym sets completed: $totalSets across ${exercises.length} exercises\n'
           'Cardio blocks completed: ${cardioBlocks.length}\n'
           'Calories burned: $cals kcal\n'
+          'If the supplied recent-training context includes recovery '
+          'guidance, include one brief suggestion to take a rest day or '
+          'lighter recovery day. Keep it as general fitness guidance and '
+          'do not make medical claims.\n'
           'Keep it under 60 words. Plain text only, no markdown.';
     } else if (_isCardio) {
       final activity = _session['activity'] as String? ?? 'cardio';
@@ -263,6 +267,10 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
       prompt = 'Give a 2-sentence motivational summary for someone who '
           'just completed a $activity session lasting $durationMins '
           'minutes and burned $cals calories. Be encouraging and specific. '
+          'If the supplied recent-training context includes recovery '
+          'guidance, include one brief suggestion to take a rest day or '
+          'lighter recovery day. Keep it as general fitness guidance and '
+          'do not make medical claims. '
           'Under 50 words.';
     } else {
       final exercises = _session['exercises'] as List<dynamic>? ?? [];
@@ -277,6 +285,10 @@ class _PostSessionSummaryScreenState extends State<PostSessionSummaryScreen>
           'Sets completed: $totalSets across ${exercises.length} exercises\n'
           'Total volume: ${totalVolume.round()} kg\n'
           'Calories burned: $cals kcal\n'
+          'If the supplied recent-training context includes recovery '
+          'guidance, include one brief suggestion to take a rest day or '
+          'lighter recovery day. Keep it as general fitness guidance and '
+          'do not make medical claims.\n'
           'Keep it under 60 words. Plain text only, no markdown.';
     }
 

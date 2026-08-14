@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_theme.dart';
@@ -32,6 +33,9 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
   String? _breakStartDate;
   String? _breakEndDate;
   int _breakDays = 3;
+  bool _customBreakSelected = false;
+  final TextEditingController _customBreakDaysController =
+      TextEditingController();
   // Anchor for home_screen.dart's _checkMissedSession() 24h grace period —
   // loaded here (not just written) so _endBreak() can shift it forward by
   // the break's duration when the user ends a break early. See
@@ -67,7 +71,67 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
   @override
   void dispose() {
     _planStreamSub?.cancel();
+    _customBreakDaysController.dispose();
     super.dispose();
+  }
+
+  int? get _validatedCustomBreakDays {
+    final raw = _customBreakDaysController.text.trim();
+    if (raw.isEmpty) return null;
+    final parsed = int.tryParse(raw);
+    if (parsed == null || parsed < 1 || parsed > 30) return null;
+    return parsed;
+  }
+
+  bool get _customBreakInputInvalid =>
+      _customBreakSelected && _validatedCustomBreakDays == null;
+
+  bool get _canStartBreak =>
+      !_customBreakSelected || _validatedCustomBreakDays != null;
+
+  DateTime get _selectedBreakEndDate =>
+      DateTime.now().add(Duration(days: _breakDays));
+
+  String _formatBreakPreviewDate(DateTime date) {
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return '${date.day} ${months[date.month - 1]} ${date.year}';
+  }
+
+  void _selectPresetBreakDays(int days) {
+    setState(() {
+      _customBreakSelected = false;
+      _breakDays = days;
+    });
+  }
+
+  void _selectCustomBreak() {
+    setState(() {
+      _customBreakSelected = true;
+      final validCustomDays = _validatedCustomBreakDays;
+      if (validCustomDays != null) _breakDays = validCustomDays;
+    });
+  }
+
+  void _onCustomBreakDaysChanged(String value) {
+    final parsed = int.tryParse(value.trim());
+    setState(() {
+      if (parsed != null && parsed >= 1 && parsed <= 30) {
+        _breakDays = parsed;
+      }
+    });
   }
 
   Future<void> _init() async {
@@ -322,7 +386,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
   }
 
   Future<void> _startBreak() async {
-    if (_uid == null || _planId == null) return;
+    if (_uid == null || _planId == null || !_canStartBreak) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -869,16 +933,17 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
             style: TextStyle(fontSize: 13, color: WW.textSec),
           ),
           const SizedBox(height: 12),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [1, 2, 3, 5, 7, 14].map((d) {
-                final selected = _breakDays == d;
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ...[1, 2, 3, 5, 7, 14].map((d) {
+                final selected = !_customBreakSelected && _breakDays == d;
                 return GestureDetector(
-                  onTap: () => setState(() => _breakDays = d),
+                  onTap: () => _selectPresetBreakDays(d),
                   child: Container(
-                    margin: const EdgeInsets.only(right: 8),
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     decoration: BoxDecoration(
                       color: selected ? WW.primary : WW.elevated,
                       borderRadius: BorderRadius.circular(20),
@@ -893,7 +958,84 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
                     ),
                   ),
                 );
-              }).toList(),
+              }),
+              GestureDetector(
+                onTap: _selectCustomBreak,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: _customBreakSelected ? WW.primary : WW.elevated,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    'Custom',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: _customBreakSelected ? Colors.white : WW.text,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (_customBreakSelected) ...[
+            const SizedBox(height: 12),
+            const Text(
+              'Break duration',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: WW.text,
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _customBreakDaysController,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              onChanged: _onCustomBreakDaysChanged,
+              decoration: InputDecoration(
+                hintText: 'Number of days',
+                suffixText: 'days',
+                errorText: _customBreakInputInvalid
+                    ? 'Enter a break between 1 and 30 days.'
+                    : null,
+                filled: true,
+                fillColor: WW.elevated,
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: WW.border),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: WW.border),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: WW.primary),
+                ),
+                errorBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Colors.redAccent),
+                ),
+                focusedErrorBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Colors.redAccent),
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Text(
+            'Plan resumes on ${_formatBreakPreviewDate(_selectedBreakEndDate)}',
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: WW.textSec,
             ),
           ),
           const SizedBox(height: 12),
@@ -908,7 +1050,7 @@ class _PlanScheduleScreenState extends State<PlanScheduleScreen> {
                 shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12)),
               ),
-              onPressed: _startBreak,
+              onPressed: _canStartBreak ? _startBreak : null,
               child: Text('Start $_breakDays Day Break'),
             ),
           ),

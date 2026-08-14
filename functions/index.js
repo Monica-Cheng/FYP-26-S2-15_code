@@ -4990,18 +4990,12 @@ function buildVolumeTrendLines(latest, comparable) {
 }
 
 /**
- * Insight (b): plan-frequency adherence — this week's totalSessions
- * (already computed by the caller via computeSessionStats(), not
- * recomputed here) against the tracked plan's daysPerWeek field. Returns
- * null (omit this insight) when there's no tracked plan or the plan doc
- * has no usable daysPerWeek, same "omit rather than send a placeholder"
- * convention buildPersonalizationContext's other categories already use.
+ * Reads the tracked plan's daysPerWeek value when available.
  *
  * @param {FirebaseFirestore.DocumentData} userData
- * @param {number} thisWeekSessions
- * @return {Promise<string|null>}
+ * @return {Promise<number|null>}
  */
-async function buildPlanAdherenceLine(userData, thisWeekSessions) {
+async function getTrackedPlanDaysPerWeek(userData) {
   const trackedPlanId = userData.trackedPlanId;
   if (typeof trackedPlanId !== "string" || trackedPlanId === "") return null;
   try {
@@ -5009,14 +5003,31 @@ async function buildPlanAdherenceLine(userData, thisWeekSessions) {
     if (!planDoc.exists) return null;
     const daysPerWeek = Number(planDoc.data().daysPerWeek) || 0;
     if (daysPerWeek <= 0) return null;
-    return `${thisWeekSessions} of your planned ${daysPerWeek} sessions this week.`;
+    return daysPerWeek;
   } catch (err) {
     console.error(
-        `buildPlanAdherenceLine: plan read failed for planId ${trackedPlanId}:`,
+        `getTrackedPlanDaysPerWeek: plan read failed for planId ${trackedPlanId}:`,
         err,
     );
     return null;
   }
+}
+
+/**
+ * Insight (b): plan-frequency adherence — this week's totalSessions
+ * (already computed by the caller via computeSessionStats(), not
+ * recomputed here) against the tracked plan's daysPerWeek field. Returns
+ * null (omit this insight) when there's no tracked plan or the plan doc
+ * has no usable daysPerWeek, same "omit rather than send a placeholder"
+ * convention buildPersonalizationContext's other categories already use.
+ *
+ * @param {number|null} daysPerWeek
+ * @param {number} thisWeekSessions
+ * @return {string|null}
+ */
+function buildPlanAdherenceLine(daysPerWeek, thisWeekSessions) {
+  if (!Number.isInteger(daysPerWeek) || daysPerWeek <= 0) return null;
+  return `${thisWeekSessions} of your planned ${daysPerWeek} sessions this week.`;
 }
 
 function dateKey(d) {
@@ -5134,8 +5145,24 @@ async function buildInsights(uid, userData, now) {
 
   const {weekStart: thisStart, weekEnd: thisEnd} = getWeekRange(now, 0);
   const thisWeekStats = await computeSessionStats(uid, thisStart, thisEnd);
-  const planLine = await buildPlanAdherenceLine(userData, thisWeekStats.totalSessions);
+  const daysPerWeek = await getTrackedPlanDaysPerWeek(userData);
+  const planLine = buildPlanAdherenceLine(daysPerWeek, thisWeekStats.totalSessions);
   if (planLine) insightLines.push(planLine);
+
+  const recoveryRecommended = Number.isInteger(daysPerWeek) && daysPerWeek > 0 ?
+    thisWeekStats.totalSessions > daysPerWeek :
+    thisWeekStats.totalSessions >= 5;
+  if (recoveryRecommended) {
+    const schedulePhrase = Number.isInteger(daysPerWeek) && daysPerWeek > 0 ?
+      "relative to their planned schedule" :
+      "this week";
+    insightLines.push(
+        "RECOVERY GUIDANCE: The user has trained frequently " +
+        `${schedulePhrase}. Include a brief general reminder suggesting ` +
+        "a rest day or lighter recovery activity before another hard " +
+        "session. Keep it non-medical.",
+    );
+  }
 
   const streakLine = await buildStreakLine(uid, now);
   if (streakLine) insightLines.push(streakLine);
