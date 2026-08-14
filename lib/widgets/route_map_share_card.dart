@@ -74,35 +74,8 @@ class RouteMapShareCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasSnapshot = mapSnapshotBase64?.isNotEmpty ?? false;
-    // Diagnostic for the "map card shows a blank/grey gradient instead of
-    // the real map" bug — confirms whether this session's
-    // mapSnapshotBase64 actually reached this widget with real content
-    // (upstream capture problem, see outdoor_cardio_screen.dart's
-    // _captureMapSnapshot) vs. arrived fine and the CustomPainter/gradient
-    // fallback is being shown for some other reason (a rendering issue in
-    // this widget itself). Check this line's output the next time the bug
-    // reproduces before assuming which case it is.
-    debugPrint('[RouteMapShareCard] hasSnapshot=$hasSnapshot '
-        'mapSnapshotBase64.length=${mapSnapshotBase64?.length ?? 0} '
-        'routePoints.length=${routePoints.length}');
-    // Real decoded pixel dimensions of the snapshot actually being
-    // displayed — a base64 STRING length alone doesn't say whether the
-    // source image is high-res-but-well-compressed or genuinely tiny.
-    // This card renders at 1080x1920 real pixels (360x640 logical @
-    // pixelRatio 3.0, see this widget's width/height constants) via
-    // BoxFit.cover below — if the decoded source is much smaller than
-    // that in either dimension, BoxFit.cover is upscaling it to fill the
-    // canvas, which is a blur no amount of JPEG-quality tuning at the
-    // share-card encoding step (see image_encode.dart's
-    // encodeCapturedCardBase64) can fix, since that step only re-encodes
-    // whatever this widget already rendered — it never touches this
-    // source image's own resolution.
     if (hasSnapshot) {
-      ui.decodeImageFromList(base64Decode(mapSnapshotBase64!), (image) {
-        debugPrint('[RouteMapShareCard] mapSnapshotBase64 decoded '
-            'width=${image.width} height=${image.height} '
-            '(card target=1080x1920)');
-      });
+      ui.decodeImageFromList(base64Decode(mapSnapshotBase64!), (_) {});
     }
     final distanceKm = (distanceMeters / 1000).toStringAsFixed(2);
 

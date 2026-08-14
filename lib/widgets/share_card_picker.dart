@@ -216,8 +216,6 @@ class _ShareCardPickerSheetState extends State<_ShareCardPickerSheet> {
         final selected = i == _gradientIndex;
         return GestureDetector(
           onTap: () {
-            debugPrint('[ShareCardPicker] swatch tapped: index=$i '
-                'colors=${preset.colors}');
             widget.onGradientChanged?.call(preset.colors);
             setState(() => _gradientIndex = i);
           },
