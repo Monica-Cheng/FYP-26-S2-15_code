@@ -4822,6 +4822,38 @@ async function computeSessionStats(uid, startDate, endDate) {
 }
 
 /**
+ * Counts only genuine tracked completed training sessions for recovery
+ * guidance, excluding manual activities without changing general session
+ * statistics elsewhere.
+ *
+ * @param {string} uid
+ * @param {Date} startDate
+ * @param {Date} endDate
+ * @return {Promise<number>}
+ */
+async function countRecoveryEligibleSessions(uid, startDate, endDate) {
+  const snapshot = await db
+      .collection("users")
+      .doc(uid)
+      .collection("sessions")
+      .where("date", ">=", startDate)
+      .where("date", "<", endDate)
+      .get();
+
+  let recoveryEligibleSessions = 0;
+  snapshot.forEach((doc) => {
+    const data = doc.data();
+    if (data.isManuallyLogged === true) return;
+    const type = data.type || "";
+    if (type === "gym" || type === "cardio" || type === "combined") {
+      recoveryEligibleSessions++;
+    }
+  });
+
+  return recoveryEligibleSessions;
+}
+
+/**
  * Formats the week-over-week delta line for chat's personalization
  * context (decision: replaces the old flat "last 5 sessions" list) — the
  * percentage is pre-computed here, not left for the LLM to derive from
@@ -5144,14 +5176,17 @@ async function buildInsights(uid, userData, now) {
   }
 
   const {weekStart: thisStart, weekEnd: thisEnd} = getWeekRange(now, 0);
-  const thisWeekStats = await computeSessionStats(uid, thisStart, thisEnd);
+  const [thisWeekStats, recoveryEligibleSessionsThisWeek] = await Promise.all([
+    computeSessionStats(uid, thisStart, thisEnd),
+    countRecoveryEligibleSessions(uid, thisStart, thisEnd),
+  ]);
   const daysPerWeek = await getTrackedPlanDaysPerWeek(userData);
   const planLine = buildPlanAdherenceLine(daysPerWeek, thisWeekStats.totalSessions);
   if (planLine) insightLines.push(planLine);
 
   const recoveryRecommended = Number.isInteger(daysPerWeek) && daysPerWeek > 0 ?
-    thisWeekStats.totalSessions > daysPerWeek :
-    thisWeekStats.totalSessions >= 5;
+    recoveryEligibleSessionsThisWeek > daysPerWeek :
+    recoveryEligibleSessionsThisWeek >= 5;
   if (recoveryRecommended) {
     const schedulePhrase = Number.isInteger(daysPerWeek) && daysPerWeek > 0 ?
       "relative to their planned schedule" :
