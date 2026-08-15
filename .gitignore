@@ -58,6 +58,9 @@ firebase-debug.log
 firebase-debug.*.log
 .runtimeconfig.json
 
+# Website (Next.js)
+website/node_modules/
+
 # Environment files
 .env
 *.env
