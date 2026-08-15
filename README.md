@@ -49,7 +49,6 @@ lib/                    Flutter app source (screens, services, models, etc.)
 admin/wiseworkout-admin/  Admin dashboard (React) for approvals and moderation
 website/                Marketing website (Next.js)
 functions/              Firebase Cloud Functions (Node.js)
-docs/                   Project documentation (architecture, test cases, etc.)
 android/, ios/           Platform-specific Flutter project files
 ```
 
