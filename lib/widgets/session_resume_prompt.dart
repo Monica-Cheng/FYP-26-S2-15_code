@@ -1,4 +1,8 @@
 // lib/widgets/session_resume_prompt.dart
+// Shared helper that checks for an already-started, unfinished gym session
+// before starting a new one, and if found, prompts the user to resume it
+// or start over. Called from every screen that can launch a tracked-plan
+// session (see startOrResumeTrackedSession's own doc comment below).
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';

@@ -1,4 +1,8 @@
 // lib/screens/settings/health_profile_screen.dart
+// Settings screen for editing body metrics (height/weight/DOB/sex), daily
+// calorie/weight goals, and injury/limitation data. Body/injury fields are
+// stored via FirestoreService.updateHealthData() as an encrypted blob,
+// kept separate from the plaintext user profile doc.
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';

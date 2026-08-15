@@ -1,4 +1,7 @@
 // lib/screens/profile/all_badges_screen.dart
+// Full-screen grid of every available badge, earned or not, reached from
+// profile_screen.dart's "See all" link. Purely a display of data already
+// loaded by the caller — does not fetch anything itself.
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';

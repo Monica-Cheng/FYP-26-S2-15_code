@@ -1,4 +1,7 @@
 // lib/screens/club/club_screen.dart
+// Club tab: Leaderboard/Challenges/Feed subtabs. Leaderboard ranks users by
+// weekly activity, Challenges lists/joins group challenges, and Feed shows
+// the real Firestore-backed social feed of workout/nutrition posts.
 import 'dart:async';
 
 import 'package:flutter/material.dart';

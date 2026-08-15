@@ -1,4 +1,6 @@
 // lib/screens/club/create_challenge_screen.dart
+// Form for creating a new (private) group challenge: name, category, goal
+// value, date range, and friends to invite.
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 

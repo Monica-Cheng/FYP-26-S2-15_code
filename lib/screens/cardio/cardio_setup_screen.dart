@@ -1,4 +1,8 @@
 // lib/screens/cardio/cardio_setup_screen.dart
+// Pre-session setup for a cardio activity: pick activity type, indoor vs
+// outdoor mode, and a time/duration goal, then start the session — routes
+// to either the indoor timer (cardio_session_screen.dart) or outdoor GPS
+// tracking (outdoor_cardio_screen.dart).
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -100,11 +104,9 @@ class _CardioSetupScreenState extends State<CardioSetupScreen> {
 
   void _handleStart() {
     if (_selectedMode == 'outdoor') {
-      // Temporary wiring: Routes.outdoorCardioTest only proves the map
-      // renders and location permissions work (see OutdoorCardioScreen).
-      // Once Phase A/B of outdoor GPS tracking are fully built, this
-      // should push the real outdoor cardio route/flow instead, and the
-      // temporary test route can be removed.
+      // Routes.outdoorCardioTest is the real outdoor cardio GPS tracking
+      // flow (see OutdoorCardioScreen) — route name predates the full
+      // build and is a holdover from an early map-rendering test.
       context.push(
         Routes.outdoorCardioTest,
         extra: {

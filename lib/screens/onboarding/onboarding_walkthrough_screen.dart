@@ -1,4 +1,7 @@
 // lib/screens/onboarding/onboarding_walkthrough_screen.dart
+// Swipeable feature-highlight carousel shown after sign-up, before the
+// health-profile onboarding steps. Purely informational — no data is
+// collected here, just intro cards the user can swipe through or skip.
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -78,6 +81,9 @@ class _OnboardingWalkthroughScreenState
       backgroundColor: WW.bg,
       body: GestureDetector(
         onHorizontalDragEnd: (details) {
+          // Velocity-based swipe detection (not PageView) — a fast enough
+          // flick in either direction advances/retreats one card,
+          // regardless of how far the drag traveled.
           final v = details.primaryVelocity ?? 0;
           if (v < -200) _next();
           if (v > 200) _goTo(_currentIndex - 1);

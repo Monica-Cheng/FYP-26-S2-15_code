@@ -1,4 +1,7 @@
 // lib/screens/club/friends_screen.dart
+// Full-page Friends screen: search users by username, send/accept/decline
+// friend requests, and view the friends list with each friend's level and
+// weekly XP.
 import 'dart:async';
 
 import 'package:flutter/material.dart';

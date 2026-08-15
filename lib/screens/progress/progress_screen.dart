@@ -1,4 +1,7 @@
 // lib/screens/progress/progress_screen.dart
+// Progress tab: level/XP card, streak and lifetime-volume stats, weight
+// trend chart, a month calendar of logged activity, and a scrollable
+// history of past gym/cardio/nutrition sessions with filtering.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;

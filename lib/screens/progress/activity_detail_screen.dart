@@ -1,4 +1,8 @@
 // lib/screens/progress/activity_detail_screen.dart
+// Detail view for a single logged activity (gym session, cardio, or
+// manually logged), reached from Progress tab history. Shows exercises/
+// stats/route map as applicable, lets the user edit the photo, delete the
+// entry, or generate a share card.
 
 import 'dart:convert';
 import 'dart:io';
@@ -22,8 +26,7 @@ import '../../widgets/session_share_cards.dart';
 import '../../widgets/share_card_picker.dart';
 
 // Same OpenFreeMap style URL used in outdoor_cardio_screen.dart — duplicated
-// here (not imported) since that file's own constant is library-private and
-// this task's scope doesn't include modifying that file to export it.
+// here (not imported) since that file's own constant is library-private.
 const String _kMapStyleUrl = 'https://tiles.openfreemap.org/styles/liberty';
 
 class ActivityDetailScreen extends StatefulWidget {

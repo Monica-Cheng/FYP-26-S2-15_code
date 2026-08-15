@@ -1,4 +1,6 @@
 // lib/screens/club/challenge_leaderboard_screen.dart
+// Ranked leaderboard for a single challenge's participants, showing each
+// user's progress toward the challenge goal.
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 

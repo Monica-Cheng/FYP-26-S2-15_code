@@ -1,4 +1,7 @@
 // lib/screens/plans/explore_screen.dart
+// Browse/discover pre-built workout plans (gym, cardio, combined), pulled
+// from Firestore, with a featured plan and category browsing. Lets the
+// user preview and add a plan to their own library.
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';

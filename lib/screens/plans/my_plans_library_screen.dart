@@ -1,4 +1,6 @@
 // lib/screens/plans/my_plans_library_screen.dart
+// Full list of the user's own custom and saved plans, reached via the
+// Plans tab's "See all" link. Displays data already loaded by the caller.
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';

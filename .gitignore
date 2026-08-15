@@ -69,3 +69,8 @@ firebase-debug.*.log
 .DS_Store
 .env
 functions/scripts/*firebase-adminsdk*.json
+
+# AI-agent working docs — not part of the submission
+/handoff.md
+/AGENT.md
+/RULES.md

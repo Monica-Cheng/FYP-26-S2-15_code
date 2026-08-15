@@ -1,4 +1,8 @@
 // lib/screens/cardio/cardio_session_screen.dart
+// Indoor cardio session tracker: elapsed-time timer with an
+// accelerometer-based motion-presence gate (pauses accrual if the user
+// stops moving), heart-rate via HealthService, and a finish form to save
+// the session.
 
 import 'dart:async';
 import 'dart:convert';

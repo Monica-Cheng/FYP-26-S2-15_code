@@ -1,4 +1,7 @@
 // lib/screens/coach/coach_screen.dart
+// "WiseCoach" AI chat assistant — answers workout/nutrition questions via
+// an OpenAI-backed Cloud Function. Distinct from the human coach dashboard
+// in screens/business/coach_dashboard_screen.dart.
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';

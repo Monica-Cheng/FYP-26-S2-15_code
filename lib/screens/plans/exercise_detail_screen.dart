@@ -1,3 +1,8 @@
+// lib/screens/plans/exercise_detail_screen.dart
+// Shows instructions/muscle info for a single exercise, looked up by name
+// from the exercise library. Reached by tapping an exercise while building
+// or viewing a routine.
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/app_theme.dart';

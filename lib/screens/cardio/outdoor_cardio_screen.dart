@@ -1,4 +1,8 @@
 // lib/screens/cardio/outdoor_cardio_screen.dart
+// Outdoor cardio GPS tracking: live map, Start/Pause/Finish controls,
+// GPS accuracy filtering and speed-implausibility rejection, elevation
+// gain, and route/distance capture. Saves the finished session via
+// FirestoreService, either standalone or as a plan-linked block.
 
 import 'dart:async';
 import 'dart:convert';

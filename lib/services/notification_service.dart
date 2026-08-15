@@ -1,3 +1,8 @@
+// lib/services/notification_service.dart
+// Schedules and manages the daily workout-reminder local notification
+// (Android/iOS) using flutter_local_notifications + timezone. A singleton,
+// initialized once via init() before any other method is used.
+
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -75,6 +80,8 @@ class NotificationService {
         time.hour,
         time.minute,
       );
+      // If today's reminder time has already passed, schedule for
+      // tomorrow instead of firing immediately.
       if (scheduled.isBefore(now)) {
         scheduled = scheduled.add(const Duration(days: 1));
       }

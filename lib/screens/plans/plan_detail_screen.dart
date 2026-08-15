@@ -1,4 +1,7 @@
 // lib/screens/plans/plan_detail_screen.dart
+// Detail view for a single plan: hero stats, day-by-day schedule, and the
+// entry point to start a day's session (gym or cardio), including
+// resuming an in-progress session and Compress Workout adjustments.
 
 import 'dart:async';
 

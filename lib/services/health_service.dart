@@ -1,3 +1,8 @@
+// lib/services/health_service.dart
+// Reads heart-rate data from the device's native health store (Apple
+// HealthKit / Android Health Connect) via the `health` package, for use
+// during cardio sessions.
+
 import 'dart:io';
 import 'package:health/health.dart';
 

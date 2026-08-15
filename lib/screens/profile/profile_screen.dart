@@ -1,4 +1,7 @@
 // lib/screens/profile/profile_screen.dart
+// The current user's own profile tab: photo, level/XP, streak stats, earned
+// badges, and settings entry point. Distinct from user_profile_screen.dart,
+// which views another user's profile.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -83,6 +86,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   double _xpProgress() {
     if (_level >= _xpThresholds.length) return 1.0;
+    // _xpThresholds[i] is the XP needed to reach level i+1, so the
+    // current level's own start/end bounds sit at [_level-1, _level].
     final start = _xpThresholds[_level - 1];
     final end = _xpThresholds[_level];
     return ((_totalXp - start) / (end - start)).clamp(0.0, 1.0);

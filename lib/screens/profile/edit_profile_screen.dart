@@ -1,4 +1,6 @@
 // lib/screens/profile/edit_profile_screen.dart
+// Lets the current user edit their display name, username (with live
+// uniqueness/format validation), hometown, bio, and profile photo.
 
 import 'dart:convert';
 import 'dart:io';

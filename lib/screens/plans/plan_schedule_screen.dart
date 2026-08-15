@@ -1,4 +1,7 @@
 // lib/screens/plans/plan_schedule_screen.dart
+// Calendar/schedule view for an active plan: today's session, upcoming
+// days, Break Mode (pausing the schedule), and starting or resuming a
+// day's session.
 
 import 'dart:async';
 

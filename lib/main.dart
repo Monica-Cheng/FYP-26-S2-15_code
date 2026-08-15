@@ -1,4 +1,7 @@
 // lib/main.dart
+// App entry point. Initializes Firebase and notifications, then runs the
+// app wrapped in Riverpod's ProviderScope with the go_router config from
+// core/router.dart and the WW theme from core/app_theme.dart.
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

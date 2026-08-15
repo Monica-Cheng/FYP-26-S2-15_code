@@ -1,4 +1,7 @@
 // lib/screens/club/challenge_detail_screen.dart
+// Detail view for a single group challenge: the user's progress toward the
+// goal, challenge stats, a link to the leaderboard, and (for private
+// challenges) an invite-friends option.
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 

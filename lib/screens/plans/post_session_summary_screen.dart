@@ -1,4 +1,7 @@
 // lib/screens/plans/post_session_summary_screen.dart
+// Final summary shown after a full session (gym or cardio) finishes: stats,
+// AI-generated WiseCoach recap, XP earned, and options to share a
+// generated card or post the session to the feed.
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;

@@ -1,4 +1,8 @@
 // lib/screens/plans/mid_plan_cardio_complete_screen.dart
+// Interstitial "block complete" screen shown after a cardio block finishes
+// inside a multi-block plan session, when more blocks remain — a forward-
+// only step to the next block, distinct from the final post-session
+// summary shown once the whole day's session is done.
 
 import 'dart:convert';
 import 'dart:io';

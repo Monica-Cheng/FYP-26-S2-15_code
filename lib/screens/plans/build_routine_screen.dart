@@ -1,4 +1,7 @@
 // lib/screens/plans/build_routine_screen.dart
+// Custom workout routine builder: pick exercises from a filterable library,
+// configure sets/reps/tags per exercise/day, and save as a custom plan the
+// user can schedule and run sessions from.
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';

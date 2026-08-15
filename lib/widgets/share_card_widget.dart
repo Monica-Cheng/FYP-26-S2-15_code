@@ -1,3 +1,8 @@
+// lib/widgets/share_card_widget.dart
+// Renders a shareable, gradient-background workout summary card (session
+// name, date, duration/calories/volume-or-goal stats) at a fixed
+// Story-ratio size, for posting a finished session to the feed or sharing
+// externally.
 import 'package:flutter/material.dart';
 import '../core/app_theme.dart';
 

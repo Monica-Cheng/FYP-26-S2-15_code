@@ -1,4 +1,8 @@
 // lib/screens/home/missed_checkin_screen.dart
+// Prompts the user for a reason when they missed a scheduled plan day
+// (busy, sick, injured, rest, or skipped), logs it via
+// FirestoreService.logMissedSession(), and shows a short tip based on the
+// reason chosen.
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';

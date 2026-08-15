@@ -98,10 +98,10 @@ class Routes {
   static const String myPlansLibrary = '/my-plans-library';
   static const String cardioSetup = '/cardio-setup';
   static const String cardioSession = '/cardio-session';
-  // Temporary/scaffolding route for testing the map-renders-and-permission
-  // flow in isolation. Not linked from anywhere in the app yet — a later
-  // task wires proper navigation from cardio setup's Outdoor mode and this
-  // constant/route can be removed then.
+  // The real outdoor-cardio GPS tracking route, wired from cardio setup's
+  // Outdoor mode (see cardio_setup_screen.dart's _handleStart). Name is a
+  // holdover from an early map-rendering proof-of-concept and predates the
+  // full GPS tracking flow now built on it.
   static const String outdoorCardioTest = '/outdoor-cardio-test';
   static const String nutritionScan = '/nutrition-scan';
   static const String midPlanCardioComplete = '/mid-plan-cardio-complete';
@@ -520,7 +520,6 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: Routes.upgrade,
         builder: (context, state) => const UpgradeScreen(),
       ),
-      // Temporary/scaffolding — see the Routes.outdoorCardioTest comment.
       GoRoute(
         path: Routes.outdoorCardioTest,
         builder: (context, state) => const OutdoorCardioScreen(),

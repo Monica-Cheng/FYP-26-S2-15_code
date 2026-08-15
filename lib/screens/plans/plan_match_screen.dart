@@ -1,4 +1,7 @@
 // lib/screens/plans/plan_match_screen.dart
+// Scores and ranks available plans against the user's onboarding
+// preferences (goal, level, days/week, equipment, sport), surfacing the
+// best matches first when a user picks a starting plan.
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -118,9 +121,8 @@ const _kGymWeightKeywords = [
 // 4-category granularity of the onboarding question against the plan's
 // own free-text equipment[] list (specific named items) and its
 // sport/type — there's no shared vocabulary between the two sides, so
-// this is a heuristic, not an exact comparison (see the earlier
-// equipment-scoring investigation this session for why a direct string
-// match isn't possible here the way level/goal/sport/days already are).
+// this is a heuristic (a direct string match isn't possible here the way
+// level/goal/sport/days already are), not an exact comparison.
 // 'bodyweight' only matches a plan with a genuinely EMPTY equipment[] (or
 // missing entirely) — deliberately not attempting to infer "bodyweight-
 // only" from a non-empty-but-non-gym-weight list (e.g. a Cardio plan's

@@ -4339,24 +4339,6 @@ class FirestoreService {
       'commentCount': 0,
       'createdAt': FieldValue.serverTimestamp(),
     };
-    // TEMPORARY DEBUG — remove once the invalid-argument regression is
-    // confirmed fixed. Logs every field's runtimeType + value (imageBase64
-    // truncated — it can be huge) plus its approximate serialized size, so
-    // NaN/Infinity, an unexpected List-of-List, a bad key, or a
-    // too-large document can all be told apart from the actual data.
-    for (final entry in postData.entries) {
-      final v = entry.value;
-      final display = (v is String && v.length > 80)
-          ? '${v.substring(0, 80)}...<${v.length} chars total>'
-          : v;
-      debugPrint('[createFeedPost] ${entry.key} '
-          '(${v.runtimeType}) = $display');
-    }
-    if (imageBase64 != null) {
-      debugPrint('[createFeedPost] imageBase64 length=${imageBase64.length} '
-          'chars (~${(imageBase64.length / 1024).toStringAsFixed(1)} KB)');
-    }
-
     // Diagnostic for the "Post to Feed failing" investigation — a single
     // consolidated line (uid/type/approx payload size) plus an explicit
     // try/catch around the write itself, so a permission-denied failure

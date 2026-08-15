@@ -385,9 +385,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         alignment: PlaceholderAlignment.baseline,
                         baseline: TextBaseline.alphabetic,
                         child: GestureDetector(
-                          onTap: () {
-                            // TODO: navigate to professional registration screen
-                          },
+                          onTap: () => context.push(Routes.coachRegister),
                           child: const Text(
                             'Tap here',
                             style: TextStyle(

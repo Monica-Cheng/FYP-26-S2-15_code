@@ -1,4 +1,7 @@
 // lib/screens/home/manual_activity_log_screen.dart
+// Lets the user manually log a non-gym/cardio activity (e.g. basketball,
+// hiking) from a catalogue of preset activity types, estimating calories
+// burned from standard MET values, duration, and body weight.
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -17,7 +20,8 @@ const _kYellow = Color(0xFFEAB308); // tennis
 const _kBrown  = Color(0xFF92400E); // rock climbing
 const _kPink   = Color(0xFFEC4899); // dance
 
-// MET values per activity key and intensity
+// MET (Metabolic Equivalent of Task) values per activity key and
+// intensity — standard reference values used to estimate calorie burn.
 const Map<String, Map<String, double>> _kMet = {
   'running':    {'easy': 6.0,  'moderate': 8.0,  'hard': 11.5},
   'walking':    {'easy': 2.8,  'moderate': 3.5,  'hard': 5.0},
@@ -126,6 +130,7 @@ class _ManualActivityLogScreenState extends State<ManualActivityLogScreen> {
 
   int get _estimatedCals {
     if (_selected == null || _durationMin <= 0) return 0;
+    // Standard MET formula: kcal = MET * weight(kg) * duration(hours).
     return (_metFor(_selected!.key, _intensity) * _userWeightKg * _durationMin / 60)
         .round();
   }

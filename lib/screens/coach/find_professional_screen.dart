@@ -1,4 +1,7 @@
 // lib/screens/coach/find_professional_screen.dart
+// Lets a regular user browse approved coaches/professionals
+// (businessPartners collection), filter by specialty, and send a coach
+// request or contact them by email.
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
